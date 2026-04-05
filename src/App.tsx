@@ -1861,26 +1861,29 @@ export default function App() {
                           <span className="font-sans text-xs text-slate-400 block mb-1 uppercase tracking-tighter">System Sans</span>
                           <span className="font-sans text-lg">Preview</span>
                         </div>
-                        {(user?.selectedFonts && user.selectedFonts.length > 0 
-                          ? user.selectedFonts.map(name => fonts.find(f => f.name === name)).filter(Boolean) as Font[]
-                          : fonts
-                        ).map((f, index) => (
-                          <div 
-                            key={`${f.name}-${index}`}
-                            className="px-3 py-2.5 hover:bg-blue-600/20 cursor-pointer border-b border-slate-800/50 transition-colors group/font"
-                            onClick={() => {
-                              updateLayer(selectedLayer.id, { fontFamily: f.name });
-                              document.getElementById('font-dropdown')?.classList.add('hidden');
-                            }}
-                          >
-                            <div className="flex items-center justify-between mb-1">
-                              <span className="font-sans text-xs text-slate-400 block uppercase tracking-tighter">{f.name.split('-').slice(1).join('-') || f.name}</span>
+                        {(() => {
+                          const userSelected = (user?.selectedFonts && user.selectedFonts.length > 0)
+                            ? user.selectedFonts.map(name => fonts.find(f => f.name === name)).filter(Boolean) as Font[]
+                            : fonts;
+                          const finalFonts = userSelected.length > 0 ? userSelected : fonts;
+                          return finalFonts.map((f, index) => (
+                            <div 
+                              key={`${f.name}-${index}`}
+                              className="px-3 py-2.5 hover:bg-blue-600/20 cursor-pointer border-b border-slate-800/50 transition-colors group/font"
+                              onClick={() => {
+                                updateLayer(selectedLayer.id, { fontFamily: f.name });
+                                document.getElementById('font-dropdown')?.classList.add('hidden');
+                              }}
+                            >
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="font-sans text-xs text-slate-400 block uppercase tracking-tighter">{f.name.split('-').slice(1).join('-') || f.name}</span>
+                              </div>
+                              <span style={{ fontFamily: f.name }} className="text-lg">
+                                Preview
+                              </span>
                             </div>
-                            <span style={{ fontFamily: f.name }} className="text-lg">
-                              Preview
-                            </span>
-                          </div>
-                        ))}
+                          ));
+                        })()}
                       </div>
                     </div>
 

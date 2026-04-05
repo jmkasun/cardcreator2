@@ -15,16 +15,17 @@ const { Pool } = pg;
 const __filename = (typeof import.meta !== 'undefined' && import.meta.url) ? fileURLToPath(import.meta.url) : '';
 const __dirname = __filename ? path.dirname(__filename) : ((globalThis as any).__dirname || process.cwd());
 
-const FONTS_DIR = fs.existsSync(path.join(process.cwd(), "public", "fonts"))
-  ? path.join(process.cwd(), "public", "fonts")
-  : fs.existsSync(path.join(process.cwd(), "api", "font"))
-    ? path.join(process.cwd(), "api", "font")
-    : path.join(process.cwd(), "font");
-const WRITABLE_FONTS_DIR = FONTS_DIR;
+const FONTS_DIR = [
+  path.join(process.cwd(), "api", "webfonts"),
+  path.join(process.cwd(), "public", "fonts"),
+  path.join(process.cwd(), "api", "font"),
+  path.join(process.cwd(), "font")
+].find(dir => fs.existsSync(dir) && fs.readdirSync(dir).length > 0) || path.join(process.cwd(), "public", "fonts");
+const WRITABLE_FONTS_DIR = path.join(process.cwd(), "public", "fonts");
 const UPLOADS_DIR = path.join(__dirname, "public", "uploads");
 
 // Ensure directories exist
-[FONTS_DIR, UPLOADS_DIR].forEach(dir => {
+[FONTS_DIR, WRITABLE_FONTS_DIR, UPLOADS_DIR].forEach(dir => {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
@@ -141,6 +142,7 @@ async function startServer() {
   });
 
   app.use("/fonts", express.static(FONTS_DIR));
+  app.use("/fonts", express.static(WRITABLE_FONTS_DIR));
   app.use("/uploads", express.static(UPLOADS_DIR));
 
   // Auth
@@ -298,9 +300,12 @@ async function startServer() {
   app.get("/api/fonts", async (req, res) => {
     try {
       const projectFiles = fs.existsSync(FONTS_DIR) ? fs.readdirSync(FONTS_DIR) : [];
+      const writableFiles = fs.existsSync(WRITABLE_FONTS_DIR) ? fs.readdirSync(WRITABLE_FONTS_DIR) : [];
+      
       const projectFonts = projectFiles.map(f => ({ name: f, url: `/fonts/${f}` }));
+      const writableFonts = writableFiles.map(f => ({ name: f, url: `/fonts/${f}` }));
 
-      const allFonts = [...projectFonts];
+      const allFonts = [...projectFonts, ...writableFonts];
       const uniqueFonts = Array.from(new Map(allFonts.map(f => [f.name, f])).values());
       res.json(uniqueFonts);
     } catch (err) {
