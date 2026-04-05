@@ -145,15 +145,18 @@ export default function App() {
       setFonts(apiFonts);
       
       // Load fonts in the background
-      apiFonts.forEach(async (font: any) => {
+      const loadPromises = apiFonts.map(async (font: any) => {
         const fontFamily = font.name;
         
         if (Array.from(document.fonts.values()).some(face => face.family === fontFamily)) {
+          console.log(`Font "${fontFamily}" already in document.fonts`);
           return;
         }
 
         try {
-          const fontFace = new FontFace(fontFamily, `url("${encodeURI(font.url)}")`);
+          const fontUrl = font.url.startsWith('/') ? font.url : `/fonts/${font.url}`;
+          console.log(`Loading font face: "${fontFamily}" from ${fontUrl}`);
+          const fontFace = new FontFace(fontFamily, `url("${encodeURI(fontUrl)}")`);
           const loadedFace = await fontFace.load();
           document.fonts.add(loadedFace);
           console.log(`Successfully loaded font: "${fontFamily}"`);
@@ -161,6 +164,10 @@ export default function App() {
           console.error(`Failed to load font: "${fontFamily}" from ${font.url}`, e);
         }
       });
+      
+      await Promise.all(loadPromises);
+      console.log("All fonts loaded/checked");
+      drawCanvas(); // Force a redraw after all fonts are loaded
     } catch (err) {
       console.error("Failed to fetch fonts", err);
     }
@@ -697,10 +704,12 @@ export default function App() {
         ctx.save();
         const fontStyle = layer.isItalic ? "italic " : "";
         const fontWeight = layer.isBold ? "bold " : "";
-        const fontStr = `${fontStyle}${fontWeight}${layer.fontSize}px "${layer.fontFamily}"`;
+        const fontFamily = layer.fontFamily || "sans-serif";
+        const fontStr = `${fontStyle}${fontWeight}${layer.fontSize}px "${fontFamily}"`;
         
         // Ensure font is loaded before drawing
         try {
+          await document.fonts.ready; // Wait for all fonts to be ready
           if (!document.fonts.check(fontStr)) {
             console.log(`Font not ready, attempting to load: ${fontStr}`);
             await document.fonts.load(fontStr);

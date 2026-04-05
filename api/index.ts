@@ -181,10 +181,20 @@ app.use("/fonts", express.static(PROJECT_FONTS_DIR));
 app.use("/fonts", express.static(WRITABLE_FONTS_DIR));
 app.use("/uploads", express.static(UPLOADS_DIR));
 
-// Explicit font serving route for Vercel
+// Explicit font serving route for Vercel/Netlify
 app.get("/fonts/:name", (req, res) => {
   const { name } = req.params;
-  res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  const ext = path.extname(name).toLowerCase();
+  
+  // Set correct MIME type
+  if (ext === ".ttf") res.type("font/ttf");
+  else if (ext === ".otf") res.type("font/otf");
+  else if (ext === ".woff") res.type("font/woff");
+  else if (ext === ".woff2") res.type("font/woff2");
+  
+  res.setHeader("Cache-Control", "public, max-age=31536000");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  
   const projectPath = path.join(PROJECT_FONTS_DIR, name);
   const writablePath = path.join(WRITABLE_FONTS_DIR, name);
   const fallbackPath = path.join(process.cwd(), "api", "font", name);
@@ -198,6 +208,8 @@ app.get("/fonts/:name", (req, res) => {
   if (fs.existsSync(fallbackPath)) {
     return res.sendFile(fallbackPath);
   }
+  
+  console.error(`Font not found: ${name}. Checked: ${projectPath}, ${writablePath}, ${fallbackPath}`);
   res.status(404).send("Font not found");
 });
 
