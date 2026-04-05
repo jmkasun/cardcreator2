@@ -70,12 +70,18 @@ async function initDb() {
           username TEXT PRIMARY KEY,
           password TEXT NOT NULL,
           role TEXT NOT NULL DEFAULT 'user',
-          selected_fonts TEXT[] DEFAULT '{}'
+          selected_fonts TEXT[] DEFAULT '{}',
+          default_font TEXT,
+          default_font_size INTEGER,
+          default_font_color TEXT
         );
       `);
       
       await client.query(`
         ALTER TABLE users ADD COLUMN IF NOT EXISTS selected_fonts TEXT[] DEFAULT '{}';
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS default_font TEXT;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS default_font_size INTEGER;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS default_font_color TEXT;
       `);
 
       await client.query(`
@@ -201,7 +207,7 @@ async function startServer() {
       
       if (HAS_POSTGRES) {
         const result = await pool.query(
-          "SELECT username, role, selected_fonts as \"selectedFonts\" FROM users WHERE username = $1 AND password = $2",
+          "SELECT username, role, selected_fonts as \"selectedFonts\", default_font as \"defaultFont\", default_font_size as \"defaultFontSize\", default_font_color as \"defaultFontColor\" FROM users WHERE username = $1 AND password = $2",
           [username, password]
         );
         
@@ -212,7 +218,10 @@ async function startServer() {
             success: true, 
             username: user.username, 
             role: user.role,
-            selectedFonts: user.selectedFonts || []
+            selectedFonts: user.selectedFonts || [],
+            defaultFont: user.defaultFont,
+            defaultFontSize: user.defaultFontSize,
+            defaultFontColor: user.defaultFontColor
           });
         }
       }
@@ -328,11 +337,38 @@ async function startServer() {
 
   app.post("/api/user/preferences", async (req, res) => {
     try {
-      const { username, selectedFonts } = req.body;
-      const result = await pool.query(
-        "UPDATE users SET selected_fonts = $1 WHERE username = $2",
-        [selectedFonts, username]
-      );
+      const { username, selectedFonts, defaultFont, defaultFontSize, defaultFontColor } = req.body;
+      
+      let query = "UPDATE users SET ";
+      const updates = [];
+      const params = [];
+      let paramIndex = 1;
+
+      if (selectedFonts !== undefined) {
+        updates.push(`selected_fonts = $${paramIndex++}`);
+        params.push(selectedFonts);
+      }
+      if (defaultFont !== undefined) {
+        updates.push(`default_font = $${paramIndex++}`);
+        params.push(defaultFont);
+      }
+      if (defaultFontSize !== undefined) {
+        updates.push(`default_font_size = $${paramIndex++}`);
+        params.push(defaultFontSize);
+      }
+      if (defaultFontColor !== undefined) {
+        updates.push(`default_font_color = $${paramIndex++}`);
+        params.push(defaultFontColor);
+      }
+
+      if (updates.length === 0) {
+        return res.json({ success: true });
+      }
+
+      query += updates.join(", ") + ` WHERE username = $${paramIndex}`;
+      params.push(username);
+
+      const result = await pool.query(query, params);
       
       if (result.rowCount === 0) {
         return res.status(404).json({ success: false, message: "User not found" });

@@ -8,6 +8,9 @@ interface User {
   username: string;
   role: 'admin' | 'user';
   selectedFonts?: string[];
+  defaultFont?: string;
+  defaultFontSize?: number;
+  defaultFontColor?: string;
 }
 
 interface Font {
@@ -571,16 +574,17 @@ export default function App() {
     }
   };
 
-  const updatePreferences = async (selectedFonts: string[]) => {
+  const updatePreferences = async (preferences: Partial<User> | string[]) => {
     if (!user) return;
+    const payload = Array.isArray(preferences) ? { selectedFonts: preferences } : preferences;
     try {
       const res = await fetch("/api/user/preferences", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: user.username, selectedFonts }),
+        body: JSON.stringify({ username: user.username, ...payload }),
       });
       if (res.ok) {
-        setUser({ ...user, selectedFonts });
+        setUser({ ...user, ...payload });
       }
     } catch (err) {
       console.error("Failed to update preferences", err);
@@ -634,9 +638,9 @@ export default function App() {
       text: "New Text Layer",
       x: 50,
       y: 50,
-      fontSize: 60,
-      color: "#000064",
-      fontFamily: fonts[0]?.name || "sans-serif",
+      fontSize: user?.defaultFontSize || 60,
+      color: user?.defaultFontColor || "#000064",
+      fontFamily: user?.defaultFont || fonts[0]?.name || "sans-serif",
       strokeColor: "#000000",
       strokeWidth: 0,
       shadowBlur: 0,
@@ -659,9 +663,9 @@ export default function App() {
       text: today,
       x: 50,
       y: 50,
-      fontSize: 60,
-      color: "#000064",
-      fontFamily: fonts[0]?.name || "sans-serif",
+      fontSize: user?.defaultFontSize || 60,
+      color: user?.defaultFontColor || "#000064",
+      fontFamily: user?.defaultFont || fonts[0]?.name || "sans-serif",
       strokeColor: "#000000",
       strokeWidth: 0,
       shadowBlur: 0,
@@ -1217,6 +1221,51 @@ export default function App() {
               </div>
 
               <div className="flex-1 overflow-y-auto custom-scrollbar pr-2 space-y-6">
+                {/* Default Preferences Section */}
+                <div className="bg-slate-800/30 border border-slate-800 p-4 rounded-xl space-y-4">
+                  <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                    <Settings size={16} className="text-blue-400" />
+                    Default Text Settings
+                  </h4>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div>
+                      <label className="text-[10px] text-slate-500 uppercase tracking-widest block mb-1.5">Default Font</label>
+                      <select 
+                        value={user?.defaultFont || ''}
+                        onChange={(e) => updatePreferences({ defaultFont: e.target.value })}
+                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:ring-1 focus:ring-blue-500"
+                      >
+                        <option value="">Select Font</option>
+                        <option value="sans-serif">System Sans</option>
+                        {fonts.map(f => (
+                          <option key={f.name} value={f.name}>{f.name.split('-').slice(1).join('-') || f.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-slate-500 uppercase tracking-widest block mb-1.5">Default Size</label>
+                      <input 
+                        type="number"
+                        value={user?.defaultFontSize || 60}
+                        onChange={(e) => updatePreferences({ defaultFontSize: parseInt(e.target.value) })}
+                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:ring-1 focus:ring-blue-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-slate-500 uppercase tracking-widest block mb-1.5">Default Color</label>
+                      <div className="flex items-center gap-2">
+                        <input 
+                          type="color"
+                          value={user?.defaultFontColor || '#000064'}
+                          onChange={(e) => updatePreferences({ defaultFontColor: e.target.value })}
+                          className="w-8 h-8 bg-transparent border-none cursor-pointer"
+                        />
+                        <span className="text-xs text-slate-400 font-mono uppercase">{user?.defaultFontColor || '#000064'}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
                 {/* Upload Section */}
                 <div className="bg-slate-800/30 border border-slate-800 p-4 rounded-xl">
                   <h4 className="text-sm font-bold text-white mb-4 flex items-center gap-2">
