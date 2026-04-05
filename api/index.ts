@@ -178,22 +178,19 @@ app.get("/api/health", async (req, res) => {
   });
 });
 
-app.use("/fonts", express.static(PROJECT_FONTS_DIR));
-app.use("/fonts", express.static(WRITABLE_FONTS_DIR));
-app.use("/uploads", express.static(UPLOADS_DIR));
-
-// Explicit font serving route for Vercel/Netlify
+// Explicit font serving route for Vercel/Netlify - MUST BE BEFORE express.static
 app.get("/fonts/:name", (req, res) => {
   const { name } = req.params;
   const ext = path.extname(name).toLowerCase();
   
   // Set correct MIME type
-  if (ext === ".otf") res.type("font/otf");
-  else if (ext === ".woff") res.type("font/woff");
-  else if (ext === ".woff2") res.type("font/woff2");
+  if (ext === ".otf") res.setHeader("Content-Type", "font/otf");
+  else if (ext === ".woff") res.setHeader("Content-Type", "font/woff");
+  else if (ext === ".woff2") res.setHeader("Content-Type", "font/woff2");
   
   res.setHeader("Cache-Control", "public, max-age=31536000");
   res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Content-Encoding", "identity");
   
   const projectPath = path.join(PROJECT_FONTS_DIR, name);
   const writablePath = path.join(WRITABLE_FONTS_DIR, name);
@@ -201,21 +198,28 @@ app.get("/fonts/:name", (req, res) => {
   
   if (fs.existsSync(projectPath)) {
     console.log(`Serving project font: ${projectPath}`);
-    return res.sendFile(projectPath);
+    const buffer = fs.readFileSync(projectPath);
+    return res.send(buffer);
   }
   if (fs.existsSync(writablePath)) {
     console.log(`Serving writable font: ${writablePath}`);
-    return res.sendFile(writablePath);
+    const buffer = fs.readFileSync(writablePath);
+    return res.send(buffer);
   }
   if (fs.existsSync(fallbackPath)) {
     console.log(`Serving fallback font: ${fallbackPath}`);
-    return res.sendFile(fallbackPath);
+    const buffer = fs.readFileSync(fallbackPath);
+    return res.send(buffer);
   }
   
   console.error(`Font not found: ${name}. Checked: ${projectPath}, ${writablePath}, ${fallbackPath}`);
   res.type("text/plain");
   res.status(404).send("Font not found");
 });
+
+app.use("/fonts", express.static(PROJECT_FONTS_DIR));
+app.use("/fonts", express.static(WRITABLE_FONTS_DIR));
+app.use("/uploads", express.static(UPLOADS_DIR));
 
 // Auth
 app.post("/api/login", async (req, res) => {

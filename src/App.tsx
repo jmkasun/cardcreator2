@@ -156,7 +156,12 @@ export default function App() {
         try {
           const fontUrl = font.url.startsWith('/') ? font.url : `/fonts/${font.url}`;
           console.log(`Loading font face: "${fontFamily}" from ${fontUrl}`);
-          const fontFace = new FontFace(fontFamily, `url("${encodeURI(fontUrl)}")`);
+          
+          const response = await fetch(fontUrl);
+          if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+          const buffer = await response.arrayBuffer();
+          
+          const fontFace = new FontFace(fontFamily, buffer);
           const loadedFace = await fontFace.load();
           document.fonts.add(loadedFace);
           console.log(`Successfully loaded font: "${fontFamily}"`);
@@ -964,6 +969,31 @@ export default function App() {
           <span className="font-bold text-lg tracking-tight">My Card Creator</span>
         </div>
         <div className="flex items-center gap-2 md:gap-4">
+          {image && (
+            <div className="flex items-center gap-2">
+              <button
+                onClick={shareWhatsApp}
+                title="Share on WhatsApp"
+                className="p-2 bg-green-600/20 hover:bg-green-600/30 text-green-400 rounded-lg transition-all border border-green-600/30"
+              >
+                <MessageCircle size={18} />
+              </button>
+              <button
+                onClick={shareImage}
+                title="Share Image"
+                className="p-2 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 rounded-lg transition-all border border-blue-600/30"
+              >
+                <Share2 size={18} />
+              </button>
+              <button
+                onClick={downloadImage}
+                title="Download Image"
+                className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition-all border border-slate-700"
+              >
+                <Download size={18} />
+              </button>
+            </div>
+          )}
           <button 
             onClick={() => setIsPreviewMode(!isPreviewMode)}
             className={cn(
@@ -2121,29 +2151,6 @@ export default function App() {
                       onMouseLeave={handleCanvasMouseUp}
                     />
                   </div>
-                </div>
-                <div className="absolute top-4 right-4 flex gap-2 z-50">
-                  <button
-                    onClick={shareWhatsApp}
-                    title="Share on WhatsApp"
-                    className="bg-green-600 hover:bg-green-500 text-white p-3 rounded-xl shadow-lg flex items-center gap-2 font-medium transition-all"
-                  >
-                    <MessageCircle size={20} />
-                  </button>
-                  <button
-                    onClick={shareImage}
-                    title="Share Image"
-                    className="bg-blue-600 hover:bg-blue-500 text-white p-3 rounded-xl shadow-lg flex items-center gap-2 font-medium transition-all"
-                  >
-                    <Share2 size={20} />
-                  </button>
-                  <button
-                    onClick={downloadImage}
-                    title="Download Image"
-                    className="bg-slate-800 hover:bg-slate-700 text-white p-3 rounded-xl shadow-lg flex items-center gap-2 font-medium transition-all"
-                  >
-                    <Download size={20} />
-                  </button>
                 </div>
               </div>
             </div>
