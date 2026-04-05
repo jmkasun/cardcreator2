@@ -200,16 +200,20 @@ app.get("/fonts/:name", (req, res) => {
   const fallbackPath = path.join(process.cwd(), "api", "font", name);
   
   if (fs.existsSync(projectPath)) {
+    console.log(`Serving project font: ${projectPath}`);
     return res.sendFile(projectPath);
   }
   if (fs.existsSync(writablePath)) {
+    console.log(`Serving writable font: ${writablePath}`);
     return res.sendFile(writablePath);
   }
   if (fs.existsSync(fallbackPath)) {
+    console.log(`Serving fallback font: ${fallbackPath}`);
     return res.sendFile(fallbackPath);
   }
   
   console.error(`Font not found: ${name}. Checked: ${projectPath}, ${writablePath}, ${fallbackPath}`);
+  res.type("text/plain");
   res.status(404).send("Font not found");
 });
 
