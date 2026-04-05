@@ -1254,7 +1254,12 @@ export default function App() {
                       <input 
                         type="number"
                         value={user?.defaultFontSize || 60}
-                        onChange={(e) => updatePreferences({ defaultFontSize: parseInt(e.target.value) })}
+                        onChange={(e) => {
+                          const val = parseInt(e.target.value);
+                          if (!isNaN(val)) {
+                            updatePreferences({ defaultFontSize: val });
+                          }
+                        }}
                         className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:ring-1 focus:ring-blue-500"
                       />
                     </div>
