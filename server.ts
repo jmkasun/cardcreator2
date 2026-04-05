@@ -93,6 +93,14 @@ async function initDb() {
         ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
       `);
       
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS custom_fonts (
+          name TEXT PRIMARY KEY,
+          data BYTEA NOT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+
       const adminCheck = await client.query("SELECT * FROM users WHERE username = 'admin'");
       if (adminCheck.rowCount === 0) {
         await client.query("INSERT INTO users (username, password, role) VALUES ('admin', 'admin@1234', 'admin')");
@@ -141,7 +149,7 @@ async function startServer() {
   });
 
   // Explicit font serving route
-  app.get("/fonts/:name", (req, res) => {
+  app.get("/fonts/:name", async (req, res) => {
     const { name } = req.params;
     const ext = path.extname(name).toLowerCase();
     
@@ -164,6 +172,18 @@ async function startServer() {
     if (fs.existsSync(writablePath)) {
       const buffer = fs.readFileSync(writablePath);
       return res.send(buffer);
+    }
+
+    // Try database if not found in files
+    if (HAS_POSTGRES) {
+      try {
+        const result = await pool.query("SELECT data FROM custom_fonts WHERE name = $1", [name]);
+        if (result.rowCount && result.rowCount > 0) {
+          return res.send(result.rows[0].data);
+        }
+      } catch (err) {
+        console.error(`Error fetching font ${name} from DB:`, err);
+      }
     }
     
     res.status(404).send("Font not found");
@@ -325,15 +345,27 @@ async function startServer() {
     }
   });
 
+  // Fonts
   app.get("/api/fonts", async (req, res) => {
     try {
       const projectFiles = fs.existsSync(FONTS_DIR) ? fs.readdirSync(FONTS_DIR) : [];
       const writableFiles = fs.existsSync(WRITABLE_FONTS_DIR) ? fs.readdirSync(WRITABLE_FONTS_DIR) : [];
       
+      let dbFiles: string[] = [];
+      if (HAS_POSTGRES) {
+        try {
+          const result = await pool.query("SELECT name FROM custom_fonts");
+          dbFiles = result.rows.map(r => r.name);
+        } catch (err) {
+          console.error("Error fetching fonts from DB:", err);
+        }
+      }
+
       const projectFonts = projectFiles.map(f => ({ name: f, url: `/fonts/${f}` }));
       const writableFonts = writableFiles.map(f => ({ name: f, url: `/fonts/${f}` }));
+      const dbFonts = dbFiles.map(f => ({ name: f, url: `/fonts/${f}` }));
 
-      const allFonts = [...projectFonts, ...writableFonts];
+      const allFonts = [...projectFonts, ...writableFonts, ...dbFonts];
       const uniqueFonts = Array.from(new Map(allFonts.map(f => [f.name, f])).values());
       res.json(uniqueFonts);
     } catch (err) {
@@ -348,8 +380,21 @@ async function startServer() {
       if (!file) return res.status(400).json({ success: false, message: "No file uploaded" });
 
       const sanitized = file.originalname.replace(/[^a-z0-9.]/gi, '_').toLowerCase();
-      const fileName = `${Date.now()}-${sanitized}`;
-      fs.writeFileSync(path.join(FONTS_DIR, fileName), file.buffer);
+      const fileName = sanitized;
+
+      if (HAS_POSTGRES) {
+        try {
+          await pool.query(
+            "INSERT INTO custom_fonts (name, data) VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET data = $2",
+            [fileName, file.buffer]
+          );
+          return res.json({ success: true, url: `/fonts/${fileName}`, name: fileName });
+        } catch (err) {
+          console.error("DB Font upload error:", err);
+        }
+      }
+
+      fs.writeFileSync(path.join(WRITABLE_FONTS_DIR, fileName), file.buffer);
       res.json({ success: true, url: `/fonts/${fileName}`, name: fileName });
     } catch (err) {
       console.error("Font upload error:", err);

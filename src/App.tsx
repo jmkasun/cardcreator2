@@ -149,13 +149,11 @@ export default function App() {
         const fontFamily = font.name;
         
         if (Array.from(document.fonts.values()).some(face => face.family === fontFamily)) {
-          console.log(`Font "${fontFamily}" already in document.fonts`);
           return;
         }
 
         try {
           const fontUrl = font.url.startsWith('/') ? font.url : `/fonts/${font.url}`;
-          console.log(`Loading font face: "${fontFamily}" from ${fontUrl}`);
           
           const response = await fetch(fontUrl);
           if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
@@ -164,14 +162,12 @@ export default function App() {
           const fontFace = new FontFace(fontFamily, buffer);
           const loadedFace = await fontFace.load();
           document.fonts.add(loadedFace);
-          console.log(`Successfully loaded font: "${fontFamily}"`);
         } catch (e) {
           console.error(`Failed to load font: "${fontFamily}" from ${font.url}`, e);
         }
       });
       
       await Promise.all(loadPromises);
-      console.log("All fonts loaded/checked");
       drawCanvas(); // Force a redraw after all fonts are loaded
     } catch (err) {
       console.error("Failed to fetch fonts", err);
@@ -1608,6 +1604,23 @@ export default function App() {
             >
               <input {...getSidebarInputProps()} />
               <span className="text-slate-400">Upload New Image(s)</span>
+            </div>
+
+            <div className="relative">
+              <input
+                type="file"
+                id="font-upload"
+                className="hidden"
+                accept=".woff,.woff2,.otf,.ttf"
+                onChange={handleFontUpload}
+              />
+              <label
+                htmlFor="font-upload"
+                className="w-full border-2 border-dashed border-slate-800 hover:border-slate-700 bg-slate-800/50 rounded-lg py-2 flex flex-col items-center justify-center transition-all cursor-pointer text-[10px] text-slate-400"
+              >
+                <Type size={14} className="mb-1" />
+                <span>Upload Custom Font</span>
+              </label>
             </div>
 
             {image && (

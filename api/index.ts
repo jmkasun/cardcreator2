@@ -112,6 +112,14 @@ async function initDb() {
         ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
       `);
       
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS custom_fonts (
+          name TEXT PRIMARY KEY,
+          data BYTEA NOT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+
       const adminCheck = await client.query("SELECT * FROM users WHERE username = 'admin'");
       if (adminCheck.rowCount === 0) {
         await client.query("INSERT INTO users (username, password, role) VALUES ('admin', 'admin@1234', 'admin')");
@@ -179,7 +187,7 @@ app.get("/api/health", async (req, res) => {
 });
 
 // Explicit font serving route for Vercel/Netlify - MUST BE BEFORE express.static
-app.get("/fonts/:name", (req, res) => {
+app.get("/fonts/:name", async (req, res) => {
   const { name } = req.params;
   const ext = path.extname(name).toLowerCase();
   
@@ -210,6 +218,19 @@ app.get("/fonts/:name", (req, res) => {
     console.log(`Serving fallback font: ${fallbackPath}`);
     const buffer = fs.readFileSync(fallbackPath);
     return res.send(buffer);
+  }
+
+  // Try database if not found in files
+  if (HAS_POSTGRES) {
+    try {
+      const result = await pool.query("SELECT data FROM custom_fonts WHERE name = $1", [name]);
+      if (result.rowCount && result.rowCount > 0) {
+        console.log(`Serving font from database: ${name}`);
+        return res.send(result.rows[0].data);
+      }
+    } catch (err) {
+      console.error(`Error fetching font ${name} from DB:`, err);
+    }
   }
   
   console.error(`Font not found: ${name}. Checked: ${projectPath}, ${writablePath}, ${fallbackPath}`);
@@ -489,8 +510,19 @@ app.get("/api/fonts", async (req, res) => {
   try {
     const projectFiles = fs.existsSync(PROJECT_FONTS_DIR) ? fs.readdirSync(PROJECT_FONTS_DIR) : [];
     const writableFiles = fs.existsSync(WRITABLE_FONTS_DIR) ? fs.readdirSync(WRITABLE_FONTS_DIR) : [];
-    const allFiles = Array.from(new Set([...projectFiles, ...writableFiles]));
-    console.log(`Found ${projectFiles.length} project fonts and ${writableFiles.length} writable fonts. Total unique: ${allFiles.length}`);
+    
+    let dbFiles: string[] = [];
+    if (HAS_POSTGRES) {
+      try {
+        const result = await pool.query("SELECT name FROM custom_fonts");
+        dbFiles = result.rows.map(r => r.name);
+      } catch (err) {
+        console.error("Error fetching fonts from DB:", err);
+      }
+    }
+
+    const allFiles = Array.from(new Set([...projectFiles, ...writableFiles, ...dbFiles]));
+    console.log(`Found ${projectFiles.length} project fonts, ${writableFiles.length} writable fonts, and ${dbFiles.length} DB fonts. Total unique: ${allFiles.length}`);
     res.json(allFiles.map(f => ({ name: f, url: `/fonts/${f}` })));
   } catch (err) {
     console.error("Fetch fonts error:", err);
@@ -506,9 +538,23 @@ app.post("/api/upload-font", upload.single("font"), async (req, res) => {
     }
 
     const sanitized = file.originalname.replace(/[^a-z0-9.]/gi, '_').toLowerCase();
-    const fileName = `${Date.now()}-${sanitized}`;
-    const filePath = path.join(WRITABLE_FONTS_DIR, fileName);
+    const fileName = sanitized; // Don't use timestamp if we want to keep name clean, or use it if we want uniqueness
 
+    if (HAS_POSTGRES) {
+      try {
+        await pool.query(
+          "INSERT INTO custom_fonts (name, data) VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET data = $2",
+          [fileName, file.buffer]
+        );
+        console.log(`Font ${fileName} saved to database.`);
+        return res.json({ success: true, url: `/fonts/${fileName}`, name: fileName });
+      } catch (err) {
+        console.error("DB Font upload error:", err);
+        // Fallback to file system if DB fails
+      }
+    }
+
+    const filePath = path.join(WRITABLE_FONTS_DIR, fileName);
     fs.writeFileSync(filePath, file.buffer);
     res.json({ success: true, url: `/fonts/${fileName}`, name: fileName });
   } catch (err) {
