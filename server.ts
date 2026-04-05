@@ -18,7 +18,6 @@ const __dirname = __filename ? path.dirname(__filename) : ((globalThis as any)._
 const FONTS_DIR = [
   path.join(process.cwd(), "api", "webfonts"),
   path.join(process.cwd(), "public", "fonts"),
-  path.join(process.cwd(), "api", "font"),
   path.join(process.cwd(), "font")
 ].find(dir => fs.existsSync(dir) && fs.readdirSync(dir).length > 0) || path.join(process.cwd(), "public", "fonts");
 const WRITABLE_FONTS_DIR = path.join(process.cwd(), "public", "fonts");

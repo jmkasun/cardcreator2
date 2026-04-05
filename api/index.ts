@@ -26,8 +26,9 @@ const PROJECT_FONTS_DIR = [
   path.join(__dirname, "webfonts"),
   path.join(process.cwd(), "webfonts"),
   "/var/task/api/webfonts",
-  "/var/task/webfonts"
-].find(dir => fs.existsSync(dir)) || path.join(process.cwd(), "api", "webfonts");
+  "/var/task/webfonts",
+  path.join(__dirname, "..", "api", "webfonts")
+].find(dir => fs.existsSync(dir) && fs.readdirSync(dir).length > 0) || path.join(process.cwd(), "api", "webfonts");
 
 const WRITABLE_FONTS_DIR = path.resolve(STORAGE_BASE, "public", "fonts");
 const UPLOADS_DIR = path.resolve(STORAGE_BASE, "public", "uploads");
