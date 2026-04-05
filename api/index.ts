@@ -22,12 +22,12 @@ const STORAGE_BASE = (IS_VERCEL || IS_NETLIFY) ? "/tmp" : process.cwd();
 const DATA_FILE = path.resolve(STORAGE_BASE, "data.json");
 
 const PROJECT_FONTS_DIR = [
-  path.join(process.cwd(), "api", "font"),
-  path.join(__dirname, "font"),
-  path.join(process.cwd(), "font"),
-  "/var/task/api/font",
-  "/var/task/font"
-].find(dir => fs.existsSync(dir)) || path.join(process.cwd(), "api", "font");
+  path.join(process.cwd(), "api", "webfonts"),
+  path.join(__dirname, "webfonts"),
+  path.join(process.cwd(), "webfonts"),
+  "/var/task/api/webfonts",
+  "/var/task/webfonts"
+].find(dir => fs.existsSync(dir)) || path.join(process.cwd(), "api", "webfonts");
 
 const WRITABLE_FONTS_DIR = path.resolve(STORAGE_BASE, "public", "fonts");
 const UPLOADS_DIR = path.resolve(STORAGE_BASE, "public", "uploads");
@@ -177,50 +177,44 @@ app.get("/api/health", async (req, res) => {
   });
 });
 
+app.use("/fonts", express.static(PROJECT_FONTS_DIR));
+app.use("/fonts", express.static(WRITABLE_FONTS_DIR));
+app.use("/uploads", express.static(UPLOADS_DIR));
+
 // Explicit font serving route for Vercel/Netlify
 app.get("/fonts/:name", (req, res) => {
   const { name } = req.params;
   const ext = path.extname(name).toLowerCase();
   
   // Set correct MIME type
-  let contentType = "application/octet-stream";
-  if (ext === ".ttf") contentType = "application/font-ttf";
-  else if (ext === ".otf") contentType = "application/font-otf";
-  else if (ext === ".woff") contentType = "application/font-woff";
-  else if (ext === ".woff2") contentType = "application/font-woff2";
+  if (ext === ".otf") res.type("font/otf");
+  else if (ext === ".woff") res.type("font/woff");
+  else if (ext === ".woff2") res.type("font/woff2");
   
-  res.setHeader("Content-Type", contentType);
   res.setHeader("Cache-Control", "public, max-age=31536000");
   res.setHeader("Access-Control-Allow-Origin", "*");
   
   const projectPath = path.join(PROJECT_FONTS_DIR, name);
   const writablePath = path.join(WRITABLE_FONTS_DIR, name);
-  const fallbackPath = path.join(process.cwd(), "api", "font", name);
+  const fallbackPath = path.join(process.cwd(), "api", "webfonts", name);
   
-  let finalPath = null;
-  if (fs.existsSync(projectPath)) finalPath = projectPath;
-  else if (fs.existsSync(writablePath)) finalPath = writablePath;
-  else if (fs.existsSync(fallbackPath)) finalPath = fallbackPath;
-
-  if (finalPath) {
-    console.log(`Serving font: ${finalPath} as ${contentType}`);
-    try {
-      const buffer = fs.readFileSync(finalPath);
-      return res.end(buffer);
-    } catch (e) {
-      console.error(`Error reading font file ${finalPath}:`, e);
-      return res.status(500).send("Error reading font file");
-    }
+  if (fs.existsSync(projectPath)) {
+    console.log(`Serving project font: ${projectPath}`);
+    return res.sendFile(projectPath);
+  }
+  if (fs.existsSync(writablePath)) {
+    console.log(`Serving writable font: ${writablePath}`);
+    return res.sendFile(writablePath);
+  }
+  if (fs.existsSync(fallbackPath)) {
+    console.log(`Serving fallback font: ${fallbackPath}`);
+    return res.sendFile(fallbackPath);
   }
   
   console.error(`Font not found: ${name}. Checked: ${projectPath}, ${writablePath}, ${fallbackPath}`);
   res.type("text/plain");
   res.status(404).send("Font not found");
 });
-
-app.use("/fonts", express.static(PROJECT_FONTS_DIR));
-app.use("/fonts", express.static(WRITABLE_FONTS_DIR));
-app.use("/uploads", express.static(UPLOADS_DIR));
 
 // Auth
 app.post("/api/login", async (req, res) => {
@@ -477,9 +471,9 @@ app.get("/api/debug-fs", (req, res) => {
     projectFonts: fs.existsSync(PROJECT_FONTS_DIR) ? fs.readdirSync(PROJECT_FONTS_DIR) : [],
     writableFontsExist: fs.existsSync(WRITABLE_FONTS_DIR),
     writableFonts: fs.existsSync(WRITABLE_FONTS_DIR) ? fs.readdirSync(WRITABLE_FONTS_DIR) : [],
-    apiFontDir: path.join(process.cwd(), "api", "font"),
-    apiFontDirExists: fs.existsSync(path.join(process.cwd(), "api", "font")),
-    apiFontDirFiles: fs.existsSync(path.join(process.cwd(), "api", "font")) ? fs.readdirSync(path.join(process.cwd(), "api", "font")) : []
+    apiFontDir: path.join(process.cwd(), "api", "webfonts"),
+    apiFontDirExists: fs.existsSync(path.join(process.cwd(), "api", "webfonts")),
+    apiFontDirFiles: fs.existsSync(path.join(process.cwd(), "api", "webfonts")) ? fs.readdirSync(path.join(process.cwd(), "api", "webfonts")) : []
   };
   res.json(debugInfo);
 });

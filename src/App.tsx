@@ -1183,7 +1183,7 @@ export default function App() {
                   </h4>
                   <div className="flex items-center gap-4">
                     <label className="flex-1 cursor-pointer bg-slate-900 border border-slate-700 border-dashed rounded-xl p-6 hover:border-blue-500 hover:bg-blue-500/5 transition-all text-center group">
-                      <input type="file" accept=".ttf,.otf,.woff,.woff2" className="hidden" onChange={handleFontUpload} />
+                      <input type="file" accept=".otf,.woff,.woff2" className="hidden" onChange={handleFontUpload} />
                       <div className="flex flex-col items-center gap-2">
                         <Plus size={24} className="text-slate-500 group-hover:text-blue-400 transition-colors" />
                         <span className="text-sm text-slate-400 group-hover:text-slate-300">Click to browse font files</span>
@@ -1830,7 +1830,7 @@ export default function App() {
                       <label className="cursor-pointer text-blue-500 hover:text-blue-400 transition-colors flex items-center gap-1">
                         <Plus size={12} />
                         <span className="text-[10px] font-bold uppercase tracking-wider">Upload</span>
-                        <input type="file" accept=".ttf,.otf,.woff,.woff2" className="hidden" onChange={handleFontUpload} />
+                        <input type="file" accept=".otf,.woff,.woff2" className="hidden" onChange={handleFontUpload} />
                       </label>
                     </div>
                     
