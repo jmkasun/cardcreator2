@@ -405,15 +405,43 @@ async function startServer() {
   app.delete("/api/fonts/:name", async (req, res) => {
     try {
       const { name } = req.params;
+      let deleted = false;
       
-      const files = fs.readdirSync(FONTS_DIR);
-      const fileToDelete = files.find(f => {
-        const fontFamily = f.split('.').slice(0, -1).join('.');
-        return fontFamily === name || f === name;
-      });
+      // 1. Delete from database if exists
+      if (process.env.DATABASE_URL) {
+        try {
+          const result = await pool.query("DELETE FROM custom_fonts WHERE name = $1 OR name LIKE $2", [name, `${name}.%`]);
+          if (result.rowCount && result.rowCount > 0) {
+            deleted = true;
+          }
+        } catch (dbErr) {
+          console.error("Error deleting font from DB:", dbErr);
+        }
+      }
 
-      if (fileToDelete) {
-        fs.unlinkSync(path.join(FONTS_DIR, fileToDelete));
+      // 2. Delete from file system
+      const dirsToSearch = Array.from(new Set([FONTS_DIR, WRITABLE_FONTS_DIR]));
+      
+      for (const dir of dirsToSearch) {
+        if (!fs.existsSync(dir)) continue;
+        
+        const files = fs.readdirSync(dir);
+        const fileToDelete = files.find(f => {
+          const fontFamily = f.split('.').slice(0, -1).join('.');
+          return fontFamily === name || f === name;
+        });
+
+        if (fileToDelete) {
+          try {
+            fs.unlinkSync(path.join(dir, fileToDelete));
+            deleted = true;
+          } catch (fsErr) {
+            console.error(`Error unlinking font file ${fileToDelete} in ${dir}:`, fsErr);
+          }
+        }
+      }
+
+      if (deleted) {
         res.json({ success: true });
       } else {
         res.status(404).json({ success: false, message: "Font not found" });
@@ -427,18 +455,47 @@ async function startServer() {
   app.post("/api/fonts/rename", async (req, res) => {
     try {
       const { oldName, newName } = req.body;
+      let renamed = false;
 
-      const files = fs.readdirSync(FONTS_DIR);
-      const fileToRename = files.find(f => {
-        const fontFamily = f.split('.').slice(0, -1).join('.');
-        return fontFamily === oldName || f === oldName;
-      });
+      // 1. Rename in database if exists
+      if (process.env.DATABASE_URL) {
+        try {
+          const result = await pool.query("UPDATE custom_fonts SET name = $1 WHERE name = $2", [newName, oldName]);
+          if (result.rowCount && result.rowCount > 0) {
+            renamed = true;
+          }
+        } catch (dbErr) {
+          console.error("Error renaming font in DB:", dbErr);
+        }
+      }
 
-      if (fileToRename) {
-        const ext = path.extname(fileToRename);
-        const timestamp = fileToRename.split('-')[0];
-        const newFileName = `${timestamp}-${newName}${ext}`;
-        fs.renameSync(path.join(FONTS_DIR, fileToRename), path.join(FONTS_DIR, newFileName));
+      // 2. Rename in file system
+      const dirsToSearch = Array.from(new Set([FONTS_DIR, WRITABLE_FONTS_DIR]));
+      
+      for (const dir of dirsToSearch) {
+        if (!fs.existsSync(dir)) continue;
+        
+        const files = fs.readdirSync(dir);
+        const fileToRename = files.find(f => {
+          const fontFamily = f.split('.').slice(0, -1).join('.');
+          return fontFamily === oldName || f === oldName;
+        });
+
+        if (fileToRename) {
+          const ext = path.extname(fileToRename);
+          const parts = fileToRename.split('-');
+          const timestamp = parts.length > 1 ? parts[0] : Date.now().toString();
+          const newFileName = `${timestamp}-${newName}${ext}`;
+          try {
+            fs.renameSync(path.join(dir, fileToRename), path.join(dir, newFileName));
+            renamed = true;
+          } catch (fsErr) {
+            console.error(`Error renaming font file ${fileToRename} in ${dir}:`, fsErr);
+          }
+        }
+      }
+
+      if (renamed) {
         res.json({ success: true });
       } else {
         res.status(404).json({ success: false, message: "Font not found" });

@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { useDropzone } from "react-dropzone";
-import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X } from "lucide-react";
+import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check } from "lucide-react";
 import { cn } from "@/src/lib/utils";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -75,6 +75,9 @@ export default function App() {
   const [allUsers, setAllUsers] = useState<User[]>([]);
   const [editingUser, setEditingUser] = useState<User | null>(null);
   const [editingFont, setEditingFont] = useState<Font | null>(null);
+  const [fontToDelete, setFontToDelete] = useState<Font | null>(null);
+  const [userToDelete, setUserToDelete] = useState<string | null>(null);
+  const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [newFontName, setNewFontName] = useState("");
   const [userManagementPassword, setUserManagementPassword] = useState("");
   const [showSidebar, setShowSidebar] = useState(false);
@@ -83,6 +86,13 @@ export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const isDraggingRef = useRef(false);
   const dragStartPos = useRef({ x: 0, y: 0 });
+
+  useEffect(() => {
+    if (notification) {
+      const timer = setTimeout(() => setNotification(null), 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [notification]);
 
   useEffect(() => {
     const checkHealth = async () => {
@@ -221,7 +231,7 @@ export default function App() {
   const handleChangePassword = async (e: React.FormEvent) => {
     e.preventDefault();
     if (newPassword !== confirmPassword) {
-      alert("Passwords do not match");
+      setNotification({ message: "Passwords do not match", type: 'error' });
       return;
     }
     try {
@@ -236,16 +246,17 @@ export default function App() {
       });
       const data = await res.json();
       if (data.success) {
-        alert("Password changed successfully");
+        setNotification({ message: "Password changed successfully", type: 'success' });
         setShowChangePasswordModal(false);
         setOldPassword("");
         setNewPassword("");
         setConfirmPassword("");
       } else {
-        alert(data.message);
+        setNotification({ message: data.message || "Failed to change password", type: 'error' });
       }
     } catch (err) {
       console.error("Failed to change password", err);
+      setNotification({ message: "Failed to change password", type: 'error' });
     }
   };
 
@@ -295,22 +306,21 @@ export default function App() {
       });
       const data = await res.json();
       if (data.success) {
-        alert("User updated successfully");
+        setNotification({ message: "User updated successfully", type: 'success' });
         setEditingUser(null);
         setUserManagementPassword("");
         fetchAllUsers();
       } else {
-        alert(data.message || "Failed to update user");
+        setNotification({ message: data.message || "Failed to update user", type: 'error' });
       }
     } catch (err) {
       console.error("Failed to update user", err);
-      alert("Failed to update user");
+      setNotification({ message: "Failed to update user", type: 'error' });
     }
   };
 
   const handleDeleteUser = async (usernameToDelete: string) => {
     if (!user || user.role !== 'admin') return;
-    if (!confirm(`Are you sure you want to delete user ${usernameToDelete}?`)) return;
     try {
       const res = await fetch(`/api/v1/update`, {
         method: "POST",
@@ -326,12 +336,13 @@ export default function App() {
       const data = await res.json();
       if (data.success) {
         fetchAllUsers();
+        setNotification({ message: "User deleted successfully", type: 'success' });
       } else {
-        alert(data.message || "Failed to delete user");
+        setNotification({ message: data.message || "Failed to delete user", type: 'error' });
       }
     } catch (err) {
       console.error("Failed to delete user", err);
-      alert("Failed to delete user");
+      setNotification({ message: "Failed to delete user", type: 'error' });
     }
   };
 
@@ -416,7 +427,7 @@ export default function App() {
     
     if (!user) {
       console.error("onDrop: User is not logged in, cannot upload");
-      alert("Please sign in to upload images.");
+      setNotification({ message: "Please sign in to upload images.", type: 'error' });
       return;
     }
 
@@ -473,7 +484,7 @@ export default function App() {
       }
     } catch (err) {
       console.error("Critical upload error:", err);
-      alert(err instanceof Error ? err.message : "An error occurred during processing.");
+      setNotification({ message: err instanceof Error ? err.message : "An error occurred during processing.", type: 'error' });
     } finally {
       setLoading(false);
     }
@@ -484,7 +495,7 @@ export default function App() {
     onDrop,
     onDropRejected: (fileRejections) => {
       console.error("Sidebar files rejected:", fileRejections);
-      alert("Some files were rejected. Please upload only images.");
+      setNotification({ message: "Some files were rejected. Please upload only images.", type: 'error' });
     },
     accept: { "image/*": [] },
     multiple: true,
@@ -494,7 +505,7 @@ export default function App() {
     onDrop,
     onDropRejected: (fileRejections) => {
       console.error("Main area files rejected:", fileRejections);
-      alert("Some files were rejected. Please upload only images.");
+      setNotification({ message: "Some files were rejected. Please upload only images.", type: 'error' });
     },
     accept: { "image/*": [] },
     multiple: true,
@@ -527,7 +538,7 @@ export default function App() {
 
   const deleteFont = async (fontName: string) => {
     try {
-      const res = await fetch(`/api/fonts/${fontName}`, { method: "DELETE" });
+      const res = await fetch(`/api/fonts/${encodeURIComponent(fontName)}`, { method: "DELETE" });
       if (res.ok) {
         await fetchFonts();
       }
@@ -616,13 +627,13 @@ export default function App() {
         setNewAccountUsername("");
         setNewAccountPassword("");
         await fetchAllUsers();
-        alert("Account created successfully!");
+        setNotification({ message: "Account created successfully!", type: 'success' });
       } else {
-        alert(data.message || "Failed to create account");
+        setNotification({ message: data.message || "Failed to create account", type: 'error' });
       }
     } catch (err) {
       console.error("Failed to create account", err);
-      alert("Failed to create account");
+      setNotification({ message: "Failed to create account", type: 'error' });
     } finally {
       setIsCreatingAccount(false);
     }
@@ -882,7 +893,7 @@ export default function App() {
           text: 'Check out this image I created!',
         });
       } else {
-        alert("Sharing is not supported on this browser. You can download the image instead.");
+        setNotification({ message: "Sharing is not supported on this browser. You can download the image instead.", type: 'error' });
       }
     } catch (err) {
       console.error("Error sharing image:", err);
@@ -956,6 +967,23 @@ export default function App() {
 
   return (
     <div className="h-screen bg-slate-950 text-slate-200 flex flex-col overflow-hidden">
+      {/* Notification Toast */}
+      <AnimatePresence>
+        {notification && (
+          <motion.div
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }}
+            className={cn(
+              "fixed top-6 left-1/2 -translate-x-1/2 z-[200] px-6 py-3 rounded-2xl shadow-2xl flex items-center gap-3 border backdrop-blur-md",
+              notification.type === 'success' ? "bg-green-600/20 border-green-500/50 text-green-400" : "bg-red-600/20 border-red-500/50 text-red-400"
+            )}
+          >
+            {notification.type === 'success' ? <Check size={18} /> : <X size={18} />}
+            <span className="text-sm font-bold">{notification.message}</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
       {/* Header */}
       <header className="h-16 border-b border-slate-800 flex items-center justify-between px-6 bg-slate-900/50 backdrop-blur-md sticky top-0 z-[100]">
         <div className="flex items-center gap-3">
@@ -1237,7 +1265,7 @@ export default function App() {
                         
                         return (
                           <div key={`${f.name}-${index}`} className="bg-slate-800/30 border border-slate-800 p-3 rounded-xl flex items-center justify-between group">
-                            <div className="flex items-center gap-3">
+                            <div className="flex items-center gap-3 flex-1">
                               <button 
                                 onClick={() => {
                                   const currentSelected = user?.selectedFonts || [];
@@ -1245,6 +1273,10 @@ export default function App() {
                                     updatePreferences(currentSelected.filter(name => name !== f.name));
                                   } else {
                                     updatePreferences([...currentSelected, f.name]);
+                                    // Apply style changes to the selected element(s)
+                                    if (selectedLayer) {
+                                      updateLayer(selectedLayer.id, { fontFamily: f.name });
+                                    }
                                   }
                                 }}
                                 className={cn(
@@ -1252,20 +1284,24 @@ export default function App() {
                                   isSelected ? "bg-blue-600 border-blue-500 text-white" : "bg-slate-900 border-slate-700 text-transparent"
                                 )}
                               >
-                                <Plus size={14} className={cn(isSelected ? "" : "opacity-0")} />
+                                {isSelected ? <Check size={14} /> : <Plus size={14} className="opacity-0" />}
                               </button>
-                              <div className="w-10 h-10 bg-slate-800 rounded-lg flex items-center justify-center">
-                                <span className="text-slate-400 font-bold text-lg" style={{ fontFamily: f.name }}>Aa</span>
-                              </div>
-                              <div>
-                                <p className="text-sm font-bold text-white">{f.name.split('-').slice(1).join('-') || f.name}</p>
-                                <p className="text-[10px] text-slate-500 uppercase tracking-widest">
-                                  {isSelected ? `Selected (Position: ${selectedIndex + 1})` : 'Not Selected'}
-                                </p>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center justify-between mb-1">
+                                  <p className="text-sm font-bold text-white truncate">{f.name.split('-').slice(1).join('-') || f.name}</p>
+                                  <p className="text-[10px] text-slate-500 uppercase tracking-widest">
+                                    {isSelected ? `Selected (Position: ${selectedIndex + 1})` : 'Not Selected'}
+                                  </p>
+                                </div>
+                                <div className="bg-slate-900/50 rounded-lg p-3 border border-slate-800/50">
+                                  <p className="text-xl sm:text-2xl text-white truncate" style={{ fontFamily: f.name }}>
+                                    The quick සිංහල අක්ෂර
+                                  </p>
+                                </div>
                               </div>
                             </div>
                             
-                            <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-2 ml-4">
                               {isSelected && (
                                 <div className="flex gap-1 mr-2">
                                   <button 
@@ -1311,9 +1347,7 @@ export default function App() {
                                   </button>
                                   <button 
                                     onClick={() => {
-                                      if (confirm(`Are you sure you want to delete the font "${f.name}"?`)) {
-                                        deleteFont(f.name);
-                                      }
+                                      setFontToDelete(f);
                                     }}
                                     className="p-2 hover:bg-red-600/20 text-slate-400 hover:text-red-400 rounded-lg transition-all"
                                     title="Delete Font"
@@ -1382,6 +1416,42 @@ export default function App() {
                             Save Changes
                           </button>
                         </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </AnimatePresence>
+
+              {/* Delete Font Modal Overlay */}
+              <AnimatePresence>
+                {fontToDelete && (
+                  <div className="absolute inset-0 z-[110] flex items-center justify-center p-6 bg-slate-950/90 backdrop-blur-md rounded-2xl">
+                    <div className="w-full max-w-sm space-y-6 text-center">
+                      <div className="w-16 h-16 bg-red-600/20 rounded-full flex items-center justify-center mx-auto">
+                        <Trash2 size={32} className="text-red-500" />
+                      </div>
+                      <div>
+                        <h4 className="text-lg font-bold text-white mb-2">Delete Font?</h4>
+                        <p className="text-sm text-slate-400">
+                          Are you sure you want to delete the font <span className="text-white font-bold">"{fontToDelete.name}"</span>? This action cannot be undone.
+                        </p>
+                      </div>
+                      <div className="flex gap-3">
+                        <button
+                          onClick={() => setFontToDelete(null)}
+                          className="flex-1 bg-slate-800 hover:bg-slate-700 text-white font-bold py-2.5 rounded-xl transition-all"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          onClick={async () => {
+                            await deleteFont(fontToDelete.name);
+                            setFontToDelete(null);
+                          }}
+                          className="flex-1 bg-red-600 hover:bg-red-500 text-white font-bold py-2.5 rounded-xl transition-all"
+                        >
+                          Delete
+                        </button>
                       </div>
                     </div>
                   </div>
@@ -1480,7 +1550,7 @@ export default function App() {
                           </button>
                           {u.username !== 'admin' && (
                             <button 
-                              onClick={() => handleDeleteUser(u.username)}
+                              onClick={() => setUserToDelete(u.username)}
                               className="p-2 hover:bg-red-600/20 text-slate-400 hover:text-red-400 rounded-lg transition-all"
                               title="Delete User"
                             >
@@ -1548,6 +1618,42 @@ export default function App() {
                   </div>
                 )}
               </AnimatePresence>
+
+              {/* Delete User Modal Overlay */}
+              <AnimatePresence>
+                {userToDelete && (
+                  <div className="absolute inset-0 z-[110] flex items-center justify-center p-6 bg-slate-950/90 backdrop-blur-md rounded-2xl">
+                    <div className="w-full max-w-sm space-y-6 text-center">
+                      <div className="w-16 h-16 bg-red-600/20 rounded-full flex items-center justify-center mx-auto">
+                        <UserMinus size={32} className="text-red-500" />
+                      </div>
+                      <div>
+                        <h4 className="text-lg font-bold text-white mb-2">Delete User?</h4>
+                        <p className="text-sm text-slate-400">
+                          Are you sure you want to delete user <span className="text-white font-bold">"{userToDelete}"</span>? This action cannot be undone.
+                        </p>
+                      </div>
+                      <div className="flex gap-3">
+                        <button
+                          onClick={() => setUserToDelete(null)}
+                          className="flex-1 bg-slate-800 hover:bg-slate-700 text-white font-bold py-2.5 rounded-xl transition-all"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          onClick={async () => {
+                            await handleDeleteUser(userToDelete);
+                            setUserToDelete(null);
+                          }}
+                          className="flex-1 bg-red-600 hover:bg-red-500 text-white font-bold py-2.5 rounded-xl transition-all"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </AnimatePresence>
             </motion.div>
           </div>
         )}
@@ -1604,23 +1710,6 @@ export default function App() {
             >
               <input {...getSidebarInputProps()} />
               <span className="text-slate-400">Upload New Image(s)</span>
-            </div>
-
-            <div className="relative">
-              <input
-                type="file"
-                id="font-upload"
-                className="hidden"
-                accept=".woff,.woff2,.otf,.ttf"
-                onChange={handleFontUpload}
-              />
-              <label
-                htmlFor="font-upload"
-                className="w-full border-2 border-dashed border-slate-800 hover:border-slate-700 bg-slate-800/50 rounded-lg py-2 flex flex-col items-center justify-center transition-all cursor-pointer text-[10px] text-slate-400"
-              >
-                <Type size={14} className="mb-1" />
-                <span>Upload Custom Font</span>
-              </label>
             </div>
 
             {image && (
@@ -1870,11 +1959,6 @@ export default function App() {
                   <div>
                     <div className="flex items-center justify-between mb-1.5">
                       <label className="text-xs text-slate-500 block">Font Family</label>
-                      <label className="cursor-pointer text-blue-500 hover:text-blue-400 transition-colors flex items-center gap-1">
-                        <Plus size={12} />
-                        <span className="text-[10px] font-bold uppercase tracking-wider">Upload</span>
-                        <input type="file" accept=".otf,.woff,.woff2" className="hidden" onChange={handleFontUpload} />
-                      </label>
                     </div>
                     
                     <div className="relative">
@@ -1902,7 +1986,7 @@ export default function App() {
                           }}
                         >
                           <span className="font-sans text-xs text-slate-400 block mb-1 uppercase tracking-tighter">System Sans</span>
-                          <span className="font-sans text-lg">Preview</span>
+                          <span className="font-sans text-lg">Preview සිංහල</span>
                         </div>
                         {(() => {
                           const userSelected = (user?.selectedFonts && user.selectedFonts.length > 0)
@@ -1922,7 +2006,7 @@ export default function App() {
                                 <span className="font-sans text-xs text-slate-400 block uppercase tracking-tighter">{f.name.split('-').slice(1).join('-') || f.name}</span>
                               </div>
                               <span style={{ fontFamily: f.name }} className="text-lg">
-                                Preview
+                                Preview සිංහල
                               </span>
                             </div>
                           ));

@@ -737,6 +737,11 @@ app.post("/api/upload-image", (req, res, next) => {
   });
 });
 
+// API route guard to prevent HTML fallback for missing API endpoints
+app.use("/api", (req, res, next) => {
+  res.status(404).json({ success: false, message: `API endpoint not found: ${req.method} ${req.url}` });
+});
+
 // Error handler
 app.use((err: any, req: any, res: any, next: any) => {
   console.error("Unhandled error:", err);
