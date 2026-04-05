@@ -220,7 +220,14 @@ export default function App() {
       });
       const data = await res.json();
       if (data.success) {
-        setUser({ username: data.username, role: data.role, selectedFonts: data.selectedFonts });
+        setUser({ 
+          username: data.username, 
+          role: data.role, 
+          selectedFonts: data.selectedFonts,
+          defaultFont: data.defaultFont,
+          defaultFontSize: data.defaultFontSize,
+          defaultFontColor: data.defaultFontColor
+        });
       } else {
         setError(data.message);
       }

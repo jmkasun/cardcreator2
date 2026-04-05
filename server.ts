@@ -44,7 +44,10 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL?.split('?')[0],
   ssl: {
     rejectUnauthorized: false
-  }
+  },
+  max: 5, // Limit max connections to avoid hitting server limits
+  idleTimeoutMillis: 30000, // Close idle clients after 30 seconds
+  connectionTimeoutMillis: 2000, // Return an error if a connection cannot be established within 2 seconds
 });
 
 pool.on('error', (err) => {
@@ -79,8 +82,14 @@ async function initDb() {
       
       await client.query(`
         ALTER TABLE users ADD COLUMN IF NOT EXISTS selected_fonts TEXT[] DEFAULT '{}';
+      `);
+      await client.query(`
         ALTER TABLE users ADD COLUMN IF NOT EXISTS default_font TEXT;
+      `);
+      await client.query(`
         ALTER TABLE users ADD COLUMN IF NOT EXISTS default_font_size INTEGER;
+      `);
+      await client.query(`
         ALTER TABLE users ADD COLUMN IF NOT EXISTS default_font_color TEXT;
       `);
 
