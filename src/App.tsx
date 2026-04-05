@@ -515,6 +515,12 @@ export default function App() {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    const extension = file.name.split('.').pop()?.toLowerCase();
+    if (extension !== 'woff' && extension !== 'woff2') {
+      setNotification({ message: "Only .woff and .woff2 font formats are supported.", type: 'error' });
+      return;
+    }
+
     setIsFontLoading(true);
     const formData = new FormData();
     formData.append("font", file);
@@ -544,24 +550,6 @@ export default function App() {
       }
     } catch (err) {
       console.error("Failed to delete font", err);
-    }
-  };
-
-  const renameFont = async (oldName: string) => {
-    const cleanName = oldName.split('-').slice(1).join('-') || oldName;
-    const newName = prompt("Enter new name for the font:", cleanName);
-    if (!newName || newName === cleanName) return;
-    try {
-      const res = await fetch("/api/fonts/rename", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ oldName, newName }),
-      });
-      if (res.ok) {
-        await fetchFonts();
-      }
-    } catch (err) {
-      console.error("Failed to rename font", err);
     }
   };
 
@@ -1237,11 +1225,11 @@ export default function App() {
                   </h4>
                   <div className="flex items-center gap-4">
                     <label className="flex-1 cursor-pointer bg-slate-900 border border-slate-700 border-dashed rounded-xl p-6 hover:border-blue-500 hover:bg-blue-500/5 transition-all text-center group">
-                      <input type="file" accept=".otf,.woff,.woff2" className="hidden" onChange={handleFontUpload} />
+                      <input type="file" accept=".woff,.woff2" className="hidden" onChange={handleFontUpload} />
                       <div className="flex flex-col items-center gap-2">
                         <Plus size={24} className="text-slate-500 group-hover:text-blue-400 transition-colors" />
                         <span className="text-sm text-slate-400 group-hover:text-slate-300">Click to browse font files</span>
-                        <span className="text-[10px] text-slate-600 uppercase tracking-widest">TTF, OTF, WOFF, WOFF2</span>
+                        <span className="text-[10px] text-slate-600 uppercase tracking-widest">WOFF, WOFF2 ONLY</span>
                       </div>
                     </label>
                     {isFontLoading && (
@@ -1295,7 +1283,7 @@ export default function App() {
                                 </div>
                                 <div className="bg-slate-900/50 rounded-lg p-3 border border-slate-800/50">
                                   <p className="text-xl sm:text-2xl text-white truncate" style={{ fontFamily: f.name }}>
-                                    The quick සිංහල අක්ෂර
+                                    The quick brown fox
                                   </p>
                                 </div>
                               </div>
@@ -1406,9 +1394,14 @@ export default function App() {
                                 if (res.ok) {
                                   await fetchFonts();
                                   setEditingFont(null);
+                                  setNotification({ message: "Font renamed successfully", type: 'success' });
+                                } else {
+                                  const data = await res.json();
+                                  setNotification({ message: data.message || "Failed to rename font", type: 'error' });
                                 }
                               } catch (err) {
                                 console.error("Failed to rename font", err);
+                                setNotification({ message: "Failed to rename font", type: 'error' });
                               }
                             }}
                             className="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-bold py-2.5 rounded-xl transition-all"
@@ -1986,7 +1979,7 @@ export default function App() {
                           }}
                         >
                           <span className="font-sans text-xs text-slate-400 block mb-1 uppercase tracking-tighter">System Sans</span>
-                          <span className="font-sans text-lg">Preview සිංහල</span>
+                          <span className="font-sans text-lg">The quick brown fox</span>
                         </div>
                         {(() => {
                           const userSelected = (user?.selectedFonts && user.selectedFonts.length > 0)
@@ -2006,7 +1999,7 @@ export default function App() {
                                 <span className="font-sans text-xs text-slate-400 block uppercase tracking-tighter">{f.name.split('-').slice(1).join('-') || f.name}</span>
                               </div>
                               <span style={{ fontFamily: f.name }} className="text-lg">
-                                Preview සිංහල
+                                The quick brown fox
                               </span>
                             </div>
                           ));

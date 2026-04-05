@@ -427,7 +427,10 @@ async function startServer() {
         
         const files = fs.readdirSync(dir);
         const fileToDelete = files.find(f => {
-          const fontFamily = f.split('.').slice(0, -1).join('.');
+          // Handle timestamp-filename.ext format
+          const parts = f.split('-');
+          const nameWithExt = parts.length > 1 && /^\d+$/.test(parts[0]) ? parts.slice(1).join('-') : f;
+          const fontFamily = nameWithExt.split('.').slice(0, -1).join('.');
           return fontFamily === name || f === name;
         });
 
@@ -453,15 +456,21 @@ async function startServer() {
   });
 
   app.post("/api/fonts/rename", async (req, res) => {
+    console.log(`Rename font request: ${JSON.stringify(req.body)}`);
     try {
       const { oldName, newName } = req.body;
+      if (!oldName || !newName) {
+        return res.status(400).json({ success: false, message: "Missing oldName or newName" });
+      }
       let renamed = false;
 
       // 1. Rename in database if exists
       if (process.env.DATABASE_URL) {
         try {
+          // Try both with and without extension if not provided
           const result = await pool.query("UPDATE custom_fonts SET name = $1 WHERE name = $2", [newName, oldName]);
           if (result.rowCount && result.rowCount > 0) {
+            console.log(`Renamed font in DB from ${oldName} to ${newName}`);
             renamed = true;
           }
         } catch (dbErr) {
@@ -477,17 +486,28 @@ async function startServer() {
         
         const files = fs.readdirSync(dir);
         const fileToRename = files.find(f => {
-          const fontFamily = f.split('.').slice(0, -1).join('.');
-          return fontFamily === oldName || f === oldName;
+          // Handle timestamp-filename.ext format
+          const parts = f.split('-');
+          const nameWithExt = parts.length > 1 && /^\d+$/.test(parts[0]) ? parts.slice(1).join('-') : f;
+          const fontFamily = nameWithExt.split('.').slice(0, -1).join('.');
+          return fontFamily === oldName || f === oldName || nameWithExt === oldName;
         });
 
         if (fileToRename) {
           const ext = path.extname(fileToRename);
           const parts = fileToRename.split('-');
-          const timestamp = parts.length > 1 ? parts[0] : Date.now().toString();
-          const newFileName = `${timestamp}-${newName}${ext}`;
+          const timestamp = parts.length > 1 && /^\d+$/.test(parts[0]) ? parts[0] : Date.now().toString();
+          
+          // Ensure new name has the same extension if not provided
+          let finalNewName = newName;
+          if (!finalNewName.toLowerCase().endsWith(ext.toLowerCase())) {
+            finalNewName += ext;
+          }
+          
+          const newFileName = `${timestamp}-${finalNewName}`;
           try {
             fs.renameSync(path.join(dir, fileToRename), path.join(dir, newFileName));
+            console.log(`Renamed font file from ${fileToRename} to ${newFileName} in ${dir}`);
             renamed = true;
           } catch (fsErr) {
             console.error(`Error renaming font file ${fileToRename} in ${dir}:`, fsErr);
@@ -498,6 +518,7 @@ async function startServer() {
       if (renamed) {
         res.json({ success: true });
       } else {
+        console.warn(`Font not found for renaming: ${oldName}`);
         res.status(404).json({ success: false, message: "Font not found" });
       }
     } catch (err) {
