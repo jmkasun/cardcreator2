@@ -7,7 +7,7 @@ import pg from "pg";
 import { fileURLToPath } from "url";
 
 const __filename = (typeof import.meta !== 'undefined' && import.meta.url) ? fileURLToPath(import.meta.url) : '';
-const __dirname = __filename ? path.dirname(__filename) : (typeof __dirname !== 'undefined' ? __dirname : process.cwd());
+const __dirname = __filename ? path.dirname(__filename) : ((globalThis as any).__dirname || process.cwd());
 
 const { Pool } = pg;
 const app = express();
@@ -17,7 +17,7 @@ process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 
 // Use /tmp for writable storage on Vercel/Netlify (fallback if DB not used)
 const IS_VERCEL = process.env.VERCEL === "1";
-const IS_NETLIFY = !!process.env.NETLIFY;
+const IS_NETLIFY = !!process.env.NETLIFY || !!process.env.NETLIFY_DEV || !!process.env.LAMBDA_TASK_ROOT;
 const STORAGE_BASE = (IS_VERCEL || IS_NETLIFY) ? "/tmp" : process.cwd();
 const DATA_FILE = path.resolve(STORAGE_BASE, "data.json");
 
@@ -128,22 +128,19 @@ async function initDb() {
 }
 
 // Initialize data file if not exists (fallback)
-if (!fs.existsSync(DATA_FILE)) {
+if (!HAS_POSTGRES && !fs.existsSync(DATA_FILE)) {
   const INITIAL_DATA_FILE = path.join(process.cwd(), "data.json");
-  if (fs.existsSync(INITIAL_DATA_FILE)) {
-    try {
+  try {
+    if (fs.existsSync(INITIAL_DATA_FILE)) {
       fs.copyFileSync(INITIAL_DATA_FILE, DATA_FILE);
-    } catch (e) {
+    } else {
       fs.writeFileSync(DATA_FILE, JSON.stringify({
         users: [{ username: "admin", password: "admin@1234", role: "admin" }],
         images: []
       }, null, 2));
     }
-  } else {
-    fs.writeFileSync(DATA_FILE, JSON.stringify({
-      users: [{ username: "admin", password: "admin@1234", role: "admin" }],
-      images: []
-    }, null, 2));
+  } catch (e) {
+    console.error(`Failed to initialize data file at ${DATA_FILE}:`, e);
   }
 }
 

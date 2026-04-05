@@ -13,7 +13,7 @@ process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 const { Pool } = pg;
 
 const __filename = (typeof import.meta !== 'undefined' && import.meta.url) ? fileURLToPath(import.meta.url) : '';
-const __dirname = __filename ? path.dirname(__filename) : (typeof __dirname !== 'undefined' ? __dirname : process.cwd());
+const __dirname = __filename ? path.dirname(__filename) : ((globalThis as any).__dirname || process.cwd());
 
 const FONTS_DIR = fs.existsSync(path.join(process.cwd(), "public", "fonts"))
   ? path.join(process.cwd(), "public", "fonts")
