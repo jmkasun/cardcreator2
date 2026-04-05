@@ -532,14 +532,13 @@ async function startServer() {
     try {
       const { username } = req.query;
       
+      if (!username) {
+        return res.json([]);
+      }
+
       if (HAS_POSTGRES) {
-        let query = "SELECT id, username, image_url as \"imageUrl\", layers, name, created_at as \"createdAt\" FROM font_app_images";
-        const params = [];
-        if (username) {
-          query += " WHERE username = $1";
-          params.push(username);
-        }
-        const result = await pool.query(query, params);
+        const query = "SELECT id, username, image_url as \"imageUrl\", layers, name, created_at as \"createdAt\" FROM font_app_images WHERE username = $1";
+        const result = await pool.query(query, [username]);
         return res.json(result.rows);
       }
       res.json([]);
