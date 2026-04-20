@@ -1239,7 +1239,13 @@ export default function App() {
                       <label className="text-[10px] text-slate-500 uppercase tracking-widest block mb-1.5">Default Font</label>
                       <select 
                         value={user?.defaultFont || ''}
-                        onChange={(e) => updatePreferences({ defaultFont: e.target.value })}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          updatePreferences({ defaultFont: val });
+                          if (selectedLayerId) {
+                            updateLayer(selectedLayerId, { fontFamily: val });
+                          }
+                        }}
                         className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:ring-1 focus:ring-blue-500"
                       >
                         <option value="">Select Font</option>
@@ -1258,6 +1264,9 @@ export default function App() {
                           const val = parseInt(e.target.value);
                           if (!isNaN(val)) {
                             updatePreferences({ defaultFontSize: val });
+                            if (selectedLayerId) {
+                              updateLayer(selectedLayerId, { fontSize: val });
+                            }
                           }
                         }}
                         className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:ring-1 focus:ring-blue-500"
@@ -1269,7 +1278,13 @@ export default function App() {
                         <input 
                           type="color"
                           value={user?.defaultFontColor || '#000064'}
-                          onChange={(e) => updatePreferences({ defaultFontColor: e.target.value })}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            updatePreferences({ defaultFontColor: val });
+                            if (selectedLayerId) {
+                              updateLayer(selectedLayerId, { color: val });
+                            }
+                          }}
                           className="w-8 h-8 bg-transparent border-none cursor-pointer"
                         />
                         <span className="text-xs text-slate-400 font-mono uppercase">{user?.defaultFontColor || '#000064'}</span>
@@ -1896,14 +1911,9 @@ export default function App() {
                           <div className="flex flex-col gap-1 overflow-hidden flex-1">
                             <div className="flex items-center gap-2">
                               <Type size={12} className="shrink-0 opacity-50" />
-                              <input
-                                type="text"
-                                value={layer.name}
-                                onChange={(e) => updateLayer(layer.id, { name: e.target.value })}
-                                onClick={(e) => e.stopPropagation()}
-                                placeholder="Layer Name"
-                                className="bg-transparent border-none outline-none text-[10px] font-bold uppercase tracking-wider w-full p-0 text-inherit placeholder:text-slate-600"
-                              />
+                              <span className="text-[10px] font-bold uppercase tracking-wider truncate text-inherit">
+                                {layer.name}
+                              </span>
                             </div>
                             <input
                               type="text"
