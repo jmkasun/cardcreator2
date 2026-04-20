@@ -85,7 +85,15 @@ export default function App() {
   const [userManagementPassword, setUserManagementPassword] = useState("");
   const [showSidebar, setShowSidebar] = useState(false);
   const [isPreviewMode, setIsPreviewMode] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    const saved = localStorage.getItem("sidebar_width");
+    // Ensure initial width doesn't exceed 50% of screen
+    const defaultWidth = Math.min(600, window.innerWidth * 0.4);
+    return saved ? parseInt(saved) : defaultWidth;
+  });
+  const [isResizing, setIsResizing] = useState(false);
 
+  const sidebarRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const isDraggingRef = useRef(false);
   const dragStartPos = useRef({ x: 0, y: 0 });
@@ -111,9 +119,29 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    localStorage.setItem("sidebar_width", sidebarWidth.toString());
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    const savedUser = localStorage.getItem("app_user");
+    if (savedUser) {
+      try {
+        const parsed = JSON.parse(savedUser);
+        setUser(parsed);
+      } catch (e) {
+        console.error("Failed to parse saved user", e);
+        localStorage.removeItem("app_user");
+      }
+    }
+  }, []);
+
+  useEffect(() => {
     if (user) {
+      localStorage.setItem("app_user", JSON.stringify(user));
       fetchFonts();
       fetchProjects();
+    } else {
+      localStorage.removeItem("app_user");
     }
   }, [user]);
 
@@ -136,6 +164,32 @@ export default function App() {
       };
     }
   }, [image]);
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isResizing) return;
+      
+      const newWidth = e.clientX;
+      const maxWidth = window.innerWidth * 0.5;
+      if (newWidth > 200 && newWidth < maxWidth) {
+        setSidebarWidth(newWidth);
+      }
+    };
+
+    const handleMouseUp = () => {
+      setIsResizing(false);
+    };
+
+    if (isResizing) {
+      window.addEventListener('mousemove', handleMouseMove);
+      window.addEventListener('mouseup', handleMouseUp);
+    }
+
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isResizing]);
 
   const fetchFonts = async () => {
     try {
@@ -176,7 +230,9 @@ export default function App() {
           const loadedFace = await fontFace.load();
           document.fonts.add(loadedFace);
         } catch (e) {
-          console.error(`Failed to load font: "${fontFamily}" from ${font.url}`, e);
+          if (fontFamily !== "apex_apura_044") {
+            console.error(`Failed to load font: "${fontFamily}" from ${font.url}`, e);
+          }
         }
       });
       
@@ -726,7 +782,9 @@ export default function App() {
             await document.fonts.load(fontStr);
           }
         } catch (e) {
-          console.warn(`Failed to verify/load font for canvas: ${fontStr}`, e);
+          if (!fontFamily.includes("apex_apura_044")) {
+            console.warn(`Failed to verify/load font for canvas: ${fontStr}`, e);
+          }
         }
 
         ctx.font = fontStr;
@@ -1757,11 +1815,21 @@ export default function App() {
 
       <div className="flex-1 flex flex-col md:flex-row overflow-hidden relative">
         {/* Sidebar Left - Layers & Controls */}
-        <aside className={cn(
-          "fixed inset-y-0 left-0 z-[60] w-80 bg-slate-900 border-r border-slate-800 flex flex-col transition-transform duration-300 md:relative md:translate-x-0",
-          showSidebar ? "translate-x-0" : "-translate-x-full",
-          isPreviewMode && "md:-translate-x-full md:absolute"
-        )}>
+        <aside 
+          ref={sidebarRef}
+          style={{ width: window.innerWidth >= 768 ? sidebarWidth : undefined }}
+          className={cn(
+            "fixed inset-y-0 left-0 z-[60] bg-slate-900 border-r border-slate-800 flex flex-col transition-transform duration-300 md:relative md:translate-x-0 group/sidebar",
+            !sidebarWidth && "w-80",
+            showSidebar ? "translate-x-0" : "-translate-x-full",
+            isPreviewMode && "md:-translate-x-full md:absolute"
+          )}
+        >
+          {/* Resize Handle */}
+          <div 
+            onMouseDown={() => setIsResizing(true)}
+            className="hidden md:block absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-blue-500/50 transition-colors z-[70]"
+          />
           {/* Mobile Close Button */}
           <button 
             onClick={() => setShowSidebar(false)}
@@ -1815,9 +1883,9 @@ export default function App() {
                 <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">My Projects</h3>
               </div>
               <div className="p-4 pt-0">
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-4 gap-1.5">
                   {projects.length === 0 ? (
-                    <p className="text-[10px] text-slate-600 italic col-span-2 text-center py-4">No projects yet</p>
+                    <p className="text-[10px] text-slate-600 italic col-span-4 text-center py-4">No projects yet</p>
                   ) : (
                     projects.map((proj) => (
                       <div
@@ -1902,95 +1970,69 @@ export default function App() {
                             if (window.innerWidth < 768) setShowSidebar(false);
                           }}
                           className={cn(
-                            "group flex items-center justify-between p-3 rounded-xl cursor-pointer transition-all border",
+                            "group flex flex-col p-3 rounded-xl cursor-pointer transition-all border gap-2",
                             selectedLayerId === layer.id
                               ? "bg-blue-600/10 border-blue-600/50 text-blue-400 ring-1 ring-blue-600/20"
                               : "bg-slate-800/50 border-transparent hover:bg-slate-800 text-slate-400"
                           )}
                         >
-                          <div className="flex flex-col gap-1 overflow-hidden flex-1">
-                            <div className="flex items-center gap-2">
-                              <Type size={12} className="shrink-0 opacity-50" />
-                              <span className="text-[10px] font-bold uppercase tracking-wider truncate text-inherit">
-                                {layer.name}
-                              </span>
-                            </div>
-                            <input
-                              type="text"
-                              value={layer.text}
-                              onChange={(e) => updateLayer(layer.id, { text: e.target.value })}
-                              onClick={(e) => e.stopPropagation()}
-                              placeholder="Content"
-                              className="bg-transparent border-none outline-none text-sm w-full p-0 text-inherit opacity-80 placeholder:text-slate-600"
-                            />
-                          </div>
-                          <div className="flex items-center gap-1">
-                            <div className="flex items-center gap-0.5 mr-2">
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  updateLayer(layer.id, { isBold: !layer.isBold });
-                                }}
-                                className={cn(
-                                  "p-1 rounded transition-all",
-                                  layer.isBold ? "bg-blue-600 text-white" : "text-slate-500 hover:text-slate-300"
-                                )}
-                              >
-                                <Bold size={12} />
-                              </button>
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  updateLayer(layer.id, { isItalic: !layer.isItalic });
-                                }}
-                                className={cn(
-                                  "p-1 rounded transition-all",
-                                  layer.isItalic ? "bg-blue-600 text-white" : "text-slate-500 hover:text-slate-300"
-                                )}
-                              >
-                                <Italic size={12} />
-                              </button>
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  updateLayer(layer.id, { isUnderline: !layer.isUnderline });
-                                }}
-                                className={cn(
-                                  "p-1 rounded transition-all",
-                                  layer.isUnderline ? "bg-blue-600 text-white" : "text-slate-500 hover:text-slate-300"
-                                )}
-                              >
-                                <Underline size={12} />
-                              </button>
-                            </div>
-                            {layer.type === 'date' && (
-                              <div className="relative group/date">
-                                <button
-                                  className="p-1 hover:text-blue-400 transition-all opacity-0 group-hover:opacity-100"
-                                >
-                                  <Calendar size={14} />
-                                </button>
-                                <input
-                                  type="date"
-                                  className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
-                                  onClick={(e) => e.stopPropagation()}
-                                  onChange={(e) => {
-                                    if (e.target.value) {
-                                      updateLayer(layer.id, { text: e.target.value });
-                                    }
-                                  }}
-                                />
+                          <div className="space-y-2">
+                            {/* Actions & Header */}
+                            <div className="flex items-center justify-between gap-2 overflow-hidden border-b border-slate-700/30 pb-2 mb-1">
+                              <div className="flex items-center gap-2 overflow-hidden flex-1">
+                                <Type size={12} className="shrink-0 opacity-50" />
+                                <span className="text-[10px] font-bold uppercase tracking-wider truncate text-inherit">
+                                  {layer.name}
+                                </span>
                               </div>
-                            )}
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                deleteLayer(layer.id);
-                              }}
-                              className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-400 transition-all"
-                            >
-                              <Trash2 size={14} />
-                            </button>
+                              
+                              <div className="flex items-center gap-1 shrink-0">
+                                {layer.type === 'date' && (
+                                  <div className="relative group/date">
+                                    <button
+                                      tabIndex={-1}
+                                      className="p-1 hover:text-blue-400 transition-all"
+                                    >
+                                      <Calendar size={14} />
+                                    </button>
+                                    <input
+                                      type="date"
+                                      tabIndex={-1}
+                                      className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+                                      onClick={(e) => e.stopPropagation()}
+                                      onFocus={() => setSelectedLayerId(layer.id)}
+                                      onChange={(e) => {
+                                        if (e.target.value) {
+                                          updateLayer(layer.id, { text: e.target.value });
+                                        }
+                                      }}
+                                    />
+                                  </div>
+                                )}
+                                <button
+                                  tabIndex={-1}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    deleteLayer(layer.id);
+                                  }}
+                                  className="p-1 hover:text-red-400 transition-all"
+                                >
+                                  <Trash2 size={14} />
+                                </button>
+                              </div>
+                            </div>
+
+                            <div className="w-full">
+                              <input
+                                type="text"
+                                value={layer.text}
+                                onChange={(e) => updateLayer(layer.id, { text: e.target.value })}
+                                onFocus={() => setSelectedLayerId(layer.id)}
+                                onClick={(e) => e.stopPropagation()}
+                                placeholder="Content"
+                                className="bg-slate-900 border border-slate-700/50 rounded-lg px-2 py-1.5 text-sm w-full outline-none text-inherit focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20"
+                              />
+                            </div>
                           </div>
                         </motion.div>
                       ))}

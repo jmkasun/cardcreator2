@@ -165,43 +165,68 @@ async function startServer() {
 
   // Explicit font serving route
   app.get("/fonts/:name", async (req, res) => {
-    const { name } = req.params;
-    const ext = path.extname(name).toLowerCase();
-    
-    // Set correct MIME type
-    if (ext === ".otf") res.setHeader("Content-Type", "font/otf");
-    else if (ext === ".woff") res.setHeader("Content-Type", "font/woff");
-    else if (ext === ".woff2") res.setHeader("Content-Type", "font/woff2");
-    
-    res.setHeader("Cache-Control", "public, max-age=31536000");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Content-Encoding", "identity");
-    
-    const projectPath = path.join(FONTS_DIR, name);
-    const writablePath = path.join(WRITABLE_FONTS_DIR, name);
-    
-    if (fs.existsSync(projectPath)) {
-      const buffer = fs.readFileSync(projectPath);
-      return res.send(buffer);
-    }
-    if (fs.existsSync(writablePath)) {
-      const buffer = fs.readFileSync(writablePath);
-      return res.send(buffer);
-    }
-
-    // Try database if not found in files
-    if (HAS_POSTGRES) {
-      try {
-        const result = await pool.query("SELECT data FROM custom_fonts WHERE name = $1", [name]);
-        if (result.rowCount && result.rowCount > 0) {
-          return res.send(result.rows[0].data);
-        }
-      } catch (err) {
-        console.error(`Error fetching font ${name} from DB:`, err);
+    try {
+      const name = decodeURIComponent(req.params.name);
+      console.log(`[Font Service] Request for font: ${name}`);
+      const ext = path.extname(name).toLowerCase();
+      
+      // Set correct MIME type
+      if (ext === ".otf") res.setHeader("Content-Type", "font/otf");
+      else if (ext === ".woff") res.setHeader("Content-Type", "font/woff");
+      else if (ext === ".woff2") res.setHeader("Content-Type", "font/woff2");
+      else res.setHeader("Content-Type", "application/octet-stream");
+      
+      res.setHeader("Cache-Control", "public, max-age=31536000");
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Content-Encoding", "identity");
+      
+      const projectPath = path.join(FONTS_DIR, name);
+      const writablePath = path.join(WRITABLE_FONTS_DIR, name);
+      
+      if (fs.existsSync(projectPath)) {
+        console.log(`[Font Service] Serving from project path: ${projectPath}`);
+        const buffer = fs.readFileSync(projectPath);
+        return res.send(buffer);
       }
+      if (fs.existsSync(writablePath)) {
+        console.log(`[Font Service] Serving from writable path: ${writablePath}`);
+        const buffer = fs.readFileSync(writablePath);
+        return res.send(buffer);
+      }
+
+      // Try database if not found in files
+      if (HAS_POSTGRES) {
+        console.log(`[Font Service] Searching DB for font: ${name}`);
+        try {
+          const result = await pool.query("SELECT data FROM custom_fonts WHERE name = $1", [name]);
+          if (result.rowCount && result.rowCount > 0) {
+            console.log(`[Font Service] Serving from database: ${name} (${result.rows[0].data.length} bytes)`);
+            return res.send(result.rows[0].data);
+          } else {
+            console.warn(`[Font Service] Font not found in DB with exact name: ${name}`);
+            // Try broader search: case-insensitive and replacing underscores with spaces or vice versa
+            const fuzzyResult = await pool.query(
+              "SELECT data, name FROM custom_fonts WHERE name ILIKE $1 OR REPLACE(name, ' ', '_') ILIKE $1 OR name ILIKE REPLACE($1, '_', ' ') OR name ILIKE REPLACE($1, '_', '%')", 
+              [name]
+            );
+            if (fuzzyResult.rowCount && fuzzyResult.rowCount > 0) {
+              console.log(`[Font Service] Serving from database (fuzzy match): ${fuzzyResult.rows[0].name}`);
+              return res.send(fuzzyResult.rows[0].data);
+            }
+          }
+        } catch (err) {
+          console.error(`[Font Service] Error fetching font ${name} from DB:`, err);
+        }
+      }
+      
+      if (name !== "apex_apura_044.woff" && name !== "apex_apura_044") {
+        console.error(`[Font Service] Font not found: ${name}. Checked: ${projectPath}, ${writablePath}, DB`);
+      }
+      res.status(404).send("Font not found");
+    } catch (err) {
+      console.error(`[Font Service] Error serving font:`, err);
+      res.status(500).send("Internal server error");
     }
-    
-    res.status(404).send("Font not found");
   });
 
   app.use("/fonts", express.static(FONTS_DIR));
