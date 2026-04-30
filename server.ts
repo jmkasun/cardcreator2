@@ -104,6 +104,8 @@ async function initDb() {
         );
       `);
 
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_font_app_images_username ON font_app_images(username);`);
+
       await client.query(`
         ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
       `);
@@ -219,7 +221,7 @@ async function startServer() {
         }
       }
       
-      if (name !== "apex_apura_044.woff" && name !== "apex_apura_044") {
+      if (name !== "apex_apura_044.woff" && name !== "apex_apura_044" && !name.toLowerCase().includes("somi_dusantha")) {
         console.error(`[Font Service] Font not found: ${name}. Checked: ${projectPath}, ${writablePath}, DB`);
       }
       res.status(404).send("Font not found");
@@ -662,12 +664,24 @@ async function startServer() {
         console.error("Multer error:", err);
         return res.status(500).json({ success: false, message: err.message });
       }
-      if (!(req as any).file) {
+      const file = (req as any).file;
+      if (!file) {
         console.error("No file in request");
         return res.status(400).json({ success: false, message: "No file uploaded" });
       }
-      console.log("File uploaded successfully:", (req as any).file.filename);
-      res.json({ success: true, url: `/uploads/${(req as any).file?.filename}` });
+
+      const timestamp = Date.now();
+      const sanitized = file.originalname.replace(/[^a-z0-9.]/gi, '_').toLowerCase();
+      const fileName = `${timestamp}-${sanitized}`;
+      
+      try {
+        fs.writeFileSync(path.join(UPLOADS_DIR, fileName), file.buffer);
+        console.log("File uploaded successfully:", fileName);
+        res.json({ success: true, url: `/uploads/${fileName}` });
+      } catch (fsErr) {
+        console.error("Error saving uploaded image:", fsErr);
+        res.status(500).json({ success: false, message: "Failed to save image" });
+      }
     });
   });
 
