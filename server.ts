@@ -33,21 +33,14 @@ const UPLOADS_DIR = path.join(process.cwd(), "public", "uploads");
 // Database setup
 const HAS_POSTGRES = !!process.env.DATABASE_URL;
 
-if (HAS_POSTGRES) {
-  const sanitizedUrl = process.env.DATABASE_URL!.replace(/:[^:@/]+@/, ':****@');
-  console.log(`Postgres Database URL found: ${sanitizedUrl}`);
-} else {
-  console.log("No remote database configured, falling back to data.json");
-}
-
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL?.split('?')[0],
-  ssl: {
+  ssl: process.env.DATABASE_URL?.includes('localhost') ? false : {
     rejectUnauthorized: false
   },
-  max: 5, // Limit max connections to avoid hitting server limits
-  idleTimeoutMillis: 30000, // Close idle clients after 30 seconds
-  connectionTimeoutMillis: 2000, // Return an error if a connection cannot be established within 2 seconds
+  max: 10,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000,
 });
 
 pool.on('error', (err) => {
@@ -114,6 +107,18 @@ async function initDb() {
         ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS is_locked BOOLEAN DEFAULT FALSE;
       `);
       
+      // Ensure all existing nulls are converted to false
+      await client.query(`UPDATE font_app_images SET is_locked = FALSE WHERE is_locked IS NULL;`);
+      
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS app_assets (
+          id TEXT PRIMARY KEY,
+          data BYTEA NOT NULL,
+          content_type TEXT NOT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      
       await client.query(`
         CREATE TABLE IF NOT EXISTS custom_fonts (
           name TEXT PRIMARY KEY,
@@ -136,7 +141,12 @@ async function initDb() {
 }
 
 const storage = multer.memoryStorage();
-const upload = multer({ storage });
+const upload = multer({ 
+  storage,
+  limits: {
+    fileSize: 50 * 1024 * 1024 // 50MB
+  }
+});
 
 async function startServer() {
   console.log("Starting server...");
@@ -167,35 +177,114 @@ async function startServer() {
   });
 
   // Image Upload - BEFORE body parsers to avoid stream consumption issues
-  app.post("/api/upload-image", (req, res, next) => {
+  app.post("/api/upload-image", (req, res) => {
     console.log("[Upload Service] Upload request received");
-    upload.single("image")(req, res, (err) => {
-      if (err) {
-        console.error("[Upload Service] Multer error:", err);
-        return res.status(500).json({ success: false, message: err.message });
-      }
-      const file = (req as any).file;
-      if (!file) {
-        console.error("[Upload Service] No file in request");
-        return res.status(400).json({ success: false, message: "No file uploaded" });
-      }
-
-      const timestamp = Date.now();
-      const sanitized = file.originalname.replace(/[^a-z0-9.]/gi, '_').toLowerCase();
-      const fileName = `${timestamp}-${sanitized}`;
-      
+    
+    upload.single("image")(req, res, async (err) => {
       try {
-        if (!fs.existsSync(UPLOADS_DIR)) {
-          fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+        if (err) {
+          console.error("[Upload Service] Multer error:", err);
+          return res.status(500).json({ success: false, message: "Upload middleware error: " + err.message });
         }
-        fs.writeFileSync(path.join(UPLOADS_DIR, fileName), file.buffer);
-        console.log("[Upload Service] File uploaded successfully:", fileName);
-        res.json({ success: true, url: `/uploads/${fileName}` });
-      } catch (fsErr) {
-        console.error("[Upload Service] Error saving uploaded image:", fsErr);
-        res.status(500).json({ success: false, message: "Failed to save image: " + (fsErr instanceof Error ? fsErr.message : String(fsErr)) });
+        
+        const file = (req as any).file;
+        if (!file) {
+          console.error("[Upload Service] No file in request");
+          return res.status(400).json({ success: false, message: "No file uploaded" });
+        }
+
+        console.log(`[Upload Service] Processing file: ${file.originalname} (${file.size} bytes)`);
+
+        const timestamp = Date.now();
+        const sanitized = file.originalname.replace(/[^a-z0-9.]/gi, '_').toLowerCase();
+        const assetId = `${timestamp}-${sanitized}`;
+        
+        if (HAS_POSTGRES) {
+          try {
+            console.log(`[Upload Service] Saving ${assetId} to DB...`);
+            await pool.query(
+              "INSERT INTO app_assets (id, data, content_type) VALUES ($1, $2, $3)",
+              [assetId, file.buffer, file.mimetype]
+            );
+            console.log("[Upload Service] File saved to DB successfully:", assetId);
+            return res.json({ success: true, url: `/uploads/${assetId}` });
+          } catch (dbErr) {
+            console.error("[Upload Service] Error saving to DB:", dbErr);
+            // Fall through to filesystem if DB fails
+          }
+        }
+
+        try {
+          if (!fs.existsSync(UPLOADS_DIR)) {
+            fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+          }
+          fs.writeFileSync(path.join(UPLOADS_DIR, assetId), file.buffer);
+          console.log("[Upload Service] File saved to FS successfully:", assetId);
+          res.json({ success: true, url: `/uploads/${assetId}` });
+        } catch (fsErr) {
+          console.error("[Upload Service] Error saving to FS:", fsErr);
+          res.status(500).json({ success: false, message: "Failed to save to local storage: " + (fsErr instanceof Error ? fsErr.message : String(fsErr)) });
+        }
+      } catch (fatalErr) {
+        console.error("[Upload Service] FATAL error in upload handler:", fatalErr);
+        if (!res.headersSent) {
+          res.status(500).json({ success: false, message: "Internal server error during upload" });
+        }
       }
     });
+  });
+
+  // Asset resolution helper
+  async function resolveAsset(id: string) {
+    if (HAS_POSTGRES) {
+      try {
+        const result = await pool.query("SELECT data, content_type FROM app_assets WHERE id = $1", [id]);
+        if (result.rowCount && result.rowCount > 0) {
+          return { data: result.rows[0].data, contentType: result.rows[0].content_type };
+        }
+      } catch (err) {
+        console.error(`[Asset Resolver] DB error resolving ${id}:`, err);
+      }
+    }
+    
+    const filePath = path.join(UPLOADS_DIR, id);
+    if (fs.existsSync(filePath)) {
+      return { data: fs.readFileSync(filePath), contentType: "image/jpeg" }; // Default to jpeg if not in DB
+    }
+    
+    return null;
+  }
+
+  // Asset Serving Route (Legacy/Alternative)
+  app.get("/api/assets/:id", async (req, res) => {
+    try {
+      const asset = await resolveAsset(req.params.id);
+      if (asset) {
+        res.setHeader("Content-Type", asset.contentType);
+        res.setHeader("Cache-Control", "public, max-age=31536000");
+        return res.send(asset.data);
+      }
+      res.status(404).send("Asset not found");
+    } catch (err) {
+      console.error("[Asset Service] Error serving asset:", err);
+      res.status(500).send("Internal server error");
+    }
+  });
+
+  // Main Upload Serving Route
+  app.get("/uploads/:id", async (req, res) => {
+    try {
+      const asset = await resolveAsset(req.params.id);
+      if (asset) {
+        res.setHeader("Content-Type", asset.contentType);
+        res.setHeader("Cache-Control", "public, max-age=31536000");
+        return res.send(asset.data);
+      }
+      res.status(404).send("Upload not found");
+    } catch (err) {
+      console.error("[Upload Redirect] Error serving upload:", err);
+      res.status(500).send("Internal server error");
+    }
   });
 
   // Font Upload - BEFORE body parsers
@@ -301,8 +390,7 @@ async function startServer() {
 
   app.use("/fonts", express.static(FONTS_DIR));
   app.use("/fonts", express.static(WRITABLE_FONTS_DIR));
-  app.use("/uploads", express.static(UPLOADS_DIR));
-
+  
   // Auth
   app.post("/api/login", async (req, res) => {
     try {
@@ -653,6 +741,9 @@ async function startServer() {
         const query = "SELECT id, username, image_url as \"imageUrl\", layers, name, created_at as \"createdAt\", COALESCE(is_locked, false) as \"isLocked\" FROM font_app_images WHERE username = $1";
         const result = await pool.query(query, [username]);
         console.log(`[Images Service] Fetched ${result.rowCount} projects for ${username}.`);
+        if (result.rowCount > 0) {
+          console.log(`[Images Service] Sample project: ID=${result.rows[0].id}, isLocked=${result.rows[0].isLocked} (type: ${typeof result.rows[0].isLocked})`);
+        }
         return res.json(result.rows);
       }
       res.json([]);
@@ -665,10 +756,10 @@ async function startServer() {
   app.post("/api/images", async (req, res) => {
     try {
       const { id, username, imageUrl, layers, name, isLocked } = req.body;
-      console.log(`[Images Service] Saving project ${id} for ${username}. isLocked: ${isLocked}`);
+      console.log(`[Images Service] Saving project: ID=${id}, User=${username}, isLocked=${isLocked} (type: ${typeof isLocked})`);
       
       if (HAS_POSTGRES) {
-        await pool.query(
+        const result = await pool.query(
           `INSERT INTO font_app_images (id, username, image_url, layers, name, is_locked)
            VALUES ($1, $2, $3, $4, $5, $6)
            ON CONFLICT (id) DO UPDATE SET
@@ -676,9 +767,11 @@ async function startServer() {
            image_url = EXCLUDED.image_url,
            layers = EXCLUDED.layers,
            name = EXCLUDED.name,
-           is_locked = EXCLUDED.is_locked`,
-          [id, username, imageUrl, JSON.stringify(layers), name, isLocked || false]
+           is_locked = EXCLUDED.is_locked
+           RETURNING is_locked`,
+          [id, username, imageUrl, JSON.stringify(layers), name, isLocked === true]
         );
+        console.log(`[Images Service] Save confirmed in DB. New isLocked value: ${result.rows[0].is_locked}`);
       }
       
       res.json({ success: true });

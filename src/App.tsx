@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { useDropzone } from "react-dropzone";
-import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check } from "lucide-react";
+import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check, FileJson } from "lucide-react";
 import { cn } from "@/src/lib/utils";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -258,7 +258,15 @@ export default function App() {
     try {
       const res = await fetch(`/api/images?username=${user.username}`);
       const data = await res.json();
-      setProjects(data);
+      
+      // Ensure isLocked is strictly boolean for all projects
+      const normalizedData = data.map((p: any) => ({
+        ...p,
+        isLocked: !!p.isLocked
+      }));
+      
+      console.log(`[Fetch Projects] Fetched ${normalizedData.length} projects. First project isLocked: ${normalizedData[0]?.isLocked}`);
+      setProjects(normalizedData);
       
       // Auto-select the last edited project
       if (data.length > 0 && !currentProjectId) {
@@ -816,6 +824,71 @@ export default function App() {
   const deleteLayer = (id: string) => {
     setLayers(layers.filter((l) => l.id !== id));
     if (selectedLayerId === id) setSelectedLayerId(null);
+  };
+
+  const exportProject = (project: ImageProject) => {
+    const exportData = {
+      ...project,
+      exportedAt: new Date().toISOString()
+    };
+    const json = JSON.stringify(exportData, null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    
+    const downloadAnchorNode = document.createElement('a');
+    downloadAnchorNode.setAttribute("href", url);
+    downloadAnchorNode.setAttribute("download", `${project.name || 'project'}_export.json`);
+    document.body.appendChild(downloadAnchorNode);
+    downloadAnchorNode.click();
+    downloadAnchorNode.remove();
+    URL.revokeObjectURL(url);
+    setNotification({ message: "Project exported successfully!", type: 'success' });
+  };
+
+  const handleImportProject = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      const projectData = JSON.parse(text);
+      
+      if (!projectData.imageUrl || !Array.isArray(projectData.layers)) {
+        throw new Error("Invalid project file structure.");
+      }
+
+      const newProjectId = Math.random().toString(36).substr(2, 9);
+      const newProject: ImageProject = {
+        ...projectData,
+        id: newProjectId,
+        username: user?.username || projectData.username,
+        createdAt: new Date().toISOString(),
+        name: `${projectData.name || 'Imported'} (Imported)`,
+        isLocked: false
+      };
+
+      const res = await fetch("/api/images", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(newProject),
+      });
+
+      if (res.ok) {
+        setProjects(prev => [newProject, ...prev]);
+        loadProject(newProject);
+        setNotification({ message: "Project imported successfully!", type: 'success' });
+      } else {
+        const errText = await res.text();
+        throw new Error(errText || "Failed to save imported project to server");
+      }
+    } catch (err) {
+      console.error("Import failed:", err);
+      setNotification({ 
+        message: err instanceof Error ? err.message : "Failed to import project.", 
+        type: 'error' 
+      });
+    }
+    e.target.value = '';
   };
 
   const drawCanvas = () => {
@@ -1983,13 +2056,23 @@ export default function App() {
             </div>
 
             {image && (
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-4 gap-2">
                 <button
                   onClick={downloadImage}
                   className="flex flex-col items-center justify-center gap-1 p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl transition-all border border-slate-700"
                 >
                   <Download size={16} />
                   <span className="text-[10px] font-medium">Save</span>
+                </button>
+                <button
+                  onClick={() => {
+                    const currentProject = projects.find(p => p.id === currentProjectId);
+                    if (currentProject) exportProject(currentProject);
+                  }}
+                  className="flex flex-col items-center justify-center gap-1 p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl transition-all border border-slate-700"
+                >
+                  <FileJson size={16} />
+                  <span className="text-[10px] font-medium">Export</span>
                 </button>
                 <button
                   onClick={shareImage}
@@ -2012,8 +2095,14 @@ export default function App() {
           <div className="flex-1 overflow-y-auto custom-scrollbar">
             {/* Projects Section */}
             <div className="border-b border-slate-800">
-              <div className="p-4 pb-2">
+              <div className="p-4 pb-2 flex items-center justify-between">
                 <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">My Projects</h3>
+                <div className="flex gap-2">
+                  <label className="cursor-pointer p-1 text-slate-400 hover:text-white transition-colors" title="Import Project">
+                    <Upload size={14} />
+                    <input type="file" accept=".json" onChange={handleImportProject} className="hidden" />
+                  </label>
+                </div>
               </div>
               <div className="p-4 pt-0">
                 <div className="grid grid-cols-4 gap-1.5">
@@ -2061,6 +2150,16 @@ export default function App() {
                             title={proj.isLocked ? "Unlock Project" : "Lock Project"}
                           >
                             <Shield size={12} />
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              exportProject(proj);
+                            }}
+                            className="p-1 bg-blue-600/80 hover:bg-blue-600 rounded text-white backdrop-blur-sm shadow-lg transition-colors"
+                            title="Export Project"
+                          >
+                            <FileJson size={12} />
                           </button>
                           <button
                             onClick={(e) => {
