@@ -427,7 +427,7 @@ export default function App() {
     const existingProject = projects.find(p => p.id === projectId);
     
     const projectName = existingProject ? existingProject.name : (currentProjectId ? `Project ${new Date().toLocaleDateString()}` : `New Project`);
-    const isLocked = existingProject ? existingProject.isLocked : false;
+    const isLocked = existingProject?.isLocked || false;
 
     const project: ImageProject = {
       id: projectId,
@@ -502,8 +502,8 @@ export default function App() {
     }
   };
 
-  const toggleProjectLock = async (projectId?: string) => {
-    const targetId = projectId || currentProjectId;
+  const toggleProjectLock = async (idOrEvent?: string | React.MouseEvent) => {
+    const targetId = typeof idOrEvent === 'string' ? idOrEvent : currentProjectId;
     if (!targetId) return;
     const project = projects.find(p => p.id === targetId);
     if (!project) return;
@@ -948,7 +948,7 @@ export default function App() {
           const x = (layer.x / 100) * canvas.width;
           const y = (layer.y / 100) * canvas.height;
 
-          const displayText = layer.text || "";
+          const displayText = layer.text || layer.name || "";
 
           if (layer.shadowBlur > 0) {
             ctx.shadowBlur = layer.shadowBlur * (canvas.width / 1000);
