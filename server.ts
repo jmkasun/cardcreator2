@@ -21,10 +21,9 @@ const FONTS_DIR = [
   path.join(process.cwd(), "font")
 ].find(dir => fs.existsSync(dir) && fs.readdirSync(dir).length > 0) || path.join(process.cwd(), "public", "fonts");
 const WRITABLE_FONTS_DIR = path.join(process.cwd(), "public", "fonts");
-const UPLOADS_DIR = path.join(__dirname, "public", "uploads");
 
 // Ensure directories exist
-[FONTS_DIR, WRITABLE_FONTS_DIR, UPLOADS_DIR].forEach(dir => {
+[FONTS_DIR, WRITABLE_FONTS_DIR].forEach(dir => {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
@@ -100,10 +99,15 @@ async function initDb() {
           image_url TEXT NOT NULL,
           layers JSONB NOT NULL,
           name TEXT NOT NULL,
+          is_locked BOOLEAN DEFAULT FALSE,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
       `);
 
+      await client.query(`
+        ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS is_locked BOOLEAN DEFAULT FALSE;
+      `);
+      
       await client.query(`
         ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
       `);
@@ -231,7 +235,6 @@ async function startServer() {
 
   app.use("/fonts", express.static(FONTS_DIR));
   app.use("/fonts", express.static(WRITABLE_FONTS_DIR));
-  app.use("/uploads", express.static(UPLOADS_DIR));
 
   // Auth
   app.post("/api/login", async (req, res) => {
@@ -607,7 +610,7 @@ async function startServer() {
       }
 
       if (HAS_POSTGRES) {
-        const query = "SELECT id, username, image_url as \"imageUrl\", layers, name, created_at as \"createdAt\" FROM font_app_images WHERE username = $1";
+        const query = "SELECT id, username, image_url as \"imageUrl\", layers, name, is_locked as \"isLocked\", created_at as \"createdAt\" FROM font_app_images WHERE username = $1";
         const result = await pool.query(query, [username]);
         return res.json(result.rows);
       }
@@ -620,18 +623,19 @@ async function startServer() {
 
   app.post("/api/images", async (req, res) => {
     try {
-      const { id, username, imageUrl, layers, name } = req.body;
+      const { id, username, imageUrl, layers, name, isLocked } = req.body;
       
       if (HAS_POSTGRES) {
         await pool.query(
-          `INSERT INTO font_app_images (id, username, image_url, layers, name)
-           VALUES ($1, $2, $3, $4, $5)
+          `INSERT INTO font_app_images (id, username, image_url, layers, name, is_locked)
+           VALUES ($1, $2, $3, $4, $5, $6)
            ON CONFLICT (id) DO UPDATE SET
            username = EXCLUDED.username,
            image_url = EXCLUDED.image_url,
            layers = EXCLUDED.layers,
-           name = EXCLUDED.name`,
-          [id, username, imageUrl, JSON.stringify(layers), name]
+           name = EXCLUDED.name,
+           is_locked = EXCLUDED.is_locked`,
+          [id, username, imageUrl, JSON.stringify(layers), name, !!isLocked]
         );
       }
       
@@ -653,22 +657,6 @@ async function startServer() {
       console.error("Delete image error details:", err instanceof Error ? err.message : String(err));
       res.status(500).json({ success: false, message: "Internal server error" });
     }
-  });
-
-  app.post("/api/upload-image", (req, res, next) => {
-    console.log("Upload request received");
-    upload.single("image")(req, res, (err) => {
-      if (err) {
-        console.error("Multer error:", err);
-        return res.status(500).json({ success: false, message: err.message });
-      }
-      if (!(req as any).file) {
-        console.error("No file in request");
-        return res.status(400).json({ success: false, message: "No file uploaded" });
-      }
-      console.log("File uploaded successfully:", (req as any).file.filename);
-      res.json({ success: true, url: `/uploads/${(req as any).file?.filename}` });
-    });
   });
 
   // Error handler

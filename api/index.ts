@@ -31,7 +31,6 @@ const PROJECT_FONTS_DIR = [
 ].find(dir => fs.existsSync(dir) && fs.readdirSync(dir).length > 0) || path.join(process.cwd(), "api", "webfonts");
 
 const WRITABLE_FONTS_DIR = path.resolve(STORAGE_BASE, "public", "fonts");
-const UPLOADS_DIR = path.resolve(STORAGE_BASE, "public", "uploads");
 
 console.log(`__dirname: ${__dirname}`);
 console.log(`process.cwd(): ${process.cwd()}`);
@@ -65,7 +64,7 @@ let isDbInitialized = false;
 let dbInitError: string | null = null;
 
 // Ensure directories exist
-[WRITABLE_FONTS_DIR, UPLOADS_DIR].forEach(dir => {
+[WRITABLE_FONTS_DIR].forEach(dir => {
   try {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
@@ -240,7 +239,6 @@ app.get("/fonts/:name", async (req, res) => {
 
 app.use("/fonts", express.static(PROJECT_FONTS_DIR));
 app.use("/fonts", express.static(WRITABLE_FONTS_DIR));
-app.use("/uploads", express.static(UPLOADS_DIR));
 
 // Auth
 app.post("/api/login", async (req, res) => {
@@ -723,18 +721,6 @@ app.delete("/api/images/:id", async (req, res) => {
     console.error("Delete image error:", err);
     res.status(500).json({ success: false, message: "Internal server error" });
   }
-});
-
-app.post("/api/upload-image", (req, res, next) => {
-  upload.single("image")(req, res, (err) => {
-    if (err) {
-      return res.status(500).json({ success: false, message: err.message });
-    }
-    if (!(req as any).file) {
-      return res.status(400).json({ success: false, message: "No file uploaded" });
-    }
-    res.json({ success: true, url: `/uploads/${(req as any).file?.filename}` });
-  });
 });
 
 // API route guard to prevent HTML fallback for missing API endpoints

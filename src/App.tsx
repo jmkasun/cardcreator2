@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { useDropzone } from "react-dropzone";
-import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check } from "lucide-react";
+import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check, Lock, Unlock, FileUp, FileDown } from "lucide-react";
 import { cn } from "@/src/lib/utils";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -45,6 +45,7 @@ interface ImageProject {
   layers: TextLayer[];
   name: string;
   createdAt: string;
+  isLocked?: boolean;
 }
 
 export default function App() {
@@ -145,23 +146,28 @@ export default function App() {
     }
   }, [user]);
 
+  const imageCacheRef = useRef<HTMLImageElement | null>(null);
+
   useEffect(() => {
     if (image) {
       const img = new Image();
       img.src = image;
       img.onload = () => {
+        imageCacheRef.current = img;
+        drawCanvas();
+        
         const mainElement = document.querySelector('main');
         if (mainElement) {
-          const padding = 64; // p-8 is 32px on each side
+          const padding = 64;
           const maxWidth = mainElement.clientWidth - padding;
           const maxHeight = mainElement.clientHeight - padding;
-          
           const scaleX = maxWidth / img.width;
-          const newZoom = Math.min(scaleX, 1); // Fit to width, but don't exceed 100%
-          
+          const newZoom = Math.min(scaleX, 1);
           setZoom(newZoom);
         }
       };
+    } else {
+      imageCacheRef.current = null;
     }
   }, [image]);
 
@@ -417,13 +423,11 @@ export default function App() {
     setIsSaving(true);
     const projectId = currentProjectId || Math.random().toString(36).substr(2, 9);
     
-    // Find existing project to preserve its name and createdAt
-    // We check both the projects state and the currentProjectId
+    // Find existing project in the state or current projects
     const existingProject = projects.find(p => p.id === projectId);
     
-    // If we can't find it in projects, it might have been JUST created
-    // So we use a default only if it's truly a new project
     const projectName = existingProject ? existingProject.name : (currentProjectId ? `Project ${new Date().toLocaleDateString()}` : `New Project`);
+    const isLocked = existingProject ? existingProject.isLocked : false;
 
     const project: ImageProject = {
       id: projectId,
@@ -432,6 +436,7 @@ export default function App() {
       layers,
       name: projectName,
       createdAt: existingProject?.createdAt || new Date().toISOString(),
+      isLocked: isLocked,
     };
 
     try {
@@ -442,7 +447,13 @@ export default function App() {
       });
       if (res.ok) {
         setCurrentProjectId(projectId);
-        await fetchProjects();
+        setProjects(prev => {
+          const exists = prev.some(p => p.id === project.id);
+          if (exists) {
+            return prev.map(p => p.id === project.id ? project : p);
+          }
+          return [project, ...prev];
+        });
       } else {
         console.error("Failed to save project:", await res.text());
       }
@@ -459,21 +470,133 @@ export default function App() {
 
   const confirmDeleteProject = async () => {
     if (!projectToDeleteId) return;
+    
+    // Save current list for potential rollback
+    const previousProjects = [...projects];
+    const isCurrentProject = currentProjectId === projectToDeleteId;
+    
+    // Optimistic update
+    setProjects(prev => prev.filter(p => p.id !== projectToDeleteId));
+    if (isCurrentProject) {
+      setCurrentProjectId(null);
+      setImage(null);
+      setLayers([]);
+    }
+    
     try {
       const res = await fetch(`/api/images/${projectToDeleteId}`, { method: "DELETE" });
-      if (res.ok) {
-        if (currentProjectId === projectToDeleteId) {
-          setCurrentProjectId(null);
-          setImage(null);
-          setLayers([]);
-        }
-        await fetchProjects();
+      if (!res.ok) {
+        throw new Error("Failed to delete project from server");
       }
     } catch (err) {
       console.error("Failed to delete project", err);
+      // Rollback on error
+      setProjects(previousProjects);
+      if (isCurrentProject) {
+        const deletedProject = previousProjects.find(p => p.id === projectToDeleteId);
+        if (deletedProject) loadProject(deletedProject);
+      }
+      setNotification({ message: "Failed to delete project. Please try again.", type: 'error' });
     } finally {
       setProjectToDeleteId(null);
     }
+  };
+
+  const toggleProjectLock = async (projectId?: string) => {
+    const targetId = projectId || currentProjectId;
+    if (!targetId) return;
+    const project = projects.find(p => p.id === targetId);
+    if (!project) return;
+
+    const newLockedStatus = !project.isLocked;
+    
+    // Update local state first for immediate feedback
+    setProjects(prev => prev.map(p => p.id === targetId ? { ...p, isLocked: newLockedStatus } : p));
+    
+    try {
+      const res = await fetch("/api/images", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...project, isLocked: newLockedStatus }),
+      });
+      if (res.ok) {
+        setNotification({ message: `Project ${newLockedStatus ? 'locked' : 'unlocked'}`, type: 'success' });
+      }
+    } catch (err) {
+      console.error("Failed to toggle project lock", err);
+    }
+  };
+
+  const exportLayers = (projectId?: string, projectLayers?: TextLayer[]) => {
+    const targetId = projectId || currentProjectId;
+    const targetLayers = projectLayers || layers;
+    
+    if (targetLayers.length === 0) {
+      setNotification({ message: "No layers to export", type: 'error' });
+      return;
+    }
+    const project = projects.find(p => p.id === targetId);
+    const fileName = `${project?.name || 'project'}_layers.json`;
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(targetLayers));
+    const downloadAnchorNode = document.createElement('a');
+    downloadAnchorNode.setAttribute("href",     dataStr);
+    downloadAnchorNode.setAttribute("download", fileName);
+    document.body.appendChild(downloadAnchorNode);
+    downloadAnchorNode.click();
+    downloadAnchorNode.remove();
+    setNotification({ message: "Layers exported successfully", type: 'success' });
+  };
+
+  const importLayers = (e: React.ChangeEvent<HTMLInputElement>, projectId?: string) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const targetId = projectId || currentProjectId;
+    const targetProject = projects.find(p => p.id === targetId);
+    
+    if (targetProject?.isLocked) {
+      setNotification({ message: "Cannot import layers to a locked project", type: 'error' });
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      try {
+        const importedLayers = JSON.parse(event.target?.result as string);
+        if (Array.isArray(importedLayers)) {
+          const validLayers = importedLayers.map(l => ({
+            ...l,
+            id: l.id || Math.random().toString(36).substr(2, 9)
+          }));
+          
+          if (targetId === currentProjectId) {
+            setLayers(validLayers);
+          } else if (targetProject) {
+            // Import to another project, we need to save it back
+            const updatedProject = { ...targetProject, layers: validLayers };
+            try {
+              await fetch("/api/images", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(updatedProject),
+              });
+              setProjects(prev => prev.map(p => p.id === targetId ? updatedProject : p));
+            } catch (err) {
+              console.error("Failed to save imported layers to project", err);
+            }
+          }
+          
+          setNotification({ message: "Layers imported successfully", type: 'success' });
+        } else {
+          throw new Error("Invalid format");
+        }
+      } catch (err) {
+        console.error("Import error:", err);
+        setNotification({ message: "Failed to import layers. Invalid JSON file.", type: 'error' });
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = ''; // Reset input
   };
 
   const loadProject = (project: ImageProject) => {
@@ -640,18 +763,42 @@ export default function App() {
   const updatePreferences = async (preferences: Partial<User> | string[]) => {
     if (!user) return;
     const payload = Array.isArray(preferences) ? { selectedFonts: preferences } : preferences;
+    
+    // Optimistic update
+    const previousUser = { ...user };
+    const newUser = { ...user, ...payload };
+    setUser(newUser);
+    
     try {
       const res = await fetch("/api/user/preferences", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username: user.username, ...payload }),
       });
-      if (res.ok) {
-        setUser({ ...user, ...payload });
+      if (!res.ok) {
+        throw new Error("Server error updating preferences");
       }
     } catch (err) {
       console.error("Failed to update preferences", err);
+      // Rollback on error
+      setUser(previousUser);
+      setNotification({ message: "Failed to save preferences", type: 'error' });
     }
+  };
+
+  const prefDebounceRef = useRef<NodeJS.Timeout | null>(null);
+
+  const debouncedUpdatePreferences = (preferences: Partial<User>) => {
+    if (!user) return;
+    
+    // Update local state immediately for snappy UI
+    setUser({ ...user, ...preferences });
+    
+    // Debounce the server call
+    if (prefDebounceRef.current) clearTimeout(prefDebounceRef.current);
+    prefDebounceRef.current = setTimeout(() => {
+      updatePreferences(preferences);
+    }, 500);
   };
 
   const handleCreateAccount = async (e: React.FormEvent) => {
@@ -752,83 +899,90 @@ export default function App() {
     if (selectedLayerId === id) setSelectedLayerId(null);
   };
 
+  const drawCanvasRef = useRef<number | null>(null);
+  const drawTimerRef = useRef<NodeJS.Timeout | null>(null);
+
   const drawCanvas = () => {
-    const canvas = canvasRef.current;
-    if (!canvas || !image) return;
+    if (drawTimerRef.current) clearTimeout(drawTimerRef.current);
+    
+    drawTimerRef.current = setTimeout(() => {
+      if (drawCanvasRef.current) cancelAnimationFrame(drawCanvasRef.current);
+      
+      drawCanvasRef.current = requestAnimationFrame(async () => {
+        const canvas = canvasRef.current;
+        if (!canvas || !imageCacheRef.current) return;
 
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+        const ctx = canvas.getContext("2d", { alpha: false });
+        if (!ctx) return;
 
-    const img = new Image();
-    img.src = image;
-    img.onload = async () => {
-      canvas.width = img.width;
-      canvas.height = img.height;
-      setCanvasSize({ width: img.width, height: img.height });
-      ctx.drawImage(img, 0, 0);
-
-      for (const layer of layers) {
-        ctx.save();
-        const fontStyle = layer.isItalic ? "italic " : "";
-        const fontWeight = layer.isBold ? "bold " : "";
-        const fontFamily = layer.fontFamily || "sans-serif";
-        const fontStr = `${fontStyle}${fontWeight}${layer.fontSize}px "${fontFamily}"`;
+        const img = imageCacheRef.current;
+        if (canvas.width !== img.width || canvas.height !== img.height) {
+          canvas.width = img.width;
+          canvas.height = img.height;
+          setCanvasSize({ width: img.width, height: img.height });
+        }
         
-        // Ensure font is loaded before drawing
-        try {
-          await document.fonts.ready; // Wait for all fonts to be ready
-          if (!document.fonts.check(fontStr)) {
-            console.log(`Font not ready, attempting to load: ${fontStr}`);
-            await document.fonts.load(fontStr);
-          }
-        } catch (e) {
-          if (!fontFamily.includes("apex_apura_044")) {
-            console.warn(`Failed to verify/load font for canvas: ${fontStr}`, e);
-          }
-        }
+        ctx.drawImage(img, 0, 0);
 
-        ctx.font = fontStr;
-        ctx.textAlign = layer.textAlign || "center";
-        ctx.textBaseline = "middle";
-        
-        const x = (layer.x / 100) * canvas.width;
-        const y = (layer.y / 100) * canvas.height;
-
-        // Show layer name when text content is empty
-        const displayText = layer.text || layer.name || "Text Layer";
-
-        if (layer.shadowBlur > 0) {
-          ctx.shadowBlur = layer.shadowBlur;
-          ctx.shadowColor = layer.shadowColor;
-        }
-
-        if (layer.strokeWidth > 0) {
-          ctx.strokeStyle = layer.strokeColor;
-          ctx.lineWidth = layer.strokeWidth;
-          ctx.strokeText(displayText, x, y);
-        }
-
-        ctx.fillStyle = layer.color;
-        ctx.fillText(displayText, x, y);
-
-        if (layer.isUnderline) {
-          const metrics = ctx.measureText(displayText);
-          const width = metrics.width;
-          const height = layer.fontSize;
-          let underlineX = x;
-          if (ctx.textAlign === 'center') underlineX = x - width / 2;
-          if (ctx.textAlign === 'right') underlineX = x - width;
+        for (const layer of layers) {
+          ctx.save();
+          const fontStyle = layer.isItalic ? "italic " : "";
+          const fontWeight = layer.isBold ? "bold " : "";
+          const fontFamily = layer.fontFamily || "sans-serif";
+          const fontStr = `${fontStyle}${fontWeight}${layer.fontSize}px "${fontFamily}", sans-serif`;
           
-          ctx.beginPath();
-          ctx.strokeStyle = layer.color;
-          ctx.lineWidth = Math.max(1, layer.fontSize / 15);
-          ctx.moveTo(underlineX, y + height / 2);
-          ctx.lineTo(underlineX + width, y + height / 2);
-          ctx.stroke();
+          if (fontFamily !== "sans-serif" && !document.fonts.check(fontStr)) {
+            try {
+              await document.fonts.load(fontStr);
+            } catch (e) {
+              if (!fontFamily.includes("apex_apura_044")) {
+                console.warn(`Failed to load font for canvas: ${fontStr}`, e);
+              }
+            }
+          }
+
+          ctx.font = fontStr;
+          ctx.textAlign = layer.textAlign || "center";
+          ctx.textBaseline = "middle";
+          
+          const x = (layer.x / 100) * canvas.width;
+          const y = (layer.y / 100) * canvas.height;
+
+          const displayText = layer.text || "";
+
+          if (layer.shadowBlur > 0) {
+            ctx.shadowBlur = layer.shadowBlur * (canvas.width / 1000);
+            ctx.shadowColor = layer.shadowColor;
+          }
+
+          if (layer.strokeWidth > 0) {
+            ctx.strokeStyle = layer.strokeColor;
+            ctx.lineWidth = layer.strokeWidth * (canvas.width / 1000);
+            ctx.strokeText(displayText, x, y);
+          }
+
+          ctx.fillStyle = layer.color;
+          ctx.fillText(displayText, x, y);
+
+          if (layer.isUnderline) {
+            const metrics = ctx.measureText(displayText);
+            const width = metrics.width;
+            const height = layer.fontSize;
+            let underlineX = x;
+            if (ctx.textAlign === 'center') underlineX = x - width / 2;
+            if (ctx.textAlign === 'right') underlineX = x - width;
+            
+            ctx.beginPath();
+            ctx.strokeStyle = layer.color;
+            ctx.lineWidth = Math.max(1, layer.fontSize / 15);
+            ctx.moveTo(underlineX, y + height / 2);
+            ctx.lineTo(underlineX + width, y + height / 2);
+            ctx.stroke();
+          }
+          ctx.restore();
         }
-        ctx.restore();
-      }
-    };
+      });
+    }, 16);
   };
 
   useEffect(() => {
@@ -879,6 +1033,9 @@ export default function App() {
     const canvas = canvasRef.current;
     if (!canvas || !image) return;
 
+    const currentProject = projects.find(p => p.id === currentProjectId);
+    const isLocked = currentProject?.isLocked;
+
     const rect = canvas.getBoundingClientRect();
     const scaleX = canvas.width / rect.width;
     const scaleY = canvas.height / rect.height;
@@ -889,11 +1046,13 @@ export default function App() {
 
     if (clickedLayer) {
       setSelectedLayerId(clickedLayer.id);
-      isDraggingRef.current = true;
-      dragStartPos.current = {
-        x: mouseX - (clickedLayer.x / 100) * canvas.width,
-        y: mouseY - (clickedLayer.y / 100) * canvas.height,
-      };
+      if (!isLocked) {
+        isDraggingRef.current = true;
+        dragStartPos.current = {
+          x: mouseX - (clickedLayer.x / 100) * canvas.width,
+          y: mouseY - (clickedLayer.y / 100) * canvas.height,
+        };
+      }
     } else {
       setSelectedLayerId(null);
     }
@@ -903,20 +1062,27 @@ export default function App() {
     const canvas = canvasRef.current;
     if (!canvas || !image) return;
 
+    const currentProject = projects.find(p => p.id === currentProjectId);
+    const isLocked = currentProject?.isLocked;
+
     const rect = canvas.getBoundingClientRect();
     const scaleX = canvas.width / rect.width;
     const scaleY = canvas.height / rect.height;
     const mouseX = (e.clientX - rect.left) * scaleX;
     const mouseY = (e.clientY - rect.top) * scaleY;
 
-    if (isDraggingRef.current && selectedLayerId) {
+    if (isDraggingRef.current && selectedLayerId && !isLocked) {
       const newX = ((mouseX - dragStartPos.current.x) / canvas.width) * 100;
       const newY = ((mouseY - dragStartPos.current.y) / canvas.height) * 100;
       updateLayer(selectedLayerId, { x: newX, y: newY });
       canvas.style.cursor = 'move';
     } else {
       const hoveredLayer = getLayerAtPosition(mouseX, mouseY);
-      canvas.style.cursor = hoveredLayer ? 'move' : 'default';
+      if (hoveredLayer) {
+        canvas.style.cursor = isLocked ? 'pointer' : 'move';
+      } else {
+        canvas.style.cursor = 'default';
+      }
     }
   };
 
@@ -1299,7 +1465,7 @@ export default function App() {
                         value={user?.defaultFont || ''}
                         onChange={(e) => {
                           const val = e.target.value;
-                          updatePreferences({ defaultFont: val });
+                          debouncedUpdatePreferences({ defaultFont: val });
                           if (selectedLayerId) {
                             updateLayer(selectedLayerId, { fontFamily: val });
                           }
@@ -1321,7 +1487,7 @@ export default function App() {
                         onChange={(e) => {
                           const val = parseInt(e.target.value);
                           if (!isNaN(val)) {
-                            updatePreferences({ defaultFontSize: val });
+                            debouncedUpdatePreferences({ defaultFontSize: val });
                             if (selectedLayerId) {
                               updateLayer(selectedLayerId, { fontSize: val });
                             }
@@ -1338,7 +1504,7 @@ export default function App() {
                           value={user?.defaultFontColor || '#000064'}
                           onChange={(e) => {
                             const val = e.target.value;
-                            updatePreferences({ defaultFontColor: val });
+                            debouncedUpdatePreferences({ defaultFontColor: val });
                             if (selectedLayerId) {
                               updateLayer(selectedLayerId, { color: val });
                             }
@@ -1392,10 +1558,9 @@ export default function App() {
                                 onClick={() => {
                                   const currentSelected = user?.selectedFonts || [];
                                   if (isSelected) {
-                                    updatePreferences(currentSelected.filter(name => name !== f.name));
+                                    debouncedUpdatePreferences({ selectedFonts: currentSelected.filter(name => name !== f.name) });
                                   } else {
-                                    updatePreferences([...currentSelected, f.name]);
-                                    // Apply style changes to the selected element(s)
+                                    debouncedUpdatePreferences({ selectedFonts: [...currentSelected, f.name] });
                                     if (selectedLayer) {
                                       updateLayer(selectedLayer.id, { fontFamily: f.name });
                                     }
@@ -1838,15 +2003,57 @@ export default function App() {
             <X size={20} />
           </button>
           <div className="p-4 border-b border-slate-800 space-y-4 shrink-0">
-            <div
-              {...getSidebarRootProps()}
-              className={cn(
-                "w-full border-2 border-dashed rounded-lg py-2 flex flex-col items-center justify-center transition-all cursor-pointer text-xs",
-                isSidebarDragActive ? "border-blue-500 bg-blue-500/5" : "border-slate-800 hover:border-slate-700 bg-slate-800/50"
+            <div className="flex items-center justify-between gap-2">
+              <div
+                {...getSidebarRootProps()}
+                className={cn(
+                  "flex-1 border-2 border-dashed rounded-lg py-2 flex flex-col items-center justify-center transition-all cursor-pointer text-xs",
+                  isSidebarDragActive ? "border-blue-500 bg-blue-500/5" : "border-slate-800 hover:border-slate-700 bg-slate-800/50"
+                )}
+              >
+                <input {...getSidebarInputProps()} />
+                <span className="text-slate-400">Upload Image(s)</span>
+              </div>
+              
+              {currentProjectId && (
+                <div className="flex gap-1 shrink-0">
+                  <button
+                    onClick={exportLayers}
+                    className="p-2.5 rounded-lg transition-all border bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700 hover:text-blue-400"
+                    title="Export Layers"
+                  >
+                    <FileDown size={16} />
+                  </button>
+                  <label 
+                    className={cn(
+                      "p-2.5 rounded-lg transition-all border bg-slate-800 border-slate-700 text-slate-400 cursor-pointer flex items-center justify-center",
+                      projects.find(p => p.id === currentProjectId)?.isLocked ? "opacity-30 cursor-not-allowed" : "hover:bg-slate-700 hover:text-green-400"
+                    )}
+                    title="Import Layers"
+                  >
+                    <input 
+                      type="file" 
+                      className="hidden" 
+                      accept=".json" 
+                      onChange={importLayers} 
+                      disabled={projects.find(p => p.id === currentProjectId)?.isLocked}
+                    />
+                    <FileUp size={16} />
+                  </label>
+                  <button
+                    onClick={toggleProjectLock}
+                    className={cn(
+                      "p-2.5 rounded-lg transition-all border shrink-0",
+                      projects.find(p => p.id === currentProjectId)?.isLocked 
+                        ? "bg-red-600/20 border-red-600/30 text-red-400 shadow-lg shadow-red-900/10" 
+                        : "bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700"
+                    )}
+                    title={projects.find(p => p.id === currentProjectId)?.isLocked ? "Unlock Project" : "Lock Project"}
+                  >
+                    {projects.find(p => p.id === currentProjectId)?.isLocked ? <Lock size={16} /> : <Unlock size={16} />}
+                  </button>
+                </div>
               )}
-            >
-              <input {...getSidebarInputProps()} />
-              <span className="text-slate-400">Upload New Image(s)</span>
             </div>
 
             {image && (
@@ -1898,16 +2105,64 @@ export default function App() {
                       >
                         <img src={proj.imageUrl} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
                         
-                        {/* Delete Button Overlay */}
-                        <div className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        {/* Actions Overlay */}
+                        <div className="absolute top-1 right-1 flex flex-row gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              toggleProjectLock(proj.id);
+                            }}
+                            className={cn(
+                              "p-1.5 rounded backdrop-blur-sm shadow-lg border transition-all",
+                              proj.isLocked 
+                                ? "bg-red-600/80 border-red-500 text-white" 
+                                : "bg-slate-800/80 border-slate-700 text-slate-300 hover:bg-slate-700 hover:text-white"
+                            )}
+                            title={proj.isLocked ? "Unlock Project" : "Lock Project"}
+                          >
+                            {proj.isLocked ? <Lock size={14} /> : <Unlock size={14} />}
+                          </button>
+                          
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              exportLayers(proj.id, proj.layers);
+                            }}
+                            className="p-1.5 bg-slate-800/80 hover:bg-slate-700 border border-slate-700 rounded text-slate-300 hover:text-blue-400 backdrop-blur-sm shadow-lg transition-all"
+                            title="Export Layers"
+                          >
+                            <FileDown size={14} />
+                          </button>
+
+                          <label 
+                            onClick={(e) => e.stopPropagation()}
+                            className={cn(
+                              "p-1.5 rounded border backdrop-blur-sm shadow-lg transition-all flex items-center justify-center cursor-pointer",
+                              proj.isLocked 
+                                ? "bg-slate-900/50 border-slate-800 text-slate-600 cursor-not-allowed" 
+                                : "bg-slate-800/80 border-slate-700 text-slate-300 hover:bg-slate-700 hover:text-green-400"
+                            )}
+                            title="Import Layers"
+                          >
+                            <input 
+                              type="file" 
+                              className="hidden" 
+                              accept=".json" 
+                              onChange={(e) => importLayers(e, proj.id)} 
+                              disabled={proj.isLocked}
+                            />
+                            <FileUp size={14} />
+                          </label>
+
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
                               deleteProject(proj.id);
                             }}
-                            className="p-1 bg-red-600/80 hover:bg-red-600 rounded text-white backdrop-blur-sm shadow-lg"
+                            className="p-1.5 bg-red-600/80 hover:bg-red-600 rounded text-white backdrop-blur-sm shadow-lg transition-all"
+                            title="Delete Project"
                           >
-                            <Trash2 size={12} />
+                            <Trash2 size={14} />
                           </button>
                         </div>
 
@@ -1939,14 +2194,14 @@ export default function App() {
                 <div className="grid grid-cols-2 gap-2 mb-4">
                   <button
                     onClick={addLayer}
-                    disabled={!image}
+                    disabled={!image || projects.find(p => p.id === currentProjectId)?.isLocked}
                     className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium py-2 rounded-lg flex items-center justify-center gap-2 transition-all text-xs"
                   >
                     <Plus size={14} /> Add Text
                   </button>
                   <button
                     onClick={addDateLayer}
-                    disabled={!image}
+                    disabled={!image || projects.find(p => p.id === currentProjectId)?.isLocked}
                     className="bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium py-2 rounded-lg flex items-center justify-center gap-2 transition-all text-xs"
                   >
                     <Calendar size={14} /> Add Date
@@ -1981,7 +2236,10 @@ export default function App() {
                             <div className="flex items-center justify-between gap-2 overflow-hidden border-b border-slate-700/30 pb-2 mb-1">
                               <div className="flex items-center gap-2 overflow-hidden flex-1">
                                 <Type size={12} className="shrink-0 opacity-50" />
-                                <span className="text-[10px] font-bold uppercase tracking-wider truncate text-inherit">
+                                <span 
+                                  className="text-base font-normal tracking-wider truncate text-inherit"
+                                  style={{ fontFamily: `"${layer.fontFamily}", sans-serif` }}
+                                >
                                   {layer.name}
                                 </span>
                               </div>
@@ -2011,11 +2269,12 @@ export default function App() {
                                 )}
                                 <button
                                   tabIndex={-1}
+                                  disabled={projects.find(p => p.id === currentProjectId)?.isLocked}
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     deleteLayer(layer.id);
                                   }}
-                                  className="p-1 hover:text-red-400 transition-all"
+                                  className="p-1 hover:text-red-400 transition-all disabled:opacity-30"
                                 >
                                   <Trash2 size={14} />
                                 </button>
@@ -2029,8 +2288,8 @@ export default function App() {
                                 onChange={(e) => updateLayer(layer.id, { text: e.target.value })}
                                 onFocus={() => setSelectedLayerId(layer.id)}
                                 onClick={(e) => e.stopPropagation()}
-                                placeholder="Content"
                                 className="bg-slate-900 border border-slate-700/50 rounded-lg px-2 py-1.5 text-sm w-full outline-none text-inherit focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20"
+                                style={{ fontFamily: layer.fontFamily }}
                               />
                             </div>
                           </div>
@@ -2045,23 +2304,33 @@ export default function App() {
                 <div className="pt-4 border-t border-slate-800 space-y-4">
                 <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Properties</h3>
                 <div className="space-y-4">
+                  {!projects.find(p => p.id === currentProjectId)?.isLocked && (
+                    <div>
+                      <label className="text-xs text-slate-500 block mb-1.5">Layer Name</label>
+                      <input
+                        type="text"
+                        value={selectedLayer.name}
+                        onChange={(e) => updateLayer(selectedLayer.id, { name: e.target.value })}
+                        className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-blue-500"
+                        style={{ fontFamily: `"${selectedLayer.fontFamily}", sans-serif` }}
+                      />
+                    </div>
+                  )}
                   <div>
-                    <label className="text-xs text-slate-500 block mb-1.5">Layer Name</label>
-                    <input
-                      type="text"
-                      value={selectedLayer.name}
-                      onChange={(e) => updateLayer(selectedLayer.id, { name: e.target.value })}
-                      className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-blue-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-xs text-slate-500 block mb-1.5">Text Content</label>
+                    <label className="text-xs text-slate-500 block mb-1.5">{projects.find(p => p.id === currentProjectId)?.isLocked ? "Editing Content" : "Text Content"}</label>
                     <textarea
                       value={selectedLayer.text}
                       onChange={(e) => updateLayer(selectedLayer.id, { text: e.target.value })}
                       className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-blue-500 resize-none h-20"
+                      style={{ 
+                        fontFamily: `"${selectedLayer.fontFamily}", sans-serif`,
+                        fontWeight: selectedLayer.isBold ? 'bold' : 'normal',
+                        fontStyle: selectedLayer.isItalic ? 'italic' : 'normal'
+                      }}
                     />
                   </div>
+                  {!projects.find(p => p.id === currentProjectId)?.isLocked && (
+                    <>
                   <div>
                     <div className="flex items-center justify-between mb-1.5">
                       <label className="text-xs text-slate-500 block">Font Family</label>
@@ -2259,6 +2528,8 @@ export default function App() {
                       />
                     </div>
                   </div>
+                  </>
+                  )}
                 </div>
               </div>
             )}
