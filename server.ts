@@ -21,7 +21,7 @@ const FONTS_DIR = [
   path.join(process.cwd(), "font")
 ].find(dir => fs.existsSync(dir) && fs.readdirSync(dir).length > 0) || path.join(process.cwd(), "public", "fonts");
 const WRITABLE_FONTS_DIR = path.join(process.cwd(), "public", "fonts");
-const UPLOADS_DIR = path.join(__dirname, "public", "uploads");
+const UPLOADS_DIR = path.join(process.cwd(), "public", "uploads");
 
 // Ensure directories exist
 [FONTS_DIR, WRITABLE_FONTS_DIR, UPLOADS_DIR].forEach(dir => {
@@ -143,9 +143,6 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  app.use(express.json({ limit: "50mb" }));
-  app.use(express.urlencoded({ limit: "50mb", extended: true }));
-
   app.use((req, res, next) => {
     console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
     next();
@@ -168,6 +165,73 @@ async function startServer() {
       database: dbStatus
     });
   });
+
+  // Image Upload - BEFORE body parsers to avoid stream consumption issues
+  app.post("/api/upload-image", (req, res, next) => {
+    console.log("[Upload Service] Upload request received");
+    upload.single("image")(req, res, (err) => {
+      if (err) {
+        console.error("[Upload Service] Multer error:", err);
+        return res.status(500).json({ success: false, message: err.message });
+      }
+      const file = (req as any).file;
+      if (!file) {
+        console.error("[Upload Service] No file in request");
+        return res.status(400).json({ success: false, message: "No file uploaded" });
+      }
+
+      const timestamp = Date.now();
+      const sanitized = file.originalname.replace(/[^a-z0-9.]/gi, '_').toLowerCase();
+      const fileName = `${timestamp}-${sanitized}`;
+      
+      try {
+        if (!fs.existsSync(UPLOADS_DIR)) {
+          fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+        }
+        fs.writeFileSync(path.join(UPLOADS_DIR, fileName), file.buffer);
+        console.log("[Upload Service] File uploaded successfully:", fileName);
+        res.json({ success: true, url: `/uploads/${fileName}` });
+      } catch (fsErr) {
+        console.error("[Upload Service] Error saving uploaded image:", fsErr);
+        res.status(500).json({ success: false, message: "Failed to save image: " + (fsErr instanceof Error ? fsErr.message : String(fsErr)) });
+      }
+    });
+  });
+
+  // Font Upload - BEFORE body parsers
+  app.post("/api/upload-font", upload.single("font"), async (req, res) => {
+    try {
+      const file = req.file;
+      if (!file) return res.status(400).json({ success: false, message: "No file uploaded" });
+
+      const sanitized = file.originalname.replace(/[^a-z0-9.]/gi, '_').toLowerCase();
+      const fileName = sanitized;
+
+      if (HAS_POSTGRES) {
+        try {
+          await pool.query(
+            "INSERT INTO custom_fonts (name, data) VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET data = $2",
+            [fileName, file.buffer]
+          );
+          return res.json({ success: true, url: `/fonts/${fileName}`, name: fileName });
+        } catch (err) {
+          console.error("[Font Upload] DB Font upload error:", err);
+        }
+      }
+
+      if (!fs.existsSync(WRITABLE_FONTS_DIR)) {
+        fs.mkdirSync(WRITABLE_FONTS_DIR, { recursive: true });
+      }
+      fs.writeFileSync(path.join(WRITABLE_FONTS_DIR, fileName), file.buffer);
+      res.json({ success: true, url: `/fonts/${fileName}`, name: fileName });
+    } catch (err) {
+      console.error("[Font Upload] Font upload error:", err);
+      res.status(500).json({ success: false, message: "Internal server error" });
+    }
+  });
+
+  app.use(express.json({ limit: "50mb" }));
+  app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
   // Explicit font serving route
   app.get("/fonts/:name", async (req, res) => {
@@ -450,33 +514,6 @@ async function startServer() {
     }
   });
 
-  app.post("/api/upload-font", upload.single("font"), async (req, res) => {
-    try {
-      const file = req.file;
-      if (!file) return res.status(400).json({ success: false, message: "No file uploaded" });
-
-      const sanitized = file.originalname.replace(/[^a-z0-9.]/gi, '_').toLowerCase();
-      const fileName = sanitized;
-
-      if (HAS_POSTGRES) {
-        try {
-          await pool.query(
-            "INSERT INTO custom_fonts (name, data) VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET data = $2",
-            [fileName, file.buffer]
-          );
-          return res.json({ success: true, url: `/fonts/${fileName}`, name: fileName });
-        } catch (err) {
-          console.error("DB Font upload error:", err);
-        }
-      }
-
-      fs.writeFileSync(path.join(WRITABLE_FONTS_DIR, fileName), file.buffer);
-      res.json({ success: true, url: `/fonts/${fileName}`, name: fileName });
-    } catch (err) {
-      console.error("Font upload error:", err);
-      res.status(500).json({ success: false, message: "Internal server error" });
-    }
-  });
 
   app.delete("/api/fonts/:name", async (req, res) => {
     try {
@@ -613,8 +650,9 @@ async function startServer() {
       }
 
       if (HAS_POSTGRES) {
-        const query = "SELECT id, username, image_url as \"imageUrl\", layers, name, created_at as \"createdAt\", is_locked as \"isLocked\" FROM font_app_images WHERE username = $1";
+        const query = "SELECT id, username, image_url as \"imageUrl\", layers, name, created_at as \"createdAt\", COALESCE(is_locked, false) as \"isLocked\" FROM font_app_images WHERE username = $1";
         const result = await pool.query(query, [username]);
+        console.log(`[Images Service] Fetched ${result.rowCount} projects for ${username}.`);
         return res.json(result.rows);
       }
       res.json([]);
@@ -627,6 +665,7 @@ async function startServer() {
   app.post("/api/images", async (req, res) => {
     try {
       const { id, username, imageUrl, layers, name, isLocked } = req.body;
+      console.log(`[Images Service] Saving project ${id} for ${username}. isLocked: ${isLocked}`);
       
       if (HAS_POSTGRES) {
         await pool.query(
@@ -662,32 +701,11 @@ async function startServer() {
     }
   });
 
-  app.post("/api/upload-image", (req, res, next) => {
-    console.log("Upload request received");
-    upload.single("image")(req, res, (err) => {
-      if (err) {
-        console.error("Multer error:", err);
-        return res.status(500).json({ success: false, message: err.message });
-      }
-      const file = (req as any).file;
-      if (!file) {
-        console.error("No file in request");
-        return res.status(400).json({ success: false, message: "No file uploaded" });
-      }
 
-      const timestamp = Date.now();
-      const sanitized = file.originalname.replace(/[^a-z0-9.]/gi, '_').toLowerCase();
-      const fileName = `${timestamp}-${sanitized}`;
-      
-      try {
-        fs.writeFileSync(path.join(UPLOADS_DIR, fileName), file.buffer);
-        console.log("File uploaded successfully:", fileName);
-        res.json({ success: true, url: `/uploads/${fileName}` });
-      } catch (fsErr) {
-        console.error("Error saving uploaded image:", fsErr);
-        res.status(500).json({ success: false, message: "Failed to save image" });
-      }
-    });
+  // Catch-all for API routes to prevent falling through to Vite/SPA fallback (which returns HTML)
+  app.all("/api/*", (req, res) => {
+    console.warn(`[API] 404 Not Found: ${req.method} ${req.url}`);
+    res.status(404).json({ success: false, message: `API route not found: ${req.method} ${req.url}` });
   });
 
   // Error handler

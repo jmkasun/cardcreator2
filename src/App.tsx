@@ -431,6 +431,11 @@ export default function App() {
     // We check both the projects state and the currentProjectId
     const existingProject = projects.find(p => p.id === projectId);
     
+    // For the current project, we should use the derived lock status to ensure it's up to date
+    const projectLockStatus = projectId === currentProjectId 
+      ? (projects.find(p => p.id === currentProjectId)?.isLocked || false)
+      : (existingProject?.isLocked || false);
+    
     // If we can't find it in projects, it might have been JUST created
     // So we use a default only if it's truly a new project
     const projectName = existingProject ? existingProject.name : (currentProjectId ? `Project ${new Date().toLocaleDateString()}` : `New Project`);
@@ -442,7 +447,7 @@ export default function App() {
       layers,
       name: projectName,
       createdAt: existingProject?.createdAt || new Date().toISOString(),
-      isLocked: existingProject?.isLocked || false,
+      isLocked: projectLockStatus,
     };
 
     try {
@@ -453,7 +458,16 @@ export default function App() {
       });
       if (res.ok) {
         setCurrentProjectId(projectId);
-        await fetchProjects();
+        lastLoadedLayersRef.current = layers;
+        setProjects(prev => {
+          const exists = prev.find(p => p.id === project.id);
+          if (exists) {
+            return prev.map(p => p.id === project.id ? project : p);
+          }
+          return [project, ...prev];
+        });
+        // We still fetch in background to stay in sync with server (e.g. createdAt/isLocked from DB)
+        fetchProjects(); 
       } else {
         console.error("Failed to save project:", await res.text());
       }
@@ -528,10 +542,28 @@ export default function App() {
         });
         
         if (!uploadRes.ok) {
-          throw new Error(`Failed to upload ${file.name}`);
+          const text = await uploadRes.text();
+          let errorMessage = `Failed to upload ${file.name} (Status: ${uploadRes.status})`;
+          try {
+            const data = JSON.parse(text);
+            if (data.message) errorMessage = data.message;
+          } catch {
+            // If it's not JSON, use the status text or first 100 chars of HTML
+            if (text.includes("<!DOCTYPE") || text.includes("<html")) {
+              errorMessage = `Server returned an error page (HTML) instead of JSON for ${file.name}. This usually means a 404 or a server crash.`;
+            }
+          }
+          throw new Error(errorMessage);
         }
         
-        const { url: imageUrl } = await uploadRes.json();
+        let imageUrl;
+        try {
+          const data = await uploadRes.json();
+          imageUrl = data.url;
+        } catch (jsonErr) {
+          console.error("Failed to parse upload response as JSON", jsonErr);
+          throw new Error(`Server returned non-JSON response for ${file.name}.`);
+        }
         const projectId = Math.random().toString(36).substr(2, 9);
         const fileName = file.name.split('.').slice(0, -1).join('.') || file.name;
         
@@ -947,7 +979,7 @@ export default function App() {
     const updatedLocked = !currentProject.isLocked;
     
     // Optimistic update
-    setProjects(projects.map(p => 
+    setProjects(prev => prev.map(p => 
       p.id === currentProjectId ? { ...p, isLocked: updatedLocked } : p
     ));
 
