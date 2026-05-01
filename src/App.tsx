@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { useDropzone } from "react-dropzone";
-import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check } from "lucide-react";
+import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check, Loader2 } from "lucide-react";
 import { cn } from "@/src/lib/utils";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -54,6 +54,7 @@ export default function App() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [isProjectLoading, setIsProjectLoading] = useState(false);
 
   const [projects, setProjects] = useState<ImageProject[]>([]);
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
@@ -246,6 +247,7 @@ export default function App() {
 
   const fetchProjects = async () => {
     if (!user) return;
+    setIsProjectLoading(true);
     try {
       const res = await fetch(`/api/images?username=${user.username}`);
       const data = await res.json();
@@ -262,6 +264,8 @@ export default function App() {
       }
     } catch (err) {
       console.error("Failed to fetch projects", err);
+    } finally {
+      setIsProjectLoading(false);
     }
   };
 
@@ -490,11 +494,14 @@ export default function App() {
   };
 
   const loadProject = (project: ImageProject) => {
+    setIsProjectLoading(true);
     setCurrentProjectId(project.id);
     setImage(project.imageUrl);
     // Clear text contents when loading as requested
     setLayers(project.layers.map(l => ({ ...l, text: "", name: l.name || l.text })));
     setSelectedLayerId(null);
+    // Set a small timeout to simulate loading if image is already cached
+    setTimeout(() => setIsProjectLoading(false), 500);
   };
 
   const onDrop = async (acceptedFiles: File[]) => {
@@ -1158,6 +1165,17 @@ export default function App() {
           </button>
           
           <div className="flex items-center gap-2 sm:gap-4">
+            {(isProjectLoading || isSaving || loading) && (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.5 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.5 }}
+                className="flex items-center gap-2 px-2 py-1 bg-blue-600/10 border border-blue-500/20 rounded-full text-blue-400"
+              >
+                <Loader2 size={14} className="animate-spin" />
+                <span className="text-[10px] font-bold uppercase tracking-wider hidden sm:inline">Processing...</span>
+              </motion.div>
+            )}
             <div className="flex items-center gap-2 bg-slate-800 rounded-lg px-2 sm:px-3 py-1.5 border border-slate-700/50">
               <button onClick={() => setZoom(Math.max(0.1, zoom - 0.1))} className="hover:text-blue-400 p-1 transition-colors">
                 <Minus size={14} />
@@ -2444,6 +2462,14 @@ export default function App() {
               >
                 <Settings size={20} />
               </button>
+            </div>
+          )}
+          {image && isProjectLoading && (
+            <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm z-[50] flex items-center justify-center">
+              <div className="flex flex-col items-center gap-4">
+                <Loader2 size={48} className="text-blue-500 animate-spin" />
+                <p className="text-white font-medium animate-pulse">Loading Project...</p>
+              </div>
             </div>
           )}
           {!image ? (
