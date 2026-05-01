@@ -1,6 +1,6 @@
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { useDropzone } from "react-dropzone";
-import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check, FileJson } from "lucide-react";
+import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check } from "lucide-react";
 import { cn } from "@/src/lib/utils";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -96,7 +96,6 @@ export default function App() {
 
   const sidebarRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const lastLoadedLayersRef = useRef<TextLayer[]>([]);
   const isDraggingRef = useRef(false);
   const dragStartPos = useRef({ x: 0, y: 0 });
 
@@ -245,28 +244,12 @@ export default function App() {
     }
   };
 
-  const loadProject = useCallback((project: ImageProject) => {
-    setCurrentProjectId(project.id);
-    setImage(project.imageUrl);
-    setLayers(project.layers);
-    lastLoadedLayersRef.current = project.layers;
-    setSelectedLayerId(null);
-  }, []);
-
-  const fetchProjects = useCallback(async () => {
+  const fetchProjects = async () => {
     if (!user) return;
     try {
       const res = await fetch(`/api/images?username=${user.username}`);
       const data = await res.json();
-      
-      // Ensure isLocked is strictly boolean for all projects
-      const normalizedData = data.map((p: any) => ({
-        ...p,
-        isLocked: !!p.isLocked
-      }));
-      
-      console.log(`[Fetch Projects] Fetched ${normalizedData.length} projects. First project isLocked: ${normalizedData[0]?.isLocked}`);
-      setProjects(normalizedData);
+      setProjects(data);
       
       // Auto-select the last edited project
       if (data.length > 0 && !currentProjectId) {
@@ -280,7 +263,7 @@ export default function App() {
     } catch (err) {
       console.error("Failed to fetch projects", err);
     }
-  }, [user, currentProjectId, loadProject]);
+  };
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -430,7 +413,7 @@ export default function App() {
     }
   };
 
-  const saveProject = useCallback(async () => {
+  const saveProject = async () => {
     if (!user || !image) return;
     setIsSaving(true);
     const projectId = currentProjectId || Math.random().toString(36).substr(2, 9);
@@ -438,11 +421,6 @@ export default function App() {
     // Find existing project to preserve its name and createdAt
     // We check both the projects state and the currentProjectId
     const existingProject = projects.find(p => p.id === projectId);
-    
-    // For the current project, we should use the derived lock status to ensure it's up to date
-    const projectLockStatus = projectId === currentProjectId 
-      ? (projects.find(p => p.id === currentProjectId)?.isLocked || false)
-      : (existingProject?.isLocked || false);
     
     // If we can't find it in projects, it might have been JUST created
     // So we use a default only if it's truly a new project
@@ -455,7 +433,7 @@ export default function App() {
       layers,
       name: projectName,
       createdAt: existingProject?.createdAt || new Date().toISOString(),
-      isLocked: projectLockStatus,
+      isLocked: existingProject?.isLocked || false,
     };
 
     try {
@@ -466,16 +444,7 @@ export default function App() {
       });
       if (res.ok) {
         setCurrentProjectId(projectId);
-        lastLoadedLayersRef.current = layers;
-        setProjects(prev => {
-          const exists = prev.find(p => p.id === project.id);
-          if (exists) {
-            return prev.map(p => p.id === project.id ? project : p);
-          }
-          return [project, ...prev];
-        });
-        // We still fetch in background to stay in sync with server (e.g. createdAt/isLocked from DB)
-        fetchProjects(); 
+        await fetchProjects();
       } else {
         console.error("Failed to save project:", await res.text());
       }
@@ -484,7 +453,7 @@ export default function App() {
     } finally {
       setIsSaving(false);
     }
-  }, [user, image, layers, currentProjectId, projects, fetchProjects]);
+  };
 
   const deleteProject = (id: string) => {
     setProjectToDeleteId(id);
@@ -520,6 +489,14 @@ export default function App() {
     }
   };
 
+  const loadProject = (project: ImageProject) => {
+    setCurrentProjectId(project.id);
+    setImage(project.imageUrl);
+    // Clear text contents when loading as requested
+    setLayers(project.layers.map(l => ({ ...l, text: "", name: l.name || l.text })));
+    setSelectedLayerId(null);
+  };
+
   const onDrop = async (acceptedFiles: File[]) => {
     console.log("onDrop triggered with files:", acceptedFiles.map(f => f.name));
     if (!acceptedFiles.length) {
@@ -550,28 +527,10 @@ export default function App() {
         });
         
         if (!uploadRes.ok) {
-          const text = await uploadRes.text();
-          let errorMessage = `Failed to upload ${file.name} (Status: ${uploadRes.status})`;
-          try {
-            const data = JSON.parse(text);
-            if (data.message) errorMessage = data.message;
-          } catch {
-            // If it's not JSON, use the status text or first 100 chars of HTML
-            if (text.includes("<!DOCTYPE") || text.includes("<html")) {
-              errorMessage = `Server returned an error page (HTML) instead of JSON for ${file.name}. This usually means a 404 or a server crash.`;
-            }
-          }
-          throw new Error(errorMessage);
+          throw new Error(`Failed to upload ${file.name}`);
         }
         
-        let imageUrl;
-        try {
-          const data = await uploadRes.json();
-          imageUrl = data.url;
-        } catch (jsonErr) {
-          console.error("Failed to parse upload response as JSON", jsonErr);
-          throw new Error(`Server returned non-JSON response for ${file.name}.`);
-        }
+        const { url: imageUrl } = await uploadRes.json();
         const projectId = Math.random().toString(36).substr(2, 9);
         const fileName = file.name.split('.').slice(0, -1).join('.') || file.name;
         
@@ -582,7 +541,6 @@ export default function App() {
           layers: [],
           name: fileName,
           createdAt: new Date().toISOString(),
-          isLocked: false,
         };
 
         console.log(`Saving project metadata for ${file.name}...`);
@@ -826,71 +784,6 @@ export default function App() {
     if (selectedLayerId === id) setSelectedLayerId(null);
   };
 
-  const exportProject = (project: ImageProject) => {
-    const exportData = {
-      ...project,
-      exportedAt: new Date().toISOString()
-    };
-    const json = JSON.stringify(exportData, null, 2);
-    const blob = new Blob([json], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    
-    const downloadAnchorNode = document.createElement('a');
-    downloadAnchorNode.setAttribute("href", url);
-    downloadAnchorNode.setAttribute("download", `${project.name || 'project'}_export.json`);
-    document.body.appendChild(downloadAnchorNode);
-    downloadAnchorNode.click();
-    downloadAnchorNode.remove();
-    URL.revokeObjectURL(url);
-    setNotification({ message: "Project exported successfully!", type: 'success' });
-  };
-
-  const handleImportProject = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    try {
-      const text = await file.text();
-      const projectData = JSON.parse(text);
-      
-      if (!projectData.imageUrl || !Array.isArray(projectData.layers)) {
-        throw new Error("Invalid project file structure.");
-      }
-
-      const newProjectId = Math.random().toString(36).substr(2, 9);
-      const newProject: ImageProject = {
-        ...projectData,
-        id: newProjectId,
-        username: user?.username || projectData.username,
-        createdAt: new Date().toISOString(),
-        name: `${projectData.name || 'Imported'} (Imported)`,
-        isLocked: false
-      };
-
-      const res = await fetch("/api/images", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(newProject),
-      });
-
-      if (res.ok) {
-        setProjects(prev => [newProject, ...prev]);
-        loadProject(newProject);
-        setNotification({ message: "Project imported successfully!", type: 'success' });
-      } else {
-        const errText = await res.text();
-        throw new Error(errText || "Failed to save imported project to server");
-      }
-    } catch (err) {
-      console.error("Import failed:", err);
-      setNotification({ 
-        message: err instanceof Error ? err.message : "Failed to import project.", 
-        type: 'error' 
-      });
-    }
-    e.target.value = '';
-  };
-
   const drawCanvas = () => {
     const canvas = canvasRef.current;
     if (!canvas || !image) return;
@@ -976,19 +869,14 @@ export default function App() {
 
   // Auto-save effect
   useEffect(() => {
-    if (!user || !image || !currentProjectId) return;
+    if (!user || !image) return;
     
-    // Check if layers actually changed compared to what we last loaded or saved
-    const layersChanged = JSON.stringify(layers) !== JSON.stringify(lastLoadedLayersRef.current);
-    if (!layersChanged) return;
-
     const timer = setTimeout(() => {
       saveProject();
-      lastLoadedLayersRef.current = layers; // Update ref after save
-    }, 2000); // Increased debounce to 2 seconds for stability
+    }, 1000); // Debounce save for 1 second
 
     return () => clearTimeout(timer);
-  }, [layers, image, currentProjectId, saveProject, user]);
+  }, [layers, image]);
 
   const getLayerAtPosition = (mouseX: number, mouseY: number) => {
     const canvas = canvasRef.current;
@@ -1052,7 +940,7 @@ export default function App() {
     const updatedLocked = !currentProject.isLocked;
     
     // Optimistic update
-    setProjects(prev => prev.map(p => 
+    setProjects(projects.map(p => 
       p.id === currentProjectId ? { ...p, isLocked: updatedLocked } : p
     ));
 
@@ -2056,23 +1944,13 @@ export default function App() {
             </div>
 
             {image && (
-              <div className="grid grid-cols-4 gap-2">
+              <div className="grid grid-cols-3 gap-2">
                 <button
                   onClick={downloadImage}
                   className="flex flex-col items-center justify-center gap-1 p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl transition-all border border-slate-700"
                 >
                   <Download size={16} />
                   <span className="text-[10px] font-medium">Save</span>
-                </button>
-                <button
-                  onClick={() => {
-                    const currentProject = projects.find(p => p.id === currentProjectId);
-                    if (currentProject) exportProject(currentProject);
-                  }}
-                  className="flex flex-col items-center justify-center gap-1 p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl transition-all border border-slate-700"
-                >
-                  <FileJson size={16} />
-                  <span className="text-[10px] font-medium">Export</span>
                 </button>
                 <button
                   onClick={shareImage}
@@ -2095,14 +1973,8 @@ export default function App() {
           <div className="flex-1 overflow-y-auto custom-scrollbar">
             {/* Projects Section */}
             <div className="border-b border-slate-800">
-              <div className="p-4 pb-2 flex items-center justify-between">
+              <div className="p-4 pb-2">
                 <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">My Projects</h3>
-                <div className="flex gap-2">
-                  <label className="cursor-pointer p-1 text-slate-400 hover:text-white transition-colors" title="Import Project">
-                    <Upload size={14} />
-                    <input type="file" accept=".json" onChange={handleImportProject} className="hidden" />
-                  </label>
-                </div>
               </div>
               <div className="p-4 pt-0">
                 <div className="grid grid-cols-4 gap-1.5">
@@ -2150,16 +2022,6 @@ export default function App() {
                             title={proj.isLocked ? "Unlock Project" : "Lock Project"}
                           >
                             <Shield size={12} />
-                          </button>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              exportProject(proj);
-                            }}
-                            className="p-1 bg-blue-600/80 hover:bg-blue-600 rounded text-white backdrop-blur-sm shadow-lg transition-colors"
-                            title="Export Project"
-                          >
-                            <FileJson size={12} />
                           </button>
                           <button
                             onClick={(e) => {
@@ -2293,6 +2155,7 @@ export default function App() {
                                 onChange={(e) => updateLayer(layer.id, { text: e.target.value })}
                                 onFocus={() => setSelectedLayerId(layer.id)}
                                 onClick={(e) => e.stopPropagation()}
+                                placeholder="Content"
                                 className="bg-slate-900 border border-slate-700/50 rounded-lg px-2 py-1.5 text-sm w-full outline-none text-inherit focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20"
                                 style={{ fontFamily: `"${layer.fontFamily}"` }}
                               />
