@@ -1127,41 +1127,18 @@ export default function App() {
         </div>
         <div className="flex items-center gap-2 md:gap-4">
           {image && (
-            <div className="flex items-center gap-2">
-              <button
-                onClick={toggleProjectLock}
-                title={projects.find(p => p.id === currentProjectId)?.isLocked ? "Unlock Project" : "Lock Project"}
-                className={cn(
-                  "p-2 rounded-lg border transition-all",
-                  projects.find(p => p.id === currentProjectId)?.isLocked
-                    ? "bg-red-600/20 border-red-500/50 text-red-400 hover:bg-red-600/30"
-                    : "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700"
-                )}
-              >
-                {projects.find(p => p.id === currentProjectId)?.isLocked ? <Shield size={18} /> : <Shield size={18} className="opacity-50" />}
-              </button>
-              <button
-                onClick={shareWhatsApp}
-                title="Share on WhatsApp"
-                className="p-2 bg-green-600/20 hover:bg-green-600/30 text-green-400 rounded-lg transition-all border border-green-600/30"
-              >
-                <MessageCircle size={18} />
-              </button>
-              <button
-                onClick={shareImage}
-                title="Share Image"
-                className="p-2 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 rounded-lg transition-all border border-blue-600/30"
-              >
-                <Share2 size={18} />
-              </button>
-              <button
-                onClick={downloadImage}
-                title="Download Image"
-                className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition-all border border-slate-700"
-              >
-                <Download size={18} />
-              </button>
-            </div>
+            <button
+              onClick={toggleProjectLock}
+              title={projects.find(p => p.id === currentProjectId)?.isLocked ? "Unlock Project" : "Lock Project"}
+              className={cn(
+                "p-2 rounded-lg border transition-all",
+                projects.find(p => p.id === currentProjectId)?.isLocked
+                  ? "bg-red-600/20 border-red-500/50 text-red-400 hover:bg-red-600/30"
+                  : "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700"
+              )}
+            >
+              {projects.find(p => p.id === currentProjectId)?.isLocked ? <Shield size={20} /> : <Shield size={20} className="opacity-50" />}
+            </button>
           )}
           <button 
             onClick={() => setIsPreviewMode(!isPreviewMode)}
@@ -1179,14 +1156,43 @@ export default function App() {
           >
             {showSidebar ? <X size={20} /> : <Menu size={20} />}
           </button>
-          <div className="flex items-center gap-2 bg-slate-800 rounded-lg px-2 sm:px-3 py-1.5">
-            <button onClick={() => setZoom(Math.max(0.1, zoom - 0.1))} className="hover:text-blue-400 p-1">
-              <Minus size={14} />
-            </button>
-            <span className="text-[10px] sm:text-xs font-mono w-8 sm:w-12 text-center">{Math.round(zoom * 100)}%</span>
-            <button onClick={() => setZoom(Math.min(3, zoom + 0.1))} className="hover:text-blue-400 p-1">
-              <Plus size={14} />
-            </button>
+          
+          <div className="flex items-center gap-2 sm:gap-4">
+            <div className="flex items-center gap-2 bg-slate-800 rounded-lg px-2 sm:px-3 py-1.5 border border-slate-700/50">
+              <button onClick={() => setZoom(Math.max(0.1, zoom - 0.1))} className="hover:text-blue-400 p-1 transition-colors">
+                <Minus size={14} />
+              </button>
+              <span className="text-[10px] sm:text-xs font-mono w-8 sm:w-12 text-center text-slate-300">{Math.round(zoom * 100)}%</span>
+              <button onClick={() => setZoom(Math.min(3, zoom + 0.1))} className="hover:text-blue-400 p-1 transition-colors">
+                <Plus size={14} />
+              </button>
+            </div>
+
+            {image && (
+              <div className="hidden sm:flex items-center gap-2 border-l border-slate-800 pl-4">
+                <button
+                  onClick={shareWhatsApp}
+                  title="Share on WhatsApp"
+                  className="p-2 bg-green-600/20 hover:bg-green-600/30 text-green-400 rounded-lg transition-all border border-green-600/30"
+                >
+                  <MessageCircle size={18} />
+                </button>
+                <button
+                  onClick={shareImage}
+                  title="Share Image"
+                  className="p-2 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 rounded-lg transition-all border border-blue-600/30"
+                >
+                  <Share2 size={18} />
+                </button>
+                <button
+                  onClick={downloadImage}
+                  title="Download Image"
+                  className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition-all border border-slate-700"
+                >
+                  <Download size={18} />
+                </button>
+              </div>
+            )}
           </div>
           
           <div className="relative">
@@ -2149,8 +2155,8 @@ export default function App() {
                                 onChange={(e) => updateLayer(layer.id, { text: e.target.value })}
                                 onFocus={() => setSelectedLayerId(layer.id)}
                                 onClick={(e) => e.stopPropagation()}
-                                placeholder="Content"
                                 className="bg-slate-900 border border-slate-700/50 rounded-lg px-2 py-1.5 text-sm w-full outline-none text-inherit focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20"
+                                style={{ fontFamily: `"${layer.fontFamily}"` }}
                               />
                             </div>
                           </div>
