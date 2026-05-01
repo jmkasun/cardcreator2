@@ -45,7 +45,6 @@ interface ImageProject {
   layers: TextLayer[];
   name: string;
   createdAt: string;
-  isLocked?: boolean;
 }
 
 export default function App() {
@@ -433,7 +432,6 @@ export default function App() {
       layers,
       name: projectName,
       createdAt: existingProject?.createdAt || new Date().toISOString(),
-      isLocked: existingProject?.isLocked || false,
     };
 
     try {
@@ -931,42 +929,6 @@ export default function App() {
     }
   };
 
-  const toggleProjectLock = async () => {
-    if (!currentProjectId || !user) return;
-    
-    const currentProject = projects.find(p => p.id === currentProjectId);
-    if (!currentProject) return;
-
-    const updatedLocked = !currentProject.isLocked;
-    
-    // Optimistic update
-    setProjects(projects.map(p => 
-      p.id === currentProjectId ? { ...p, isLocked: updatedLocked } : p
-    ));
-
-    try {
-      const updatedProject = { ...currentProject, isLocked: updatedLocked };
-      const res = await fetch("/api/images", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(updatedProject),
-      });
-      if (!res.ok) {
-        // Rollback
-        setProjects(projects);
-        setNotification({ message: "Failed to update lock status", type: 'error' });
-      } else {
-        setNotification({ 
-          message: updatedLocked ? "Project locked" : "Project unlocked", 
-          type: 'success' 
-        });
-      }
-    } catch (err) {
-      setProjects(projects);
-      console.error("Failed to toggle lock", err);
-    }
-  };
-
   const handleCanvasMouseMove = (e: React.MouseEvent) => {
     const canvas = canvasRef.current;
     if (!canvas || !image) return;
@@ -978,13 +940,6 @@ export default function App() {
     const mouseY = (e.clientY - rect.top) * scaleY;
 
     if (isDraggingRef.current && selectedLayerId) {
-      // Check if project is locked
-      const currentProject = projects.find(p => p.id === currentProjectId);
-      if (currentProject?.isLocked) {
-        canvas.style.cursor = 'not-allowed';
-        return;
-      }
-
       const newX = ((mouseX - dragStartPos.current.x) / canvas.width) * 100;
       const newY = ((mouseY - dragStartPos.current.y) / canvas.height) * 100;
       updateLayer(selectedLayerId, { x: newX, y: newY });
@@ -1096,7 +1051,6 @@ export default function App() {
   }
 
   const selectedLayer = layers.find((l) => l.id === selectedLayerId);
-  const isProjectLocked = projects.find(p => p.id === currentProjectId)?.isLocked || false;
 
   return (
     <div className="h-screen bg-slate-950 text-slate-200 flex flex-col overflow-hidden">
@@ -1127,18 +1081,29 @@ export default function App() {
         </div>
         <div className="flex items-center gap-2 md:gap-4">
           {image && (
-            <button
-              onClick={toggleProjectLock}
-              title={projects.find(p => p.id === currentProjectId)?.isLocked ? "Unlock Project" : "Lock Project"}
-              className={cn(
-                "p-2 rounded-lg border transition-all",
-                projects.find(p => p.id === currentProjectId)?.isLocked
-                  ? "bg-red-600/20 border-red-500/50 text-red-400 hover:bg-red-600/30"
-                  : "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700"
-              )}
-            >
-              {projects.find(p => p.id === currentProjectId)?.isLocked ? <Shield size={20} /> : <Shield size={20} className="opacity-50" />}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={shareWhatsApp}
+                title="Share on WhatsApp"
+                className="p-2 bg-green-600/20 hover:bg-green-600/30 text-green-400 rounded-lg transition-all border border-green-600/30"
+              >
+                <MessageCircle size={18} />
+              </button>
+              <button
+                onClick={shareImage}
+                title="Share Image"
+                className="p-2 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 rounded-lg transition-all border border-blue-600/30"
+              >
+                <Share2 size={18} />
+              </button>
+              <button
+                onClick={downloadImage}
+                title="Download Image"
+                className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition-all border border-slate-700"
+              >
+                <Download size={18} />
+              </button>
+            </div>
           )}
           <button 
             onClick={() => setIsPreviewMode(!isPreviewMode)}
@@ -1156,43 +1121,14 @@ export default function App() {
           >
             {showSidebar ? <X size={20} /> : <Menu size={20} />}
           </button>
-          
-          <div className="flex items-center gap-2 sm:gap-4">
-            <div className="flex items-center gap-2 bg-slate-800 rounded-lg px-2 sm:px-3 py-1.5 border border-slate-700/50">
-              <button onClick={() => setZoom(Math.max(0.1, zoom - 0.1))} className="hover:text-blue-400 p-1 transition-colors">
-                <Minus size={14} />
-              </button>
-              <span className="text-[10px] sm:text-xs font-mono w-8 sm:w-12 text-center text-slate-300">{Math.round(zoom * 100)}%</span>
-              <button onClick={() => setZoom(Math.min(3, zoom + 0.1))} className="hover:text-blue-400 p-1 transition-colors">
-                <Plus size={14} />
-              </button>
-            </div>
-
-            {image && (
-              <div className="hidden sm:flex items-center gap-2 border-l border-slate-800 pl-4">
-                <button
-                  onClick={shareWhatsApp}
-                  title="Share on WhatsApp"
-                  className="p-2 bg-green-600/20 hover:bg-green-600/30 text-green-400 rounded-lg transition-all border border-green-600/30"
-                >
-                  <MessageCircle size={18} />
-                </button>
-                <button
-                  onClick={shareImage}
-                  title="Share Image"
-                  className="p-2 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 rounded-lg transition-all border border-blue-600/30"
-                >
-                  <Share2 size={18} />
-                </button>
-                <button
-                  onClick={downloadImage}
-                  title="Download Image"
-                  className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition-all border border-slate-700"
-                >
-                  <Download size={18} />
-                </button>
-              </div>
-            )}
+          <div className="flex items-center gap-2 bg-slate-800 rounded-lg px-2 sm:px-3 py-1.5">
+            <button onClick={() => setZoom(Math.max(0.1, zoom - 0.1))} className="hover:text-blue-400 p-1">
+              <Minus size={14} />
+            </button>
+            <span className="text-[10px] sm:text-xs font-mono w-8 sm:w-12 text-center">{Math.round(zoom * 100)}%</span>
+            <button onClick={() => setZoom(Math.min(3, zoom + 0.1))} className="hover:text-blue-400 p-1">
+              <Plus size={14} />
+            </button>
           </div>
           
           <div className="relative">
@@ -1992,37 +1928,8 @@ export default function App() {
                       >
                         <img src={proj.imageUrl} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
                         
-                        {/* Lock & Delete Button Overlay */}
-                        <div className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              const toggleProjLock = async () => {
-                                const updatedLocked = !proj.isLocked;
-                                setProjects(projects.map(p => p.id === proj.id ? { ...p, isLocked: updatedLocked } : p));
-                                try {
-                                  await fetch("/api/images", {
-                                    method: "POST",
-                                    headers: { "Content-Type": "application/json" },
-                                    body: JSON.stringify({ ...proj, isLocked: updatedLocked }),
-                                  });
-                                } catch (err) {
-                                  setProjects(projects);
-                                  console.error("Failed to toggle lock from gallery", err);
-                                }
-                              };
-                              toggleProjLock();
-                            }}
-                            className={cn(
-                              "p-1 rounded backdrop-blur-sm shadow-lg transition-colors",
-                              proj.isLocked 
-                                ? "bg-red-600/80 hover:bg-red-600 text-white" 
-                                : "bg-slate-700/80 hover:bg-slate-700 text-slate-300"
-                            )}
-                            title={proj.isLocked ? "Unlock Project" : "Lock Project"}
-                          >
-                            <Shield size={12} />
-                          </button>
+                        {/* Delete Button Overlay */}
+                        <div className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity">
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
@@ -2104,10 +2011,7 @@ export default function App() {
                             <div className="flex items-center justify-between gap-2 overflow-hidden border-b border-slate-700/30 pb-2 mb-1">
                               <div className="flex items-center gap-2 overflow-hidden flex-1">
                                 <Type size={12} className="shrink-0 opacity-50" />
-                                <span 
-                                  className="text-xs truncate text-inherit"
-                                  style={{ fontFamily: `"${layer.fontFamily}"`, fontWeight: layer.isBold ? 'bold' : 'normal' }}
-                                >
+                                <span className="text-[10px] font-bold uppercase tracking-wider truncate text-inherit">
                                   {layer.name}
                                 </span>
                               </div>
@@ -2157,7 +2061,6 @@ export default function App() {
                                 onClick={(e) => e.stopPropagation()}
                                 placeholder="Content"
                                 className="bg-slate-900 border border-slate-700/50 rounded-lg px-2 py-1.5 text-sm w-full outline-none text-inherit focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20"
-                                style={{ fontFamily: `"${layer.fontFamily}"` }}
                               />
                             </div>
                           </div>
@@ -2167,238 +2070,231 @@ export default function App() {
                   )}
                 </div>
               </div>
+
               {selectedLayer && (
                 <div className="pt-4 border-t border-slate-800 space-y-4">
-                  <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Properties</h3>
-                  
-                  <div className={cn("space-y-4", isProjectLocked && "opacity-60 pointer-events-none")}>
-                    <div className="pointer-events-auto">
-                      <label className="text-xs text-slate-500 block mb-1.5">Layer Name</label>
+                <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Properties</h3>
+                <div className="space-y-4">
+                  <div>
+                    <label className="text-xs text-slate-500 block mb-1.5">Layer Name</label>
+                    <input
+                      type="text"
+                      value={selectedLayer.name}
+                      onChange={(e) => updateLayer(selectedLayer.id, { name: e.target.value })}
+                      className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-500 block mb-1.5">Text Content</label>
+                    <textarea
+                      value={selectedLayer.text}
+                      onChange={(e) => updateLayer(selectedLayer.id, { text: e.target.value })}
+                      className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-blue-500 resize-none h-20"
+                    />
+                  </div>
+                  <div>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="text-xs text-slate-500 block">Font Family</label>
+                    </div>
+                    
+                    <div className="relative">
+                      <button 
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const dropdown = document.getElementById('font-dropdown');
+                          if (dropdown) dropdown.classList.toggle('hidden');
+                        }}
+                        className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-left flex justify-between items-center hover:border-slate-600 transition-all outline-none focus:ring-1 focus:ring-blue-500"
+                      >
+                        <span className="truncate">{selectedLayer.fontFamily}</span>
+                        <Plus size={14} className="rotate-45 opacity-50" />
+                      </button>
+                      
+                      <div 
+                        id="font-dropdown"
+                        className="hidden absolute z-[100] w-full mt-1 bg-slate-900 border border-slate-700 rounded-lg shadow-2xl max-h-64 overflow-y-auto"
+                      >
+                        <div 
+                          className="px-3 py-2.5 hover:bg-blue-600/20 cursor-pointer border-b border-slate-800/50 transition-colors"
+                          onClick={() => {
+                            updateLayer(selectedLayer.id, { fontFamily: 'sans-serif' });
+                            document.getElementById('font-dropdown')?.classList.add('hidden');
+                          }}
+                        >
+                          <span className="font-sans text-xs text-slate-400 block mb-1 uppercase tracking-tighter">System Sans</span>
+                          <span className="font-sans text-lg">The quick brown fox</span>
+                        </div>
+                        {(() => {
+                          const userSelected = (user?.selectedFonts && user.selectedFonts.length > 0)
+                            ? user.selectedFonts.map(name => fonts.find(f => f.name === name)).filter(Boolean) as Font[]
+                            : fonts;
+                          const finalFonts = userSelected.length > 0 ? userSelected : fonts;
+                          return finalFonts.map((f, index) => (
+                            <div 
+                              key={`${f.name}-${index}`}
+                              className="px-3 py-2.5 hover:bg-blue-600/20 cursor-pointer border-b border-slate-800/50 transition-colors group/font"
+                              onClick={() => {
+                                updateLayer(selectedLayer.id, { fontFamily: f.name });
+                                document.getElementById('font-dropdown')?.classList.add('hidden');
+                              }}
+                            >
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="font-sans text-xs text-slate-400 block uppercase tracking-tighter">{f.name.split('-').slice(1).join('-') || f.name}</span>
+                              </div>
+                              <span style={{ fontFamily: f.name }} className="text-lg">
+                                The quick brown fox
+                              </span>
+                            </div>
+                          ));
+                        })()}
+                      </div>
+                    </div>
+
+                    {isFontLoading && (
+                      <div className="mt-2 flex items-center gap-2 text-[10px] text-blue-400">
+                        <div className="w-2 h-2 border border-blue-400 border-t-transparent rounded-full animate-spin"></div>
+                        <span>Uploading font...</span>
+                      </div>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-xs text-slate-500 block mb-1.5">Size</label>
                       <input
-                        type="text"
-                        value={selectedLayer.name}
-                        disabled={isProjectLocked}
-                        onChange={(e) => updateLayer(selectedLayer.id, { name: e.target.value })}
-                        className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-blue-500 disabled:cursor-not-allowed"
-                        style={{ fontFamily: `"${selectedLayer.fontFamily}"` }}
+                        type="number"
+                        value={selectedLayer.fontSize}
+                        onChange={(e) => updateLayer(selectedLayer.id, { fontSize: parseInt(e.target.value) })}
+                        className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-blue-500"
                       />
                     </div>
-                    <div className="pointer-events-auto">
-                      <label className="text-xs text-slate-500 block mb-1.5">Text Content</label>
-                      <textarea
-                        value={selectedLayer.text}
-                        onChange={(e) => updateLayer(selectedLayer.id, { text: e.target.value })}
-                        className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-blue-500 resize-none h-20"
-                        style={{ fontFamily: `"${selectedLayer.fontFamily}"` }}
+                    <div>
+                      <label className="text-xs text-slate-500 block mb-1.5">Color</label>
+                      <input
+                        type="color"
+                        value={selectedLayer.color}
+                        onChange={(e) => updateLayer(selectedLayer.id, { color: e.target.value })}
+                        className="w-full h-9 bg-slate-800 border border-slate-700 rounded-lg px-1 py-1 outline-none cursor-pointer"
                       />
                     </div>
                   </div>
-                  
-                  <div className={cn("space-y-4", isProjectLocked && "opacity-60 pointer-events-none")}>
-                    <div>
-                      <div className="flex items-center justify-between mb-1.5">
-                        <label className="text-xs text-slate-500 block">Font Family</label>
-                      </div>
-                      
-                      <div className="relative">
-                        <button 
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            const dropdown = document.getElementById('font-dropdown');
-                            if (dropdown) dropdown.classList.toggle('hidden');
-                          }}
-                          className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-left flex justify-between items-center hover:border-slate-600 transition-all outline-none focus:ring-1 focus:ring-blue-500"
-                        >
-                          <span className="truncate">{selectedLayer.fontFamily}</span>
-                          <Plus size={14} className="rotate-45 opacity-50" />
-                        </button>
-                        
-                        <div 
-                          id="font-dropdown"
-                          className="hidden absolute z-[100] w-full mt-1 bg-slate-900 border border-slate-700 rounded-lg shadow-2xl max-h-64 overflow-y-auto"
-                        >
-                          <div 
-                            className="px-3 py-2.5 hover:bg-blue-600/20 cursor-pointer border-b border-slate-800/50 transition-colors"
-                            onClick={() => {
-                              updateLayer(selectedLayer.id, { fontFamily: 'sans-serif' });
-                              document.getElementById('font-dropdown')?.classList.add('hidden');
-                            }}
-                          >
-                            <span className="font-sans text-xs text-slate-400 block mb-1 uppercase tracking-tighter">System Sans</span>
-                            <span className="font-sans text-lg">The quick brown fox</span>
-                          </div>
-                          {(() => {
-                            const userSelected = (user?.selectedFonts && user.selectedFonts.length > 0)
-                              ? user.selectedFonts.map(name => fonts.find(f => f.name === name)).filter(Boolean) as Font[]
-                              : fonts;
-                            const finalFonts = userSelected.length > 0 ? userSelected : fonts;
-                            return finalFonts.map((f, index) => (
-                              <div 
-                                key={`${f.name}-${index}`}
-                                className="px-3 py-2.5 hover:bg-blue-600/20 cursor-pointer border-b border-slate-800/50 transition-colors group/font"
-                                onClick={() => {
-                                  updateLayer(selectedLayer.id, { fontFamily: f.name });
-                                  document.getElementById('font-dropdown')?.classList.add('hidden');
-                                }}
-                              >
-                                <div className="flex items-center justify-between mb-1">
-                                  <span className="font-sans text-xs text-slate-400 block uppercase tracking-tighter">{f.name.split('-').slice(1).join('-') || f.name}</span>
-                                </div>
-                                <span style={{ fontFamily: f.name }} className="text-lg">
-                                  The quick brown fox
-                                </span>
-                              </div>
-                            ));
-                          })()}
-                        </div>
-                      </div>
 
-                      {isFontLoading && (
-                        <div className="mt-2 flex items-center gap-2 text-[10px] text-blue-400">
-                          <div className="w-2 h-2 border border-blue-400 border-t-transparent rounded-full animate-spin"></div>
-                          <span>Uploading font...</span>
-                        </div>
-                      )}
+                  <div>
+                    <label className="text-xs text-slate-500 block mb-1.5">Font Style</label>
+                    <div className="flex bg-slate-800 border border-slate-700 rounded-lg p-1 gap-1">
+                      <button
+                        onClick={() => updateLayer(selectedLayer.id, { isBold: !selectedLayer.isBold })}
+                        className={cn(
+                          "flex-1 py-1.5 rounded-md flex items-center justify-center transition-all",
+                          selectedLayer.isBold 
+                            ? "bg-blue-600 text-white shadow-lg shadow-blue-900/20" 
+                            : "text-slate-400 hover:text-slate-200 hover:bg-slate-700"
+                        )}
+                        title="Bold"
+                      >
+                        <Bold size={16} />
+                      </button>
+                      <button
+                        onClick={() => updateLayer(selectedLayer.id, { isItalic: !selectedLayer.isItalic })}
+                        className={cn(
+                          "flex-1 py-1.5 rounded-md flex items-center justify-center transition-all",
+                          selectedLayer.isItalic 
+                            ? "bg-blue-600 text-white shadow-lg shadow-blue-900/20" 
+                            : "text-slate-400 hover:text-slate-200 hover:bg-slate-700"
+                        )}
+                        title="Italic"
+                      >
+                        <Italic size={16} />
+                      </button>
+                      <button
+                        onClick={() => updateLayer(selectedLayer.id, { isUnderline: !selectedLayer.isUnderline })}
+                        className={cn(
+                          "flex-1 py-1.5 rounded-md flex items-center justify-center transition-all",
+                          selectedLayer.isUnderline 
+                            ? "bg-blue-600 text-white shadow-lg shadow-blue-900/20" 
+                            : "text-slate-400 hover:text-slate-200 hover:bg-slate-700"
+                        )}
+                        title="Underline"
+                      >
+                        <Underline size={16} />
+                      </button>
                     </div>
+                  </div>
 
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="text-xs text-slate-500 block mb-1.5">Size</label>
-                        <input
-                          type="number"
-                          value={selectedLayer.fontSize}
-                          onChange={(e) => updateLayer(selectedLayer.id, { fontSize: parseInt(e.target.value) })}
-                          className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-blue-500"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-xs text-slate-500 block mb-1.5">Color</label>
-                        <input
-                          type="color"
-                          value={selectedLayer.color}
-                          onChange={(e) => updateLayer(selectedLayer.id, { color: e.target.value })}
-                          className="w-full h-9 bg-slate-800 border border-slate-700 rounded-lg px-1 py-1 outline-none cursor-pointer"
-                        />
-                      </div>
-                    </div>
-
-                    <div>
-                      <label className="text-xs text-slate-500 block mb-1.5">Font Style</label>
-                      <div className="flex bg-slate-800 border border-slate-700 rounded-lg p-1 gap-1">
+                  <div>
+                    <label className="text-xs text-slate-500 block mb-1.5">Alignment</label>
+                    <div className="flex bg-slate-800 border border-slate-700 rounded-lg p-1 gap-1">
+                      {(['left', 'center', 'right'] as const).map((align) => (
                         <button
-                          onClick={() => updateLayer(selectedLayer.id, { isBold: !selectedLayer.isBold })}
+                          key={align}
+                          onClick={() => updateLayer(selectedLayer.id, { textAlign: align })}
                           className={cn(
                             "flex-1 py-1.5 rounded-md flex items-center justify-center transition-all",
-                            selectedLayer.isBold 
+                            selectedLayer.textAlign === align 
                               ? "bg-blue-600 text-white shadow-lg shadow-blue-900/20" 
                               : "text-slate-400 hover:text-slate-200 hover:bg-slate-700"
                           )}
-                          title="Bold"
                         >
-                          <Bold size={16} />
+                          {align === 'left' && <AlignLeft size={16} />}
+                          {align === 'center' && <AlignCenter size={16} />}
+                          {align === 'right' && <AlignRight size={16} />}
                         </button>
-                        <button
-                          onClick={() => updateLayer(selectedLayer.id, { isItalic: !selectedLayer.isItalic })}
-                          className={cn(
-                            "flex-1 py-1.5 rounded-md flex items-center justify-center transition-all",
-                            selectedLayer.isItalic 
-                              ? "bg-blue-600 text-white shadow-lg shadow-blue-900/20" 
-                              : "text-slate-400 hover:text-slate-200 hover:bg-slate-700"
-                          )}
-                          title="Italic"
-                        >
-                          <Italic size={16} />
-                        </button>
-                        <button
-                          onClick={() => updateLayer(selectedLayer.id, { isUnderline: !selectedLayer.isUnderline })}
-                          className={cn(
-                            "flex-1 py-1.5 rounded-md flex items-center justify-center transition-all",
-                            selectedLayer.isUnderline 
-                              ? "bg-blue-600 text-white shadow-lg shadow-blue-900/20" 
-                              : "text-slate-400 hover:text-slate-200 hover:bg-slate-700"
-                          )}
-                          title="Underline"
-                        >
-                          <Underline size={16} />
-                        </button>
-                      </div>
+                      ))}
                     </div>
+                  </div>
 
-                    <div>
-                      <label className="text-xs text-slate-500 block mb-1.5">Alignment</label>
-                      <div className="flex bg-slate-800 border border-slate-700 rounded-lg p-1 gap-1">
-                        {(['left', 'center', 'right'] as const).map((align) => (
-                          <button
-                            key={align}
-                            onClick={() => updateLayer(selectedLayer.id, { textAlign: align })}
-                            className={cn(
-                              "flex-1 py-1.5 rounded-md flex items-center justify-center transition-all",
-                              selectedLayer.textAlign === align 
-                                ? "bg-blue-600 text-white shadow-lg shadow-blue-900/20" 
-                                : "text-slate-400 hover:text-slate-200 hover:bg-slate-700"
-                            )}
-                          >
-                            {align === 'left' && <AlignLeft size={16} />}
-                            {align === 'center' && <AlignCenter size={16} />}
-                            {align === 'right' && <AlignRight size={16} />}
-                          </button>
-                        ))}
-                      </div>
+                  <div className="space-y-3 pt-2 border-t border-slate-800/50">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs text-slate-500">Stroke Width</label>
+                      <span className="text-[10px] text-slate-400">{selectedLayer.strokeWidth}px</span>
                     </div>
-
-                    <div className="space-y-3 pt-2 border-t border-slate-800/50">
-                      <div className="flex items-center justify-between">
-                        <label className="text-xs text-slate-500">Stroke Width</label>
-                        <span className="text-[10px] text-slate-400">{selectedLayer.strokeWidth}px</span>
-                      </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="20"
+                      value={selectedLayer.strokeWidth}
+                      onChange={(e) => updateLayer(selectedLayer.id, { strokeWidth: parseInt(e.target.value) })}
+                      className="w-full"
+                    />
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs text-slate-500">Stroke Color</label>
                       <input
-                        type="range"
-                        min="0"
-                        max="20"
-                        value={selectedLayer.strokeWidth}
-                        onChange={(e) => updateLayer(selectedLayer.id, { strokeWidth: parseInt(e.target.value) })}
-                        className="w-full"
+                        type="color"
+                        value={selectedLayer.strokeColor}
+                        onChange={(e) => updateLayer(selectedLayer.id, { strokeColor: e.target.value })}
+                        className="w-8 h-8 bg-slate-800 border border-slate-700 rounded-lg px-1 py-1 outline-none cursor-pointer"
                       />
-                      <div className="flex items-center justify-between">
-                        <label className="text-xs text-slate-500">Stroke Color</label>
-                        <input
-                          type="color"
-                          value={selectedLayer.strokeColor}
-                          onChange={(e) => updateLayer(selectedLayer.id, { strokeColor: e.target.value })}
-                          className="w-8 h-8 bg-slate-800 border border-slate-700 rounded-lg px-1 py-1 outline-none cursor-pointer"
-                        />
-                      </div>
                     </div>
+                  </div>
 
-                    <div className="space-y-3 pt-2 border-t border-slate-800/50">
-                      <div className="flex items-center justify-between">
-                        <label className="text-xs text-slate-500">Shadow Blur</label>
-                        <span className="text-[10px] text-slate-400">{selectedLayer.shadowBlur}px</span>
-                      </div>
+                  <div className="space-y-3 pt-2 border-t border-slate-800/50">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs text-slate-500">Shadow Blur</label>
+                      <span className="text-[10px] text-slate-400">{selectedLayer.shadowBlur}px</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="50"
+                      value={selectedLayer.shadowBlur}
+                      onChange={(e) => updateLayer(selectedLayer.id, { shadowBlur: parseInt(e.target.value) })}
+                      className="w-full"
+                    />
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs text-slate-500">Shadow Color</label>
                       <input
-                        type="range"
-                        min="0"
-                        max="50"
-                        value={selectedLayer.shadowBlur}
-                        onChange={(e) => updateLayer(selectedLayer.id, { shadowBlur: parseInt(e.target.value) })}
-                        className="w-full"
+                        type="color"
+                        value={selectedLayer.shadowColor}
+                        onChange={(e) => updateLayer(selectedLayer.id, { shadowColor: e.target.value })}
+                        className="w-8 h-8 bg-slate-800 border border-slate-700 rounded-lg px-1 py-1 outline-none cursor-pointer"
                       />
-                      <div className="flex items-center justify-between">
-                        <label className="text-xs text-slate-500">Shadow Color</label>
-                        <input
-                          type="color"
-                          value={selectedLayer.shadowColor}
-                          onChange={(e) => updateLayer(selectedLayer.id, { shadowColor: e.target.value })}
-                          className="w-8 h-8 bg-slate-800 border border-slate-700 rounded-lg px-1 py-1 outline-none cursor-pointer"
-                        />
-                      </div>
                     </div>
                   </div>
                 </div>
-              )}
-            </div>
+              </div>
+            )}
           </div>
-        </aside>
+        </div>
+      </aside>
 
         {/* Main Editor Area */}
         <main className={cn(

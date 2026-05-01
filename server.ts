@@ -109,10 +109,6 @@ async function initDb() {
       await client.query(`
         ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
       `);
-
-      await client.query(`
-        ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS is_locked BOOLEAN DEFAULT FALSE;
-      `);
       
       await client.query(`
         CREATE TABLE IF NOT EXISTS custom_fonts (
@@ -613,7 +609,7 @@ async function startServer() {
       }
 
       if (HAS_POSTGRES) {
-        const query = "SELECT id, username, image_url as \"imageUrl\", layers, name, created_at as \"createdAt\", is_locked as \"isLocked\" FROM font_app_images WHERE username = $1";
+        const query = "SELECT id, username, image_url as \"imageUrl\", layers, name, created_at as \"createdAt\" FROM font_app_images WHERE username = $1";
         const result = await pool.query(query, [username]);
         return res.json(result.rows);
       }
@@ -626,19 +622,18 @@ async function startServer() {
 
   app.post("/api/images", async (req, res) => {
     try {
-      const { id, username, imageUrl, layers, name, isLocked } = req.body;
+      const { id, username, imageUrl, layers, name } = req.body;
       
       if (HAS_POSTGRES) {
         await pool.query(
-          `INSERT INTO font_app_images (id, username, image_url, layers, name, is_locked)
-           VALUES ($1, $2, $3, $4, $5, $6)
+          `INSERT INTO font_app_images (id, username, image_url, layers, name)
+           VALUES ($1, $2, $3, $4, $5)
            ON CONFLICT (id) DO UPDATE SET
            username = EXCLUDED.username,
            image_url = EXCLUDED.image_url,
            layers = EXCLUDED.layers,
-           name = EXCLUDED.name,
-           is_locked = EXCLUDED.is_locked`,
-          [id, username, imageUrl, JSON.stringify(layers), name, isLocked || false]
+           name = EXCLUDED.name`,
+          [id, username, imageUrl, JSON.stringify(layers), name]
         );
       }
       
