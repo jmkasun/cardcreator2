@@ -230,7 +230,7 @@ export default function App() {
           const loadedFace = await fontFace.load();
           document.fonts.add(loadedFace);
         } catch (e) {
-          if (fontFamily !== "apex_apura_044" && fontFamily !== "somi_dusantha") {
+          if (fontFamily !== "apex_apura_044") {
             console.error(`Failed to load font: "${fontFamily}" from ${font.url}`, e);
           }
         }
@@ -459,28 +459,17 @@ export default function App() {
 
   const confirmDeleteProject = async () => {
     if (!projectToDeleteId) return;
-    
-    // Optimistic update
-    const previousProjects = [...projects];
-    setProjects(projects.filter(p => p.id !== projectToDeleteId));
-    
-    // If we're deleting the active project, clear it
-    if (currentProjectId === projectToDeleteId) {
-      setCurrentProjectId(null);
-      setImage(null);
-      setLayers([]);
-    }
-
     try {
       const res = await fetch(`/api/images/${projectToDeleteId}`, { method: "DELETE" });
-      if (!res.ok) {
-        // Rollback if failed
-        setProjects(previousProjects);
-        setNotification({ message: "Failed to delete project", type: 'error' });
+      if (res.ok) {
+        if (currentProjectId === projectToDeleteId) {
+          setCurrentProjectId(null);
+          setImage(null);
+          setLayers([]);
+        }
+        await fetchProjects();
       }
     } catch (err) {
-      // Rollback if failed
-      setProjects(previousProjects);
       console.error("Failed to delete project", err);
     } finally {
       setProjectToDeleteId(null);
@@ -510,38 +499,31 @@ export default function App() {
 
     setLoading(true); // Show loading state during upload
     try {
-      const newProjects: ImageProject[] = [];
-      
       for (const file of acceptedFiles) {
-        console.log(`Uploading image: ${file.name} (${file.size} bytes)`);
+        console.log(`Processing image: ${file.name} (${file.size} bytes)`);
         
-        // 1. Upload file to server
-        const formData = new FormData();
-        formData.append("image", file);
-        
-        const uploadRes = await fetch("/api/upload-image", {
-          method: "POST",
-          body: formData,
+        // Convert to base64
+        const reader = new FileReader();
+        const base64Promise = new Promise<string>((resolve, reject) => {
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = (e) => reject(e);
+          reader.readAsDataURL(file);
         });
         
-        if (!uploadRes.ok) {
-          throw new Error(`Failed to upload ${file.name}`);
-        }
-        
-        const { url: imageUrl } = await uploadRes.json();
+        const base64 = await base64Promise;
         const projectId = Math.random().toString(36).substr(2, 9);
         const fileName = file.name.split('.').slice(0, -1).join('.') || file.name;
         
         const project: ImageProject = {
           id: projectId,
           username: user.username,
-          imageUrl: imageUrl, // Use the server URL
+          imageUrl: base64,
           layers: [],
           name: fileName,
           createdAt: new Date().toISOString(),
         };
 
-        console.log(`Saving project metadata for ${file.name}...`);
+        console.log(`Saving project with base64 image for ${file.name}...`);
         const saveRes = await fetch("/api/images", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -549,24 +531,23 @@ export default function App() {
         });
         
         if (!saveRes.ok) {
-          throw new Error(`Failed to save metadata for ${file.name}`);
+          console.error(`Failed to save project for ${file.name}`);
+          throw new Error(`Failed to save project for ${file.name}`);
+        } else {
+          console.log(`Project saved successfully for ${file.name}`);
         }
-
-        newProjects.push(project);
         
         // If it's the last one, load it
         if (file === acceptedFiles[acceptedFiles.length - 1]) {
           console.log(`Loading last uploaded image: ${file.name}`);
-          setImage(imageUrl);
+          setImage(base64);
           setLayers([]);
           setCurrentProjectId(projectId);
           setSelectedLayerId(null);
+          // We update projects state locally to avoid the race condition with auto-save
+          setProjects(prev => [project, ...prev]);
         }
       }
-      
-      // Update projects state with all new projects at once
-      setProjects(prev => [...newProjects, ...prev]);
-      
     } catch (err) {
       console.error("Critical upload error:", err);
       setNotification({ message: err instanceof Error ? err.message : "An error occurred during processing.", type: 'error' });
@@ -659,28 +640,17 @@ export default function App() {
   const updatePreferences = async (preferences: Partial<User> | string[]) => {
     if (!user) return;
     const payload = Array.isArray(preferences) ? { selectedFonts: preferences } : preferences;
-    
-    // Save current user for fallback
-    const previousUser = { ...user };
-    
-    // Optimistic update
-    setUser({ ...user, ...payload });
-
     try {
       const res = await fetch("/api/user/preferences", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username: user.username, ...payload }),
       });
-      if (!res.ok) {
-        // Fallback if request failed
-        setUser(previousUser);
-        console.error("Failed to update preferences: server returned error");
+      if (res.ok) {
+        setUser({ ...user, ...payload });
       }
     } catch (err) {
-      // Fallback if request failed
-      setUser(previousUser);
-      console.error("Failed to update preferences:", err);
+      console.error("Failed to update preferences", err);
     }
   };
 
