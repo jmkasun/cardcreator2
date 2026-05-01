@@ -96,6 +96,7 @@ export default function App() {
 
   const sidebarRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const lastLoadedLayersRef = useRef<TextLayer[]>([]);
   const isDraggingRef = useRef(false);
   const dragStartPos = useRef({ x: 0, y: 0 });
 
@@ -247,8 +248,8 @@ export default function App() {
   const loadProject = useCallback((project: ImageProject) => {
     setCurrentProjectId(project.id);
     setImage(project.imageUrl);
-    // Clear text contents when loading as requested
-    setLayers(project.layers.map(l => ({ ...l, text: "", name: l.name || l.text })));
+    setLayers(project.layers);
+    lastLoadedLayersRef.current = project.layers;
     setSelectedLayerId(null);
   }, []);
 
@@ -870,14 +871,19 @@ export default function App() {
 
   // Auto-save effect
   useEffect(() => {
-    if (!user || !image) return;
+    if (!user || !image || !currentProjectId) return;
     
+    // Check if layers actually changed compared to what we last loaded or saved
+    const layersChanged = JSON.stringify(layers) !== JSON.stringify(lastLoadedLayersRef.current);
+    if (!layersChanged) return;
+
     const timer = setTimeout(() => {
       saveProject();
-    }, 1000); // Debounce save for 1 second
+      lastLoadedLayersRef.current = layers; // Update ref after save
+    }, 2000); // Increased debounce to 2 seconds for stability
 
     return () => clearTimeout(timer);
-  }, [layers, image, saveProject]);
+  }, [layers, image, currentProjectId, saveProject, user]);
 
   const getLayerAtPosition = (mouseX: number, mouseY: number) => {
     const canvas = canvasRef.current;
