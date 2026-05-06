@@ -32,22 +32,8 @@ const PROJECT_FONTS_DIR = [
 
 const WRITABLE_FONTS_DIR = path.resolve(STORAGE_BASE, "public", "fonts");
 
-console.log(`__dirname: ${__dirname}`);
-console.log(`process.cwd(): ${process.cwd()}`);
-console.log(`Resolved PROJECT_FONTS_DIR: ${PROJECT_FONTS_DIR} (exists: ${fs.existsSync(PROJECT_FONTS_DIR)})`);
-if (fs.existsSync(PROJECT_FONTS_DIR)) {
-  console.log(`Files in PROJECT_FONTS_DIR: ${fs.readdirSync(PROJECT_FONTS_DIR).join(", ")}`);
-}
-
 // Database setup
 const HAS_POSTGRES = !!process.env.DATABASE_URL;
-
-if (HAS_POSTGRES) {
-  const sanitizedUrl = process.env.DATABASE_URL!.replace(/:[^:@/]+@/, ':****@');
-  console.log(`Postgres Database URL found: ${sanitizedUrl}`);
-} else {
-  console.log("No remote database configured, falling back to data.json");
-}
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL?.split('?')[0],
@@ -83,17 +69,30 @@ async function initDb() {
     try {
       console.log("Initializing Postgres database...");
       client = await pool.connect();
+      
       await client.query(`
         CREATE TABLE IF NOT EXISTS users (
           username TEXT PRIMARY KEY,
           password TEXT NOT NULL,
           role TEXT NOT NULL DEFAULT 'user',
-          selected_fonts TEXT[] DEFAULT '{}'
+          selected_fonts TEXT[] DEFAULT '{}',
+          default_font TEXT,
+          default_font_size INTEGER,
+          default_font_color TEXT
         );
       `);
       
       await client.query(`
         ALTER TABLE users ADD COLUMN IF NOT EXISTS selected_fonts TEXT[] DEFAULT '{}';
+      `);
+      await client.query(`
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS default_font TEXT;
+      `);
+      await client.query(`
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS default_font_size INTEGER;
+      `);
+      await client.query(`
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS default_font_color TEXT;
       `);
 
       await client.query(`
@@ -103,10 +102,15 @@ async function initDb() {
           image_url TEXT NOT NULL,
           layers JSONB NOT NULL,
           name TEXT NOT NULL,
+          is_locked BOOLEAN DEFAULT FALSE,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
       `);
 
+      await client.query(`
+        ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS is_locked BOOLEAN DEFAULT FALSE;
+      `);
+      
       await client.query(`
         ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
       `);
@@ -185,12 +189,11 @@ app.get("/api/health", async (req, res) => {
   });
 });
 
-// Explicit font serving route for Vercel/Netlify - MUST BE BEFORE express.static
+// Explicit font serving route for Vercel/Netlify
 app.get("/fonts/:name", async (req, res) => {
   const { name } = req.params;
   const ext = path.extname(name).toLowerCase();
   
-  // Set correct MIME type
   if (ext === ".otf") res.setHeader("Content-Type", "font/otf");
   else if (ext === ".woff") res.setHeader("Content-Type", "font/woff");
   else if (ext === ".woff2") res.setHeader("Content-Type", "font/woff2");
@@ -204,27 +207,19 @@ app.get("/fonts/:name", async (req, res) => {
   const fallbackPath = path.join(process.cwd(), "api", "webfonts", name);
   
   if (fs.existsSync(projectPath)) {
-    console.log(`Serving project font: ${projectPath}`);
-    const buffer = fs.readFileSync(projectPath);
-    return res.send(buffer);
+    return res.send(fs.readFileSync(projectPath));
   }
   if (fs.existsSync(writablePath)) {
-    console.log(`Serving writable font: ${writablePath}`);
-    const buffer = fs.readFileSync(writablePath);
-    return res.send(buffer);
+    return res.send(fs.readFileSync(writablePath));
   }
   if (fs.existsSync(fallbackPath)) {
-    console.log(`Serving fallback font: ${fallbackPath}`);
-    const buffer = fs.readFileSync(fallbackPath);
-    return res.send(buffer);
+    return res.send(fs.readFileSync(fallbackPath));
   }
 
-  // Try database if not found in files
   if (HAS_POSTGRES) {
     try {
       const result = await pool.query("SELECT data FROM custom_fonts WHERE name = $1", [name]);
       if (result.rowCount && result.rowCount > 0) {
-        console.log(`Serving font from database: ${name}`);
         return res.send(result.rows[0].data);
       }
     } catch (err) {
@@ -232,8 +227,6 @@ app.get("/fonts/:name", async (req, res) => {
     }
   }
   
-  console.error(`Font not found: ${name}. Checked: ${projectPath}, ${writablePath}, ${fallbackPath}`);
-  res.type("text/plain");
   res.status(404).send("Font not found");
 });
 
@@ -244,57 +237,46 @@ app.use("/fonts", express.static(WRITABLE_FONTS_DIR));
 app.post("/api/login", async (req, res) => {
   try {
     const { username, password } = req.body;
-    console.log(`Login attempt for user: ${username}`);
     
     if (HAS_POSTGRES) {
-      console.log("Using Postgres for login");
       await initDb();
-      if (dbInitError) {
-        throw new Error(`Database init failed: ${dbInitError}`);
-      }
       const result = await pool.query(
-        "SELECT username, role, selected_fonts as \"selectedFonts\" FROM users WHERE username = $1 AND password = $2",
+        "SELECT username, role, selected_fonts as \"selectedFonts\", default_font as \"defaultFont\", default_font_size as \"defaultFontSize\", default_font_color as \"defaultFontColor\" FROM users WHERE username = $1 AND password = $2",
         [username, password]
       );
       
       if (result.rowCount && result.rowCount > 0) {
         const user = result.rows[0];
-        console.log(`Login successful for user: ${username}`);
         return res.json({ 
           success: true, 
           username: user.username, 
           role: user.role,
-          selectedFonts: user.selectedFonts || []
+          selectedFonts: user.selectedFonts || [],
+          defaultFont: user.defaultFont,
+          defaultFontSize: user.defaultFontSize,
+          defaultFontColor: user.defaultFontColor
         });
       }
     } else {
-      console.log("Using data.json for login");
-      if (!fs.existsSync(DATA_FILE)) {
-        throw new Error(`Data file not found at ${DATA_FILE}`);
-      }
       const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
       const user = data.users.find((u: any) => u.username === username && u.password === password);
       if (user) {
-        console.log(`Login successful for user: ${username} (data.json)`);
         return res.json({ 
           success: true, 
           username: user.username, 
           role: user.role || (user.username === 'admin' ? 'admin' : 'user'),
-          selectedFonts: user.selectedFonts || []
+          selectedFonts: user.selectedFonts || [],
+          defaultFont: user.defaultFont,
+          defaultFontSize: user.defaultFontSize,
+          defaultFontColor: user.defaultFontColor
         });
-      } else {
-        console.log(`Login failed for user: ${username} (data.json) - Invalid credentials`);
       }
     }
     
     res.status(401).json({ success: false, message: "Invalid credentials" });
   } catch (err) {
     console.error("Login error:", err);
-    res.status(500).json({ 
-      success: false, 
-      message: "Internal server error",
-      details: err instanceof Error ? err.message : String(err)
-    });
+    res.status(500).json({ success: false, message: "Internal server error" });
   }
 });
 
@@ -454,17 +436,37 @@ app.post("/api/change-password", async (req, res) => {
 
 app.post("/api/user/preferences", async (req, res) => {
   try {
-    const { username, selectedFonts } = req.body;
+    const { username, selectedFonts, defaultFont, defaultFontSize, defaultFontColor } = req.body;
     
     if (process.env.DATABASE_URL) {
       await initDb();
-      const result = await pool.query(
-        "UPDATE users SET selected_fonts = $1 WHERE username = $2",
-        [selectedFonts, username]
-      );
       
-      if (result.rowCount === 0) {
-        return res.status(404).json({ success: false, message: "User not found" });
+      let query = "UPDATE users SET ";
+      const updates = [];
+      const params = [];
+      let paramIndex = 1;
+
+      if (selectedFonts !== undefined) {
+        updates.push(`selected_fonts = $${paramIndex++}`);
+        params.push(selectedFonts);
+      }
+      if (defaultFont !== undefined) {
+        updates.push(`default_font = $${paramIndex++}`);
+        params.push(defaultFont);
+      }
+      if (defaultFontSize !== undefined) {
+        updates.push(`default_font_size = $${paramIndex++}`);
+        params.push(defaultFontSize);
+      }
+      if (defaultFontColor !== undefined) {
+        updates.push(`default_font_color = $${paramIndex++}`);
+        params.push(defaultFontColor);
+      }
+
+      if (updates.length > 0) {
+        query += updates.join(", ") + ` WHERE username = $${paramIndex}`;
+        params.push(username);
+        await pool.query(query, params);
       }
     } else {
       const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
@@ -474,7 +476,11 @@ app.post("/api/user/preferences", async (req, res) => {
         return res.status(404).json({ success: false, message: "User not found" });
       }
 
-      data.users[userIndex].selectedFonts = selectedFonts;
+      if (selectedFonts !== undefined) data.users[userIndex].selectedFonts = selectedFonts;
+      if (defaultFont !== undefined) data.users[userIndex].defaultFont = defaultFont;
+      if (defaultFontSize !== undefined) data.users[userIndex].defaultFontSize = defaultFontSize;
+      if (defaultFontColor !== undefined) data.users[userIndex].defaultFontColor = defaultFontColor;
+      
       fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
     }
     res.json({ success: true });
@@ -484,27 +490,7 @@ app.post("/api/user/preferences", async (req, res) => {
   }
 });
 
-app.get("/api/debug-fs", (req, res) => {
-  res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-  const debugInfo = {
-    __dirname,
-    cwd: process.cwd(),
-    PROJECT_FONTS_DIR,
-    WRITABLE_FONTS_DIR,
-    projectFontsExist: fs.existsSync(PROJECT_FONTS_DIR),
-    projectFonts: fs.existsSync(PROJECT_FONTS_DIR) ? fs.readdirSync(PROJECT_FONTS_DIR) : [],
-    writableFontsExist: fs.existsSync(WRITABLE_FONTS_DIR),
-    writableFonts: fs.existsSync(WRITABLE_FONTS_DIR) ? fs.readdirSync(WRITABLE_FONTS_DIR) : [],
-    apiFontDir: path.join(process.cwd(), "api", "webfonts"),
-    apiFontDirExists: fs.existsSync(path.join(process.cwd(), "api", "webfonts")),
-    apiFontDirFiles: fs.existsSync(path.join(process.cwd(), "api", "webfonts")) ? fs.readdirSync(path.join(process.cwd(), "api", "webfonts")) : []
-  };
-  res.json(debugInfo);
-});
-
-// Fonts
 app.get("/api/fonts", async (req, res) => {
-  res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
   try {
     const projectFiles = fs.existsSync(PROJECT_FONTS_DIR) ? fs.readdirSync(PROJECT_FONTS_DIR) : [];
     const writableFiles = fs.existsSync(WRITABLE_FONTS_DIR) ? fs.readdirSync(WRITABLE_FONTS_DIR) : [];
@@ -520,7 +506,6 @@ app.get("/api/fonts", async (req, res) => {
     }
 
     const allFiles = Array.from(new Set([...projectFiles, ...writableFiles, ...dbFiles]));
-    console.log(`Found ${projectFiles.length} project fonts, ${writableFiles.length} writable fonts, and ${dbFiles.length} DB fonts. Total unique: ${allFiles.length}`);
     res.json(allFiles.map(f => ({ name: f, url: `/fonts/${f}` })));
   } catch (err) {
     console.error("Fetch fonts error:", err);
@@ -531,12 +516,10 @@ app.get("/api/fonts", async (req, res) => {
 app.post("/api/upload-font", upload.single("font"), async (req, res) => {
   try {
     const file = req.file;
-    if (!file) {
-      return res.status(400).json({ success: false, message: "No file uploaded" });
-    }
+    if (!file) return res.status(400).json({ success: false, message: "No file uploaded" });
 
     const sanitized = file.originalname.replace(/[^a-z0-9.]/gi, '_').toLowerCase();
-    const fileName = sanitized; // Don't use timestamp if we want to keep name clean, or use it if we want uniqueness
+    const fileName = sanitized;
 
     if (HAS_POSTGRES) {
       try {
@@ -544,11 +527,9 @@ app.post("/api/upload-font", upload.single("font"), async (req, res) => {
           "INSERT INTO custom_fonts (name, data) VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET data = $2",
           [fileName, file.buffer]
         );
-        console.log(`Font ${fileName} saved to database.`);
         return res.json({ success: true, url: `/fonts/${fileName}`, name: fileName });
       } catch (err) {
         console.error("DB Font upload error:", err);
-        // Fallback to file system if DB fails
       }
     }
 
@@ -567,27 +548,19 @@ app.delete("/api/fonts/:name", async (req, res) => {
     const projectFiles = fs.existsSync(PROJECT_FONTS_DIR) ? fs.readdirSync(PROJECT_FONTS_DIR) : [];
     const writableFiles = fs.existsSync(WRITABLE_FONTS_DIR) ? fs.readdirSync(WRITABLE_FONTS_DIR) : [];
     
-    let fileToDelete = writableFiles.find(f => {
-      const fontFamily = f.split('.').slice(0, -1).join('.');
-      return fontFamily === name || f === name;
-    });
-
+    let fileToDelete = writableFiles.find(f => f.split('.').slice(0, -1).join('.') === name || f === name);
     if (fileToDelete) {
       fs.unlinkSync(path.join(WRITABLE_FONTS_DIR, fileToDelete));
       return res.json({ success: true });
     }
 
-    fileToDelete = projectFiles.find(f => {
-      const fontFamily = f.split('.').slice(0, -1).join('.');
-      return fontFamily === name || f === name;
-    });
-
+    fileToDelete = projectFiles.find(f => f.split('.').slice(0, -1).join('.') === name || f === name);
     if (fileToDelete) {
       try {
         fs.unlinkSync(path.join(PROJECT_FONTS_DIR, fileToDelete));
         return res.json({ success: true });
       } catch (e) {
-        console.warn("Could not delete project font (likely read-only):", e);
+        console.warn("Could not delete project font:", e);
       }
     }
 
@@ -604,11 +577,7 @@ app.post("/api/fonts/rename", async (req, res) => {
     const projectFiles = fs.existsSync(PROJECT_FONTS_DIR) ? fs.readdirSync(PROJECT_FONTS_DIR) : [];
     const writableFiles = fs.existsSync(WRITABLE_FONTS_DIR) ? fs.readdirSync(WRITABLE_FONTS_DIR) : [];
     
-    let fileToRename = writableFiles.find(f => {
-      const fontFamily = f.split('.').slice(0, -1).join('.');
-      return fontFamily === oldName || f === oldName;
-    });
-
+    let fileToRename = writableFiles.find(f => f.split('.').slice(0, -1).join('.') === oldName || f === oldName);
     if (fileToRename) {
       const ext = path.extname(fileToRename);
       const timestamp = fileToRename.split('-')[0];
@@ -617,11 +586,7 @@ app.post("/api/fonts/rename", async (req, res) => {
       return res.json({ success: true });
     }
 
-    fileToRename = projectFiles.find(f => {
-      const fontFamily = f.split('.').slice(0, -1).join('.');
-      return fontFamily === oldName || f === oldName;
-    });
-
+    fileToRename = projectFiles.find(f => f.split('.').slice(0, -1).join('.') === oldName || f === oldName);
     if (fileToRename) {
       const ext = path.extname(fileToRename);
       const timestamp = fileToRename.split('-')[0];
@@ -630,7 +595,7 @@ app.post("/api/fonts/rename", async (req, res) => {
         fs.renameSync(path.join(PROJECT_FONTS_DIR, fileToRename), path.join(PROJECT_FONTS_DIR, newFileName));
         return res.json({ success: true });
       } catch (e) {
-        console.warn("Could not rename project font (likely read-only):", e);
+        console.warn("Could not rename project font:", e);
       }
     }
 
@@ -648,7 +613,7 @@ app.get("/api/images", async (req, res) => {
     
     if (HAS_POSTGRES) {
       await initDb();
-      let query = "SELECT id, username, image_url as \"imageUrl\", layers, name, created_at as \"createdAt\" FROM font_app_images";
+      let query = "SELECT id, username, image_url as \"imageUrl\", layers, name, is_locked as \"isLocked\", created_at as \"createdAt\" FROM font_app_images";
       const params = [];
       
       if (username) {
@@ -678,14 +643,15 @@ app.post("/api/images", async (req, res) => {
     if (HAS_POSTGRES) {
       await initDb();
       await pool.query(
-        `INSERT INTO font_app_images (id, username, image_url, layers, name)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO font_app_images (id, username, image_url, layers, name, is_locked)
+         VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (id) DO UPDATE SET
          username = EXCLUDED.username,
          image_url = EXCLUDED.image_url,
          layers = EXCLUDED.layers,
-         name = EXCLUDED.name`,
-        [project.id, project.username, project.imageUrl, JSON.stringify(project.layers), project.name]
+         name = EXCLUDED.name,
+         is_locked = EXCLUDED.is_locked`,
+        [project.id, project.username, project.imageUrl, JSON.stringify(project.layers), project.name, !!project.isLocked]
       );
     } else {
       const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
@@ -723,15 +689,8 @@ app.delete("/api/images/:id", async (req, res) => {
   }
 });
 
-// API route guard to prevent HTML fallback for missing API endpoints
 app.use("/api", (req, res, next) => {
   res.status(404).json({ success: false, message: `API endpoint not found: ${req.method} ${req.url}` });
-});
-
-// Error handler
-app.use((err: any, req: any, res: any, next: any) => {
-  console.error("Unhandled error:", err);
-  res.status(500).json({ success: false, message: "Internal server error" });
 });
 
 export default app;

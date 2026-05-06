@@ -543,16 +543,19 @@ export default function App() {
     }
   };
 
-  const exportLayers = (projectId?: string, projectLayers?: TextLayer[]) => {
-    const targetId = projectId || currentProjectId;
+  const exportLayers = (idOrEvent?: string | React.MouseEvent, projectLayers?: TextLayer[]) => {
+    const targetId = typeof idOrEvent === 'string' ? idOrEvent : currentProjectId;
     const targetLayers = projectLayers || layers;
     
     if (targetLayers.length === 0) {
       setNotification({ message: "No layers to export", type: 'error' });
       return;
     }
+
     const project = projects.find(p => p.id === targetId);
-    const fileName = `${project?.name || 'project'}_layers.json`;
+    const dateStr = new Date().toISOString().split('T')[0];
+    const baseName = project?.name || 'layers';
+    const fileName = `${baseName}_layers_${dateStr}.json`;
     const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(targetLayers));
     const downloadAnchorNode = document.createElement('a');
     downloadAnchorNode.setAttribute("href",     dataStr);
