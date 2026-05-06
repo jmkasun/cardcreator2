@@ -2600,7 +2600,7 @@ export default function App() {
                         </button>
                       </div>
 
-                      {selectedLayer.useSinhalaMonth && (
+                      {selectedLayer.useSinhalaMonth && !projects.find(p => p.id === currentProjectId)?.isLocked && (
                         <div className="space-y-4">
                           <div>
                             <label className="text-[10px] uppercase tracking-wider font-bold text-slate-500 block mb-1.5">Month Font Size</label>
