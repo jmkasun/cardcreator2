@@ -545,26 +545,51 @@ app.post("/api/upload-font", upload.single("font"), async (req, res) => {
 app.delete("/api/fonts/:name", async (req, res) => {
   try {
     const { name } = req.params;
-    const projectFiles = fs.existsSync(PROJECT_FONTS_DIR) ? fs.readdirSync(PROJECT_FONTS_DIR) : [];
-    const writableFiles = fs.existsSync(WRITABLE_FONTS_DIR) ? fs.readdirSync(WRITABLE_FONTS_DIR) : [];
-    
-    let fileToDelete = writableFiles.find(f => f.split('.').slice(0, -1).join('.') === name || f === name);
-    if (fileToDelete) {
-      fs.unlinkSync(path.join(WRITABLE_FONTS_DIR, fileToDelete));
-      return res.json({ success: true });
-    }
+    let deleted = false;
 
-    fileToDelete = projectFiles.find(f => f.split('.').slice(0, -1).join('.') === name || f === name);
-    if (fileToDelete) {
+    // 1. Try Database deletion if Postgres is available
+    if (HAS_POSTGRES) {
       try {
-        fs.unlinkSync(path.join(PROJECT_FONTS_DIR, fileToDelete));
-        return res.json({ success: true });
-      } catch (e) {
-        console.warn("Could not delete project font:", e);
+        await initDb();
+        const result = await pool.query("DELETE FROM custom_fonts WHERE name = $1 OR name LIKE $2", [name, `${name}.%`]);
+        if (result.rowCount && result.rowCount > 0) {
+          deleted = true;
+          console.log(`Deleted font ${name} from database.`);
+        }
+      } catch (err) {
+        console.error(`Error deleting font ${name} from DB:`, err);
       }
     }
 
-    res.status(404).json({ success: false, message: "Font not found" });
+    // 2. Try Writable Directory
+    const writableFiles = fs.existsSync(WRITABLE_FONTS_DIR) ? fs.readdirSync(WRITABLE_FONTS_DIR) : [];
+    const fileToDeleteFromWritable = writableFiles.find(f => f.split('.').slice(0, -1).join('.') === name || f === name);
+    if (fileToDeleteFromWritable) {
+      try {
+        fs.unlinkSync(path.join(WRITABLE_FONTS_DIR, fileToDeleteFromWritable));
+        deleted = true;
+      } catch (e) {
+        console.warn(`Could not delete writable font ${fileToDeleteFromWritable}:`, e);
+      }
+    }
+
+    // 3. Try Project Directory (likely read-only on Vercel)
+    const projectFiles = fs.existsSync(PROJECT_FONTS_DIR) ? fs.readdirSync(PROJECT_FONTS_DIR) : [];
+    const fileToDeleteFromProject = projectFiles.find(f => f.split('.').slice(0, -1).join('.') === name || f === name);
+    if (fileToDeleteFromProject) {
+      try {
+        fs.unlinkSync(path.join(PROJECT_FONTS_DIR, fileToDeleteFromProject));
+        deleted = true;
+      } catch (e) {
+        console.warn(`Could not delete project font ${fileToDeleteFromProject} (read-only?):`, e);
+      }
+    }
+
+    if (deleted) {
+      return res.json({ success: true });
+    }
+
+    res.status(404).json({ success: false, message: "Font not found or could not be deleted" });
   } catch (err) {
     console.error("Delete font error:", err);
     res.status(500).json({ success: false, message: "Internal server error" });
@@ -574,32 +599,60 @@ app.delete("/api/fonts/:name", async (req, res) => {
 app.post("/api/fonts/rename", async (req, res) => {
   try {
     const { oldName, newName } = req.body;
-    const projectFiles = fs.existsSync(PROJECT_FONTS_DIR) ? fs.readdirSync(PROJECT_FONTS_DIR) : [];
-    const writableFiles = fs.existsSync(WRITABLE_FONTS_DIR) ? fs.readdirSync(WRITABLE_FONTS_DIR) : [];
-    
-    let fileToRename = writableFiles.find(f => f.split('.').slice(0, -1).join('.') === oldName || f === oldName);
-    if (fileToRename) {
-      const ext = path.extname(fileToRename);
-      const timestamp = fileToRename.split('-')[0];
-      const newFileName = `${timestamp}-${newName}${ext}`;
-      fs.renameSync(path.join(WRITABLE_FONTS_DIR, fileToRename), path.join(WRITABLE_FONTS_DIR, newFileName));
-      return res.json({ success: true });
-    }
+    let renamed = false;
 
-    fileToRename = projectFiles.find(f => f.split('.').slice(0, -1).join('.') === oldName || f === oldName);
-    if (fileToRename) {
-      const ext = path.extname(fileToRename);
-      const timestamp = fileToRename.split('-')[0];
-      const newFileName = `${timestamp}-${newName}${ext}`;
+    // 1. Try Database rename
+    if (HAS_POSTGRES) {
       try {
-        fs.renameSync(path.join(PROJECT_FONTS_DIR, fileToRename), path.join(PROJECT_FONTS_DIR, newFileName));
-        return res.json({ success: true });
-      } catch (e) {
-        console.warn("Could not rename project font:", e);
+        await initDb();
+        const result = await pool.query("UPDATE custom_fonts SET name = $1 WHERE name = $2", [newName, oldName]);
+        if (result.rowCount && result.rowCount > 0) {
+          renamed = true;
+        }
+      } catch (err) {
+        console.error(`Error renaming font ${oldName} in DB:`, err);
       }
     }
 
-    res.status(404).json({ success: false, message: "Font not found" });
+    // 2. Try Writable Files
+    const writableFiles = fs.existsSync(WRITABLE_FONTS_DIR) ? fs.readdirSync(WRITABLE_FONTS_DIR) : [];
+    const fileToRenameInWritable = writableFiles.find(f => f.split('.').slice(0, -1).join('.') === oldName || f === oldName);
+    if (fileToRenameInWritable) {
+      try {
+        const ext = path.extname(fileToRenameInWritable);
+        const timestamp = fileToRenameInWritable.includes('-') ? fileToRenameInWritable.split('-')[0] : Date.now().toString();
+        const finalNewName = newName.endsWith(ext) ? newName : `${newName}${ext}`;
+        const newFileName = fileToRenameInWritable.includes('-') ? `${timestamp}-${finalNewName}` : finalNewName;
+        
+        fs.renameSync(path.join(WRITABLE_FONTS_DIR, fileToRenameInWritable), path.join(WRITABLE_FONTS_DIR, newFileName));
+        renamed = true;
+      } catch (e) {
+        console.warn(`Could not rename writable font ${fileToRenameInWritable}:`, e);
+      }
+    }
+
+    // 3. Try Project Files
+    const projectFiles = fs.existsSync(PROJECT_FONTS_DIR) ? fs.readdirSync(PROJECT_FONTS_DIR) : [];
+    const fileToRenameInProject = projectFiles.find(f => f.split('.').slice(0, -1).join('.') === oldName || f === oldName);
+    if (fileToRenameInProject) {
+      try {
+        const ext = path.extname(fileToRenameInProject);
+        const timestamp = fileToRenameInProject.includes('-') ? fileToRenameInProject.split('-')[0] : Date.now().toString();
+        const finalNewName = newName.endsWith(ext) ? newName : `${newName}${ext}`;
+        const newFileName = fileToRenameInProject.includes('-') ? `${timestamp}-${finalNewName}` : finalNewName;
+
+        fs.renameSync(path.join(PROJECT_FONTS_DIR, fileToRenameInProject), path.join(PROJECT_FONTS_DIR, newFileName));
+        renamed = true;
+      } catch (e) {
+        console.warn(`Could not rename project font ${fileToRenameInProject} (read-only?):`, e);
+      }
+    }
+
+    if (renamed) {
+      return res.json({ success: true });
+    }
+
+    res.status(404).json({ success: false, message: "Font not found or could not be renamed" });
   } catch (err) {
     console.error("Rename font error:", err);
     res.status(500).json({ success: false, message: "Internal server error" });
