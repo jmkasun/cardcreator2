@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { useDropzone } from "react-dropzone";
-import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check, Lock, Unlock, FileUp, FileDown } from "lucide-react";
+import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check, Lock, Unlock, FileUp, FileDown, Copy, Undo2 } from "lucide-react";
 import { cn } from "@/src/lib/utils";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -32,7 +32,7 @@ interface TextLayer {
   shadowBlur: number;
   shadowColor: string;
   textAlign: 'left' | 'center' | 'right';
-  type?: 'text' | 'date';
+  type?: 'text' | 'date' | 'label';
   isBold?: boolean;
   isItalic?: boolean;
   isUnderline?: boolean;
@@ -206,6 +206,13 @@ export default function App() {
         return;
       }
       const data = await res.json();
+      
+      if (!Array.isArray(data)) {
+        console.error("Received non-array data for fonts:", data);
+        setFonts([]);
+        return;
+      }
+      
       console.log(`API returned ${data.length} fonts:`, data);
       
       // Map API data to Font objects with cleaned names for the UI
@@ -254,16 +261,21 @@ export default function App() {
     try {
       const res = await fetch(`/api/images?username=${user.username}`);
       const data = await res.json();
-      setProjects(data);
-      
-      // Auto-select the last edited project
-      if (data.length > 0 && !currentProjectId) {
-        const lastProject = [...data].sort((a, b) => {
-          const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-          const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-          return timeB - timeA;
-        })[0];
-        if (lastProject) loadProject(lastProject);
+      if (Array.isArray(data)) {
+        setProjects(data);
+        
+        // Auto-select the last edited project
+        if (data.length > 0 && !currentProjectId) {
+          const lastProject = [...data].sort((a, b) => {
+            const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+            const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+            return timeB - timeA;
+          })[0];
+          if (lastProject) loadProject(lastProject);
+        }
+      } else {
+        console.error("Received non-array data for projects:", data);
+        setProjects([]);
       }
     } catch (err) {
       console.error("Failed to fetch projects", err);
@@ -890,6 +902,30 @@ export default function App() {
     setSelectedLayerId(newLayer.id);
   };
 
+  const addLabelLayer = () => {
+    const newLayer: TextLayer = {
+      id: Math.random().toString(36).substr(2, 9),
+      name: `Label ${layers.filter(l => l.type === 'label').length + 1}`,
+      text: "New Label",
+      x: 50,
+      y: 50,
+      fontSize: user?.defaultFontSize || 60,
+      color: user?.defaultFontColor || "#000064",
+      fontFamily: user?.defaultFont || fonts[0]?.name || "sans-serif",
+      strokeColor: "#000000",
+      strokeWidth: 0,
+      shadowBlur: 0,
+      shadowColor: "#000000",
+      textAlign: 'left',
+      type: 'label',
+      isBold: false,
+      isItalic: false,
+      isUnderline: false,
+    };
+    setLayers([...layers, newLayer]);
+    setSelectedLayerId(newLayer.id);
+  };
+
   const updateLayer = (id: string, updates: Partial<TextLayer>) => {
     setLayers(layers.map((l) => (l.id === id ? { ...l, ...updates } : l)));
   };
@@ -897,6 +933,51 @@ export default function App() {
   const deleteLayer = (id: string) => {
     setLayers(layers.filter((l) => l.id !== id));
     if (selectedLayerId === id) setSelectedLayerId(null);
+  };
+
+  const copyImageToClipboard = async () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    try {
+      // 1. Save current layers state to memory (localStorage) before clearing
+      if (currentProjectId) {
+        localStorage.setItem(`prev_layers_${currentProjectId}`, JSON.stringify(layers));
+      }
+
+      // 2. Copy to clipboard
+      canvas.toBlob(async (blob) => {
+        if (!blob) return;
+        const item = new ClipboardItem({ "image/png": blob });
+        await navigator.clipboard.write([item]);
+        setNotification({ message: "Image copied to clipboard!", type: 'success' });
+      });
+
+      // 3. Clear all layers text except labels
+      setLayers(prev => prev.map(layer => {
+        if (layer.type === 'label') return layer;
+        return { ...layer, text: "" };
+      }));
+    } catch (err) {
+      console.error("Failed to copy image", err);
+      setNotification({ message: "Failed to copy image", type: 'error' });
+    }
+  };
+
+  const restorePreviousState = () => {
+    if (!currentProjectId) return;
+    const saved = localStorage.getItem(`prev_layers_${currentProjectId}`);
+    if (saved) {
+      try {
+        const restoredLayers = JSON.parse(saved);
+        setLayers(restoredLayers);
+        setNotification({ message: "Previous state restored", type: 'success' });
+      } catch (err) {
+        console.error("Failed to restore layers", err);
+      }
+    } else {
+      setNotification({ message: "No previous state found", type: 'error' });
+    }
   };
 
   const drawCanvasRef = useRef<number | null>(null);
@@ -2055,32 +2136,6 @@ export default function App() {
                 </div>
               )}
             </div>
-
-            {image && (
-              <div className="grid grid-cols-3 gap-2">
-                <button
-                  onClick={downloadImage}
-                  className="flex flex-col items-center justify-center gap-1 p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl transition-all border border-slate-700"
-                >
-                  <Download size={16} />
-                  <span className="text-[10px] font-medium">Save</span>
-                </button>
-                <button
-                  onClick={shareImage}
-                  className="flex flex-col items-center justify-center gap-1 p-2 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 rounded-xl transition-all border border-blue-600/30"
-                >
-                  <Share2 size={16} />
-                  <span className="text-[10px] font-medium">Share</span>
-                </button>
-                <button
-                  onClick={shareWhatsApp}
-                  className="flex flex-col items-center justify-center gap-1 p-2 bg-green-600/20 hover:bg-green-600/30 text-green-400 rounded-xl transition-all border border-green-600/30"
-                >
-                  <MessageCircle size={16} />
-                  <span className="text-[10px] font-medium">WA</span>
-                </button>
-              </div>
-            )}
           </div>
 
           <div className="flex-1 overflow-y-auto custom-scrollbar">
@@ -2191,7 +2246,7 @@ export default function App() {
             {/* Layers & Properties Section */}
             <div className="p-4 space-y-4">
               <div>
-                <div className="grid grid-cols-2 gap-2 mb-4">
+                <div className="grid grid-cols-2 gap-2 mb-2">
                   <button
                     onClick={addLayer}
                     disabled={!image || projects.find(p => p.id === currentProjectId)?.isLocked}
@@ -2199,6 +2254,15 @@ export default function App() {
                   >
                     <Plus size={14} /> Add Text
                   </button>
+                  <button
+                    onClick={addLabelLayer}
+                    disabled={!image || projects.find(p => p.id === currentProjectId)?.isLocked}
+                    className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium py-2 rounded-lg flex items-center justify-center gap-2 transition-all text-xs"
+                  >
+                    <Plus size={14} /> Add Label
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 gap-2 mb-4">
                   <button
                     onClick={addDateLayer}
                     disabled={!image || projects.find(p => p.id === currentProjectId)?.isLocked}
@@ -2209,11 +2273,11 @@ export default function App() {
                 </div>
                 <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Layers</h3>
                 <div className="space-y-2">
-                  {layers.length === 0 ? (
-                    <p className="text-sm text-slate-600 italic text-center py-4">No layers yet</p>
+                  {layers.filter(l => l.type !== 'label').length === 0 ? (
+                    <p className="text-sm text-slate-600 italic text-center py-4">No text layers yet</p>
                   ) : (
                     <AnimatePresence mode="popLayout">
-                      {layers.map((layer) => (
+                      {layers.filter(l => l.type !== 'label').map((layer) => (
                         <motion.div
                           layout
                           initial={{ opacity: 0, x: -20 }}
@@ -2297,6 +2361,24 @@ export default function App() {
                       ))}
                     </AnimatePresence>
                   )}
+                </div>
+
+                {/* Quick Actions after Layers */}
+                <div className="grid grid-cols-2 gap-2 mt-4">
+                  <button
+                    onClick={restorePreviousState}
+                    disabled={!image || projects.find(p => p.id === currentProjectId)?.isLocked}
+                    className="bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-2.5 rounded-xl flex items-center justify-center gap-2 transition-all text-xs border border-slate-600 shadow-lg"
+                  >
+                    <Undo2 size={16} /> Go Back
+                  </button>
+                  <button
+                    onClick={copyImageToClipboard}
+                    disabled={!image || projects.find(p => p.id === currentProjectId)?.isLocked}
+                    className="bg-teal-600 hover:bg-teal-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-2.5 rounded-xl flex items-center justify-center gap-2 transition-all text-xs shadow-lg"
+                  >
+                    <Copy size={16} /> Copy
+                  </button>
                 </div>
               </div>
 
@@ -2530,6 +2612,13 @@ export default function App() {
                   </div>
                   </>
                   )}
+                  <button
+                    onClick={() => deleteLayer(selectedLayer.id)}
+                    disabled={projects.find(p => p.id === currentProjectId)?.isLocked}
+                    className="w-full mt-6 py-2.5 bg-red-600/10 hover:bg-red-600 border border-red-600/20 text-red-500 hover:text-white rounded-xl transition-all flex items-center justify-center gap-2 font-bold text-sm disabled:opacity-30 disabled:cursor-not-allowed"
+                  >
+                    <Trash2 size={14} /> Delete Layer
+                  </button>
                 </div>
               </div>
             )}
@@ -2562,6 +2651,12 @@ export default function App() {
                 className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-xl text-xs font-bold"
               >
                 <Plus size={16} /> Text
+              </button>
+              <button 
+                onClick={addLabelLayer}
+                className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-xl text-xs font-bold"
+              >
+                <Plus size={16} /> Label
               </button>
               <button 
                 onClick={addDateLayer}

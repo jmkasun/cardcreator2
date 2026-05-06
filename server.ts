@@ -44,10 +44,46 @@ const pool = new Pool({
   ssl: {
     rejectUnauthorized: false
   },
-  max: 5, // Limit max connections to avoid hitting server limits
-  idleTimeoutMillis: 30000, // Close idle clients after 30 seconds
-  connectionTimeoutMillis: 2000, // Return an error if a connection cannot be established within 2 seconds
+  max: 3, 
+  idleTimeoutMillis: 20000, // Increased to 20s to keep connections alive slightly longer
+  connectionTimeoutMillis: 20000, // Increased to 20s to allow more time for connection establishment
 });
+
+// Helper for self-contained queries with retry logic on connection errors
+async function safeQuery(text: string, params: any[] = [], retriesValue = 3): Promise<pg.QueryResult<any>> {
+  for (let i = 0; i <= retriesValue; i++) {
+    try {
+      return await pool.query(text, params);
+    } catch (err: any) {
+      const errMsg = err.message?.toLowerCase() || '';
+      const isConnError = errMsg.includes('connection slots') || 
+                         errMsg.includes('too many clients') ||
+                         errMsg.includes('max_connections') ||
+                         errMsg.includes('client is offline') ||
+                         errMsg.includes('timeout') ||
+                         errMsg.includes('terminated');
+      
+      if (isConnError && i < retriesValue) {
+        const delay = 500 * (i + 1) + Math.random() * 500; // Increased delay with jitter
+        console.warn(`[DB] Connection error (${errMsg.substring(0, 50)}...), retrying in ${Math.round(delay)}ms... (Attempt ${i+1}/${retriesValue})`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error("Maximum retries reached for safeQuery");
+}
+
+// Graceful shutdown
+const shutdown = async () => {
+  console.log("Shutting down server...");
+  await pool.end();
+  process.exit(0);
+};
+
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
 
 pool.on('error', (err) => {
   console.error('Unexpected error on idle database client', err);
@@ -62,12 +98,8 @@ if (!process.env.DATABASE_URL) {
 async function initDb() {
   if (HAS_POSTGRES) {
     console.log("Initializing Postgres database...");
-    let client;
     try {
-      client = await pool.connect();
-      console.log("Database connected successfully.");
-      
-      await client.query(`
+      await safeQuery(`
         CREATE TABLE IF NOT EXISTS users (
           username TEXT PRIMARY KEY,
           password TEXT NOT NULL,
@@ -79,20 +111,20 @@ async function initDb() {
         );
       `);
       
-      await client.query(`
+      await safeQuery(`
         ALTER TABLE users ADD COLUMN IF NOT EXISTS selected_fonts TEXT[] DEFAULT '{}';
       `);
-      await client.query(`
+      await safeQuery(`
         ALTER TABLE users ADD COLUMN IF NOT EXISTS default_font TEXT;
       `);
-      await client.query(`
+      await safeQuery(`
         ALTER TABLE users ADD COLUMN IF NOT EXISTS default_font_size INTEGER;
       `);
-      await client.query(`
+      await safeQuery(`
         ALTER TABLE users ADD COLUMN IF NOT EXISTS default_font_color TEXT;
       `);
 
-      await client.query(`
+      await safeQuery(`
         CREATE TABLE IF NOT EXISTS font_app_images (
           id TEXT PRIMARY KEY,
           username TEXT NOT NULL,
@@ -104,15 +136,15 @@ async function initDb() {
         );
       `);
 
-      await client.query(`
+      await safeQuery(`
         ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS is_locked BOOLEAN DEFAULT FALSE;
       `);
       
-      await client.query(`
+      await safeQuery(`
         ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
       `);
       
-      await client.query(`
+      await safeQuery(`
         CREATE TABLE IF NOT EXISTS custom_fonts (
           name TEXT PRIMARY KEY,
           data BYTEA NOT NULL,
@@ -120,15 +152,14 @@ async function initDb() {
         );
       `);
 
-      const adminCheck = await client.query("SELECT * FROM users WHERE username = 'admin'");
+      const adminCheck = await safeQuery("SELECT * FROM users WHERE username = 'admin'");
       if (adminCheck.rowCount === 0) {
-        await client.query("INSERT INTO users (username, password, role) VALUES ('admin', 'admin@1234', 'admin')");
+        await safeQuery("INSERT INTO users (username, password, role) VALUES ('admin', 'admin@1234', 'admin')");
         console.log("Default admin user created.");
       }
+      console.log("Database initialized successfully.");
     } catch (err) {
       console.error("Postgres initialization error:", err);
-    } finally {
-      if (client) client.release();
     }
   }
 }
@@ -154,7 +185,7 @@ async function startServer() {
     let dbStatus = "not_configured";
     if (process.env.DATABASE_URL) {
       try {
-        await pool.query("SELECT 1");
+        await safeQuery("SELECT 1");
         dbStatus = "connected";
       } catch (err) {
         dbStatus = "error: " + (err instanceof Error ? err.message : String(err));
@@ -167,11 +198,22 @@ async function startServer() {
     });
   });
 
-  // Explicit font serving route
-  app.get("/fonts/:name", async (req, res) => {
-    try {
-      const name = decodeURIComponent(req.params.name);
-      console.log(`[Font Service] Request for font: ${name}`);
+// Font cache to reduce DB load
+const fontCache = new Map<string, Buffer>();
+
+// Explicit font serving route
+app.get("/fonts/:name", async (req, res) => {
+  try {
+    const name = decodeURIComponent(req.params.name);
+    
+    // Check cache first
+    if (fontCache.has(name)) {
+      console.log(`[Font Service] Serving from memory cache: ${name}`);
+      const cachedBuffer = fontCache.get(name)!;
+      return res.send(cachedBuffer);
+    }
+
+    console.log(`[Font Service] Request for font: ${name}`);
       const ext = path.extname(name).toLowerCase();
       
       // Set correct MIME type
@@ -202,20 +244,24 @@ async function startServer() {
       if (HAS_POSTGRES) {
         console.log(`[Font Service] Searching DB for font: ${name}`);
         try {
-          const result = await pool.query("SELECT data FROM custom_fonts WHERE name = $1", [name]);
+          const result = await safeQuery("SELECT data FROM custom_fonts WHERE name = $1", [name]);
           if (result.rowCount && result.rowCount > 0) {
-            console.log(`[Font Service] Serving from database: ${name} (${result.rows[0].data.length} bytes)`);
-            return res.send(result.rows[0].data);
+            const fontData = result.rows[0].data;
+            console.log(`[Font Service] Serving from database: ${name} (${fontData.length} bytes)`);
+            fontCache.set(name, fontData);
+            return res.send(fontData);
           } else {
             console.warn(`[Font Service] Font not found in DB with exact name: ${name}`);
             // Try broader search: case-insensitive and replacing underscores with spaces or vice versa
-            const fuzzyResult = await pool.query(
+            const fuzzyResult = await safeQuery(
               "SELECT data, name FROM custom_fonts WHERE name ILIKE $1 OR REPLACE(name, ' ', '_') ILIKE $1 OR name ILIKE REPLACE($1, '_', ' ') OR name ILIKE REPLACE($1, '_', '%')", 
               [name]
             );
             if (fuzzyResult.rowCount && fuzzyResult.rowCount > 0) {
+              const fuzzyFontData = fuzzyResult.rows[0].data;
               console.log(`[Font Service] Serving from database (fuzzy match): ${fuzzyResult.rows[0].name}`);
-              return res.send(fuzzyResult.rows[0].data);
+              fontCache.set(name, fuzzyFontData);
+              return res.send(fuzzyFontData);
             }
           }
         } catch (err) {
@@ -243,7 +289,7 @@ async function startServer() {
       console.log(`Login attempt for user: ${username}`);
       
       if (HAS_POSTGRES) {
-        const result = await pool.query(
+        const result = await safeQuery(
           "SELECT username, role, selected_fonts as \"selectedFonts\", default_font as \"defaultFont\", default_font_size as \"defaultFontSize\", default_font_color as \"defaultFontColor\" FROM users WHERE username = $1 AND password = $2",
           [username, password]
         );
@@ -284,7 +330,7 @@ async function startServer() {
       
       console.log(`Sync operation: op=${op}, action=${a}, target=${id}`);
 
-      const adminResult = await pool.query("SELECT * FROM users WHERE username = $1", [op]);
+      const adminResult = await safeQuery("SELECT * FROM users WHERE username = $1", [op]);
       const admin = adminResult.rows[0];
       
       if (!admin || admin.role !== "admin") {
@@ -293,16 +339,16 @@ async function startServer() {
       }
 
       if (a === 'l') { // list
-        const usersResult = await pool.query("SELECT username, role FROM users");
+        const usersResult = await safeQuery("SELECT username, role FROM users");
         return res.json({ success: true, users: usersResult.rows });
       }
 
       if (a === 'c') { // create
-        const checkResult = await pool.query("SELECT * FROM users WHERE username = $1", [id]);
+        const checkResult = await safeQuery("SELECT * FROM users WHERE username = $1", [id]);
         if (checkResult.rowCount && checkResult.rowCount > 0) {
           return res.status(400).json({ success: false, message: "User already exists" });
         }
-        await pool.query(
+        await safeQuery(
           "INSERT INTO users (username, password, role) VALUES ($1, $2, $3)",
           [id, c, t || "user"]
         );
@@ -329,7 +375,7 @@ async function startServer() {
         }
 
         values.push(id);
-        await pool.query(
+        await safeQuery(
           `UPDATE users SET ${updateFields.join(", ")} WHERE username = $${paramIndex}`,
           values
         );
@@ -341,7 +387,7 @@ async function startServer() {
         if (id === "admin") {
           return res.status(400).json({ success: false, message: "Cannot delete default admin" });
         }
-        await pool.query("DELETE FROM users WHERE username = $1", [id]);
+        await safeQuery("DELETE FROM users WHERE username = $1", [id]);
         console.log(`User deleted: ${id}`);
         return res.json({ success: true });
       }
@@ -356,7 +402,7 @@ async function startServer() {
   app.post("/api/change-password", async (req, res) => {
     try {
       const { username, oldPassword, newPassword } = req.body;
-      const result = await pool.query(
+      const result = await safeQuery(
         "UPDATE users SET password = $1 WHERE username = $2 AND password = $3",
         [newPassword, username, oldPassword]
       );
@@ -405,7 +451,7 @@ async function startServer() {
       query += updates.join(", ") + ` WHERE username = $${paramIndex}`;
       params.push(username);
 
-      const result = await pool.query(query, params);
+      const result = await safeQuery(query, params);
       
       if (result.rowCount === 0) {
         return res.status(404).json({ success: false, message: "User not found" });
@@ -427,7 +473,7 @@ async function startServer() {
       let dbFiles: string[] = [];
       if (HAS_POSTGRES) {
         try {
-          const result = await pool.query("SELECT name FROM custom_fonts");
+          const result = await safeQuery("SELECT name FROM custom_fonts");
           dbFiles = result.rows.map(r => r.name);
         } catch (err) {
           console.error("Error fetching fonts from DB:", err);
@@ -457,7 +503,7 @@ async function startServer() {
 
       if (HAS_POSTGRES) {
         try {
-          await pool.query(
+          await safeQuery(
             "INSERT INTO custom_fonts (name, data) VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET data = $2",
             [fileName, file.buffer]
           );
@@ -483,7 +529,7 @@ async function startServer() {
       // 1. Delete from database if exists
       if (process.env.DATABASE_URL) {
         try {
-          const result = await pool.query("DELETE FROM custom_fonts WHERE name = $1 OR name LIKE $2", [name, `${name}.%`]);
+          const result = await safeQuery("DELETE FROM custom_fonts WHERE name = $1 OR name LIKE $2", [name, `${name}.%`]);
           if (result.rowCount && result.rowCount > 0) {
             deleted = true;
           }
@@ -518,6 +564,7 @@ async function startServer() {
       }
 
       if (deleted) {
+        fontCache.delete(name);
         res.json({ success: true });
       } else {
         res.status(404).json({ success: false, message: "Font not found" });
@@ -541,7 +588,7 @@ async function startServer() {
       if (process.env.DATABASE_URL) {
         try {
           // Try both with and without extension if not provided
-          const result = await pool.query("UPDATE custom_fonts SET name = $1 WHERE name = $2", [newName, oldName]);
+          const result = await safeQuery("UPDATE custom_fonts SET name = $1 WHERE name = $2", [newName, oldName]);
           if (result.rowCount && result.rowCount > 0) {
             console.log(`Renamed font in DB from ${oldName} to ${newName}`);
             renamed = true;
@@ -589,6 +636,7 @@ async function startServer() {
       }
 
       if (renamed) {
+        fontCache.delete(oldName);
         res.json({ success: true });
       } else {
         console.warn(`Font not found for renaming: ${oldName}`);
@@ -611,7 +659,7 @@ async function startServer() {
 
       if (HAS_POSTGRES) {
         const query = "SELECT id, username, image_url as \"imageUrl\", layers, name, is_locked as \"isLocked\", created_at as \"createdAt\" FROM font_app_images WHERE username = $1";
-        const result = await pool.query(query, [username]);
+        const result = await safeQuery(query, [username]);
         return res.json(result.rows);
       }
       res.json([]);
@@ -626,7 +674,7 @@ async function startServer() {
       const { id, username, imageUrl, layers, name, isLocked } = req.body;
       
       if (HAS_POSTGRES) {
-        await pool.query(
+        await safeQuery(
           `INSERT INTO font_app_images (id, username, image_url, layers, name, is_locked)
            VALUES ($1, $2, $3, $4, $5, $6)
            ON CONFLICT (id) DO UPDATE SET
@@ -650,7 +698,7 @@ async function startServer() {
     try {
       const { id } = req.params;
       if (HAS_POSTGRES) {
-        await pool.query("DELETE FROM font_app_images WHERE id = $1", [id]);
+        await safeQuery("DELETE FROM font_app_images WHERE id = $1", [id]);
       }
       res.json({ success: true });
     } catch (err) {
