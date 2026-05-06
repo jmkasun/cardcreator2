@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { useDropzone } from "react-dropzone";
-import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check, Lock, Unlock, FileUp, FileDown, Copy, Undo2 } from "lucide-react";
+import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check, Lock, Unlock, FileUp, FileDown, Copy, Undo2, List } from "lucide-react";
 import { cn } from "@/src/lib/utils";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -32,7 +32,11 @@ interface TextLayer {
   shadowBlur: number;
   shadowColor: string;
   textAlign: 'left' | 'center' | 'right';
-  type?: 'text' | 'date' | 'label';
+  type?: 'text' | 'date' | 'label' | 'list';
+  options?: string[];
+  sinhalaMonthFontSize?: number;
+  useSinhalaMonth?: boolean;
+  sinhalaMonths?: string[];
   isBold?: boolean;
   isItalic?: boolean;
   isUnderline?: boolean;
@@ -894,6 +898,9 @@ export default function App() {
       shadowColor: "#000000",
       textAlign: 'left',
       type: 'date',
+      useSinhalaMonth: false,
+      sinhalaMonthFontSize: user?.defaultFontSize || 60,
+      sinhalaMonths: ["ckjdß", "fmnrjdß", "ud¾;=", "wfma%,a", "uehs", "cQks", "cQ,s", "wf.daia;=", "iema;eïn¾", "Tlaf;dan¾", "fkdjeïn¾", "foieïn¾"],
       isBold: false,
       isItalic: false,
       isUnderline: false,
@@ -918,6 +925,31 @@ export default function App() {
       shadowColor: "#000000",
       textAlign: 'left',
       type: 'label',
+      isBold: false,
+      isItalic: false,
+      isUnderline: false,
+    };
+    setLayers([...layers, newLayer]);
+    setSelectedLayerId(newLayer.id);
+  };
+
+  const addListLayer = () => {
+    const newLayer: TextLayer = {
+      id: Math.random().toString(36).substr(2, 9),
+      name: `List Layer ${layers.filter(l => l.type === 'list').length + 1}`,
+      text: "Select item...",
+      options: ["Item 1", "Item 2", "Item 3"],
+      x: 50,
+      y: 50,
+      fontSize: user?.defaultFontSize || 60,
+      color: user?.defaultFontColor || "#000064",
+      fontFamily: user?.defaultFont || fonts[0]?.name || "sans-serif",
+      strokeColor: "#000000",
+      strokeWidth: 0,
+      shadowBlur: 0,
+      shadowColor: "#000000",
+      textAlign: 'left',
+      type: 'list',
       isBold: false,
       isItalic: false,
       isUnderline: false,
@@ -1028,22 +1060,82 @@ export default function App() {
           
           const x = (layer.x / 100) * canvas.width;
           const y = (layer.y / 100) * canvas.height;
-
-          const displayText = layer.text || layer.name || "";
+          
+          let displayText = layer.text || layer.name || "";
+          let isSinhalaDate = false;
+          let yearStr = "";
+          let monthStr = "";
+          let dayStr = "";
+          
+          if (layer.type === 'date' && layer.useSinhalaMonth && layer.sinhalaMonths) {
+            try {
+              const d = new Date(layer.text);
+              if (!isNaN(d.getTime())) {
+                yearStr = d.getFullYear().toString();
+                monthStr = layer.sinhalaMonths[d.getMonth()] || "";
+                dayStr = d.getDate().toString();
+                isSinhalaDate = true;
+                displayText = `${yearStr} ${monthStr} ${dayStr}`;
+              }
+            } catch (e) {
+              console.error("Failed to format date with Sinhala month", e);
+            }
+          }
 
           if (layer.shadowBlur > 0) {
             ctx.shadowBlur = layer.shadowBlur * (canvas.width / 1000);
             ctx.shadowColor = layer.shadowColor;
           }
 
-          if (layer.strokeWidth > 0) {
-            ctx.strokeStyle = layer.strokeColor;
-            ctx.lineWidth = layer.strokeWidth * (canvas.width / 1000);
-            ctx.strokeText(displayText, x, y);
-          }
+          if (isSinhalaDate) {
+            const monthFontSize = ((layer.sinhalaMonthFontSize || layer.fontSize) * (canvas.width / 1000));
+            const monthFontStr = `${layer.isItalic ? 'italic ' : ''}${layer.isBold ? 'bold ' : ''}${monthFontSize}px "${layer.fontFamily}"`;
+            
+            // Calculate total width
+            const w1 = ctx.measureText(yearStr + " ").width;
+            const originalFont = ctx.font;
+            ctx.font = monthFontStr;
+            const w2 = ctx.measureText(monthStr + " ").width;
+            ctx.font = originalFont;
+            const w3 = ctx.measureText(dayStr).width;
+            const totalW = w1 + w2 + w3;
+            
+            let startX = x;
+            if (ctx.textAlign === 'center') startX = x - totalW / 2;
+            else if (ctx.textAlign === 'right') startX = x - totalW;
+            
+            const originalAlign = ctx.textAlign;
+            ctx.textAlign = 'left';
+            
+            if (layer.strokeWidth > 0) {
+              ctx.strokeStyle = layer.strokeColor;
+              ctx.lineWidth = layer.strokeWidth * (canvas.width / 1000);
+              
+              ctx.strokeText(yearStr + " ", startX, y);
+              ctx.font = monthFontStr;
+              ctx.strokeText(monthStr + " ", startX + w1, y);
+              ctx.font = originalFont;
+              ctx.strokeText(dayStr, startX + w1 + w2, y);
+            }
+            
+            ctx.fillStyle = layer.color;
+            ctx.fillText(yearStr + " ", startX, y);
+            ctx.font = monthFontStr;
+            ctx.fillText(monthStr + " ", startX + w1, y);
+            ctx.font = originalFont;
+            ctx.fillText(dayStr, startX + w1 + w2, y);
+            
+            ctx.textAlign = originalAlign;
+          } else {
+            if (layer.strokeWidth > 0) {
+              ctx.strokeStyle = layer.strokeColor;
+              ctx.lineWidth = layer.strokeWidth * (canvas.width / 1000);
+              ctx.strokeText(displayText, x, y);
+            }
 
-          ctx.fillStyle = layer.color;
-          ctx.fillText(displayText, x, y);
+            ctx.fillStyle = layer.color;
+            ctx.fillText(displayText, x, y);
+          }
 
           if (layer.isUnderline) {
             const metrics = ctx.measureText(displayText);
@@ -2262,13 +2354,20 @@ export default function App() {
                     <Plus size={14} /> Add Label
                   </button>
                 </div>
-                <div className="grid grid-cols-1 gap-2 mb-4">
+                <div className="grid grid-cols-2 gap-2 mb-4">
                   <button
                     onClick={addDateLayer}
                     disabled={!image || projects.find(p => p.id === currentProjectId)?.isLocked}
                     className="bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium py-2 rounded-lg flex items-center justify-center gap-2 transition-all text-xs"
                   >
                     <Calendar size={14} /> Add Date
+                  </button>
+                  <button
+                    onClick={addListLayer}
+                    disabled={!image || projects.find(p => p.id === currentProjectId)?.isLocked}
+                    className="bg-violet-600 hover:bg-violet-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium py-2 rounded-lg flex items-center justify-center gap-2 transition-all text-xs"
+                  >
+                    <List size={14} /> Add List
                   </button>
                 </div>
                 <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Layers</h3>
@@ -2346,15 +2445,31 @@ export default function App() {
                             </div>
 
                             <div className="w-full">
-                              <input
-                                type="text"
-                                value={layer.text}
-                                onChange={(e) => updateLayer(layer.id, { text: e.target.value })}
-                                onFocus={() => setSelectedLayerId(layer.id)}
-                                onClick={(e) => e.stopPropagation()}
-                                className="bg-slate-900 border border-slate-700/50 rounded-lg px-2 py-1.5 text-sm w-full outline-none text-inherit focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20"
-                                style={{ fontFamily: layer.fontFamily }}
-                              />
+                              {layer.type === 'list' ? (
+                                <select
+                                  value={layer.text}
+                                  onChange={(e) => updateLayer(layer.id, { text: e.target.value })}
+                                  onFocus={() => setSelectedLayerId(layer.id)}
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="bg-slate-900 border border-slate-700/50 rounded-lg px-2 py-1.5 text-sm w-full outline-none text-inherit focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 cursor-pointer"
+                                  style={{ fontFamily: layer.fontFamily }}
+                                >
+                                  <option value="" disabled>Select item...</option>
+                                  {layer.options?.map((opt, i) => (
+                                    <option key={i} value={opt}>{opt}</option>
+                                  ))}
+                                </select>
+                              ) : (
+                                <input
+                                  type="text"
+                                  value={layer.text}
+                                  onChange={(e) => updateLayer(layer.id, { text: e.target.value })}
+                                  onFocus={() => setSelectedLayerId(layer.id)}
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="bg-slate-900 border border-slate-700/50 rounded-lg px-2 py-1.5 text-sm w-full outline-none text-inherit focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20"
+                                  style={{ fontFamily: layer.fontFamily }}
+                                />
+                              )}
                             </div>
                           </div>
                         </motion.div>
@@ -2400,17 +2515,155 @@ export default function App() {
                   )}
                   <div>
                     <label className="text-xs text-slate-500 block mb-1.5">{projects.find(p => p.id === currentProjectId)?.isLocked ? "Editing Content" : "Text Content"}</label>
-                    <textarea
-                      value={selectedLayer.text}
-                      onChange={(e) => updateLayer(selectedLayer.id, { text: e.target.value })}
-                      className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-blue-500 resize-none h-20"
-                      style={{ 
-                        fontFamily: `"${selectedLayer.fontFamily}", sans-serif`,
-                        fontWeight: selectedLayer.isBold ? 'bold' : 'normal',
-                        fontStyle: selectedLayer.isItalic ? 'italic' : 'normal'
-                      }}
-                    />
+                    {selectedLayer.type === 'list' ? (
+                      <select
+                        value={selectedLayer.text}
+                        onChange={(e) => updateLayer(selectedLayer.id, { text: e.target.value })}
+                        className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer"
+                        style={{ fontFamily: `"${selectedLayer.fontFamily}", sans-serif` }}
+                      >
+                        <option value="" disabled>Select item...</option>
+                        {selectedLayer.options?.map((opt, i) => (
+                          <option key={i} value={opt}>{opt}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <textarea
+                        value={selectedLayer.text}
+                        onChange={(e) => updateLayer(selectedLayer.id, { text: e.target.value })}
+                        className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-blue-500 resize-none h-20"
+                        style={{ 
+                          fontFamily: `"${selectedLayer.fontFamily}", sans-serif`,
+                          fontWeight: selectedLayer.isBold ? 'bold' : 'normal',
+                          fontStyle: selectedLayer.isItalic ? 'italic' : 'normal'
+                        }}
+                      />
+                    )}
                   </div>
+                  {selectedLayer.type === 'list' && !projects.find(p => p.id === currentProjectId)?.isLocked && (
+                    <div className="space-y-2 bg-slate-900/30 p-3 rounded-xl border border-slate-800/50">
+                       <label className="text-xs text-slate-500 block mb-1.5 font-semibold">Dropdown Options</label>
+                       <div className="space-y-2 max-h-40 overflow-y-auto pr-1 custom-scrollbar">
+                         {selectedLayer.options?.map((opt, i) => (
+                           <div key={i} className="flex gap-2">
+                             <input 
+                               type="text" 
+                               value={opt}
+                               onChange={(e) => {
+                                 const newOpts = [...(selectedLayer.options || [])];
+                                 newOpts[i] = e.target.value;
+                                 updateLayer(selectedLayer.id, { options: newOpts });
+                               }}
+                               className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-[11px] outline-none focus:border-blue-500"
+                             />
+                             <button 
+                               onClick={() => {
+                                 const newOpts = selectedLayer.options?.filter((_, idx) => idx !== i);
+                                 updateLayer(selectedLayer.id, { options: newOpts });
+                               }}
+                               className="p-1 text-slate-500 hover:text-red-400 transition-colors"
+                             >
+                               <Trash2 size={14} />
+                             </button>
+                           </div>
+                         ))}
+                       </div>
+                       <button 
+                        onClick={() => {
+                          const newOpts = [...(selectedLayer.options || []), "New Option"];
+                          updateLayer(selectedLayer.id, { options: newOpts });
+                        }}
+                        className="w-full py-1.5 border border-dashed border-slate-700 rounded-lg text-[10px] uppercase tracking-wider font-bold text-slate-500 hover:text-slate-300 hover:border-slate-500 transition-all flex items-center justify-center gap-1"
+                       >
+                         <Plus size={12} /> Add New Item
+                       </button>
+                    </div>
+                  )}
+
+                  {selectedLayer.type === 'date' && (
+                    <div className="space-y-4 bg-slate-900/30 p-3 rounded-xl border border-slate-800/50">
+                      <div className="flex items-center justify-between">
+                        <label className="text-xs font-semibold text-slate-400">Sinhala Month</label>
+                        <button
+                          onClick={() => updateLayer(selectedLayer.id, { useSinhalaMonth: !selectedLayer.useSinhalaMonth })}
+                          className={cn(
+                            "relative inline-flex h-5 w-10 shrink-0 cursor-pointer items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500",
+                            selectedLayer.useSinhalaMonth ? "bg-teal-600" : "bg-slate-700"
+                          )}
+                        >
+                          <span
+                            className={cn(
+                              "pointer-events-none block h-4 w-4 rounded-full bg-white shadow-lg ring-0 transition-transform",
+                              selectedLayer.useSinhalaMonth ? "translate-x-5" : "translate-x-1"
+                            )}
+                          />
+                        </button>
+                      </div>
+
+                      {selectedLayer.useSinhalaMonth && (
+                        <div className="space-y-4">
+                          <div>
+                            <label className="text-[10px] uppercase tracking-wider font-bold text-slate-500 block mb-1.5">Month Font Size</label>
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="number"
+                                min="1"
+                                max="1000"
+                                value={selectedLayer.sinhalaMonthFontSize || selectedLayer.fontSize}
+                                onChange={(e) => updateLayer(selectedLayer.id, { sinhalaMonthFontSize: parseInt(e.target.value) || 0 })}
+                                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-sm outline-none focus:ring-1 focus:ring-blue-500"
+                              />
+                              <div className="flex gap-1">
+                                <button 
+                                  onClick={() => updateLayer(selectedLayer.id, { sinhalaMonthFontSize: (selectedLayer.sinhalaMonthFontSize || selectedLayer.fontSize) + 1 })}
+                                  className="bg-slate-800 hover:bg-slate-700 p-2 rounded-lg border border-slate-700 transition-colors"
+                                >
+                                  <Plus size={14} />
+                                </button>
+                                <button 
+                                  onClick={() => updateLayer(selectedLayer.id, { sinhalaMonthFontSize: Math.max(1, (selectedLayer.sinhalaMonthFontSize || selectedLayer.fontSize) - 1) })}
+                                  className="bg-slate-800 hover:bg-slate-700 p-2 rounded-lg border border-slate-700 transition-colors"
+                                >
+                                  <Minus size={14} />
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <label className="text-[10px] uppercase tracking-wider font-bold text-slate-500 block">Month Names (1-12)</label>
+                            <button 
+                              onClick={() => {
+                                updateLayer(selectedLayer.id, { 
+                                  sinhalaMonths: ["ckjdß", "fmnrjdß", "ud¾;=", "wfma%,a", "uehs", "cQks", "cQ,s", "wf.daia;=", "iema;eïn¾", "Tlaf;dan¾", "fkdjeïn¾", "foieïn¾"] 
+                                });
+                              }}
+                              className="text-[9px] text-blue-400 hover:text-blue-300 transition-colors uppercase font-bold tracking-tighter"
+                            >
+                              Reset to Default
+                            </button>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2 max-h-60 overflow-y-auto pr-1 custom-scrollbar">
+                            {selectedLayer.sinhalaMonths?.map((month, idx) => (
+                              <div key={idx} className="flex flex-col gap-1">
+                                <span className="text-[9px] text-slate-600 font-mono">{(idx + 1).toString().padStart(2, '0')}</span>
+                                <input
+                                  type="text"
+                                  value={month}
+                                  onChange={(e) => {
+                                    const newMonths = [...(selectedLayer.sinhalaMonths || [])];
+                                    newMonths[idx] = e.target.value;
+                                    updateLayer(selectedLayer.id, { sinhalaMonths: newMonths });
+                                  }}
+                                  className="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-[11px] outline-none focus:border-teal-500"
+                                  style={{ fontFamily: selectedLayer.fontFamily }}
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                   {!projects.find(p => p.id === currentProjectId)?.isLocked && (
                     <>
                   <div>
