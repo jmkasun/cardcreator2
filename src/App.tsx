@@ -2367,14 +2367,14 @@ export default function App() {
                 <div className="grid grid-cols-2 gap-2 mt-4">
                   <button
                     onClick={restorePreviousState}
-                    disabled={!image || projects.find(p => p.id === currentProjectId)?.isLocked}
+                    disabled={!image}
                     className="bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-2.5 rounded-xl flex items-center justify-center gap-2 transition-all text-xs border border-slate-600 shadow-lg"
                   >
                     <Undo2 size={16} /> Go Back
                   </button>
                   <button
                     onClick={copyImageToClipboard}
-                    disabled={!image || projects.find(p => p.id === currentProjectId)?.isLocked}
+                    disabled={!image}
                     className="bg-teal-600 hover:bg-teal-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-2.5 rounded-xl flex items-center justify-center gap-2 transition-all text-xs shadow-lg"
                   >
                     <Copy size={16} /> Copy
