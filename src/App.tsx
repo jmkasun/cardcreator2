@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { useDropzone } from "react-dropzone";
-import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check, Lock, Unlock, FileUp, FileDown, Copy, Undo2, List } from "lucide-react";
+import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check, Lock, Unlock, FileUp, FileDown, Copy, Undo2, List, Eye, EyeOff } from "lucide-react";
 import { cn } from "@/src/lib/utils";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -40,6 +40,7 @@ interface TextLayer {
   isBold?: boolean;
   isItalic?: boolean;
   isUnderline?: boolean;
+  visible?: boolean;
 }
 
 interface ImageProject {
@@ -1041,6 +1042,7 @@ export default function App() {
         ctx.drawImage(img, 0, 0);
 
         for (const layer of layers) {
+          if (layer.visible === false) continue;
           ctx.save();
           const fontStyle = layer.isItalic ? "italic " : "";
           const fontWeight = layer.isBold ? "bold " : "";
@@ -1183,6 +1185,7 @@ export default function App() {
     if (!ctx) return null;
 
     return [...layers].reverse().find((layer) => {
+      if (layer.visible === false) return false;
       const displayText = layer.text || layer.name || "Text Layer";
       ctx.font = `${layer.fontSize}px "${layer.fontFamily}"`;
       const metrics = ctx.measureText(displayText);
@@ -2375,11 +2378,11 @@ export default function App() {
                 </div>
                 <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Layers</h3>
                 <div className="space-y-2">
-                  {layers.filter(l => l.type !== 'label').length === 0 ? (
-                    <p className="text-sm text-slate-600 italic text-center py-4">No text layers yet</p>
+                  {layers.length === 0 ? (
+                    <p className="text-sm text-slate-600 italic text-center py-4">No layers yet</p>
                   ) : (
                     <AnimatePresence mode="popLayout">
-                      {layers.filter(l => l.type !== 'label').map((layer) => (
+                      {layers.map((layer) => (
                         <motion.div
                           layout
                           initial={{ opacity: 0, x: -20 }}
@@ -2392,6 +2395,7 @@ export default function App() {
                           }}
                           className={cn(
                             "group flex flex-col p-3 rounded-xl cursor-pointer transition-all border gap-2",
+                            layer.visible === false && "opacity-60",
                             selectedLayerId === layer.id
                               ? "bg-blue-600/10 border-blue-600/50 text-blue-400 ring-1 ring-blue-600/20"
                               : "bg-slate-800/50 border-transparent hover:bg-slate-800 text-slate-400"
@@ -2401,12 +2405,32 @@ export default function App() {
                             {/* Actions & Header */}
                             <div className="flex items-center justify-between gap-2 overflow-hidden border-b border-slate-700/30 pb-2 mb-1">
                               <div className="flex items-center gap-2 overflow-hidden flex-1">
+                                <button
+                                  tabIndex={-1}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    updateLayer(layer.id, { visible: layer.visible !== false ? false : true });
+                                  }}
+                                  className="p-1 hover:text-blue-400 text-slate-400 hover:bg-slate-700/50 rounded transition-all shrink-0"
+                                  title={layer.visible !== false ? "Hide Layer" : "Show Layer"}
+                                >
+                                  {layer.visible !== false ? <Eye size={14} /> : <EyeOff size={14} className="text-slate-500" />}
+                                </button>
                                 <Type size={12} className="shrink-0 opacity-50" />
                                 <span 
-                                  className="text-base font-normal tracking-wider truncate text-inherit"
+                                  className="text-base font-normal tracking-wider truncate text-inherit flex items-center gap-1.5"
                                   style={{ fontFamily: `"${layer.fontFamily}", sans-serif` }}
                                 >
                                   {layer.name}
+                                  {layer.type === 'label' && (
+                                    <span className="text-[9px] bg-indigo-500/10 text-indigo-400 px-1.5 py-0.5 rounded font-sans uppercase font-bold tracking-tight">Label</span>
+                                  )}
+                                  {layer.type === 'date' && (
+                                    <span className="text-[9px] bg-emerald-500/10 text-emerald-400 px-1.5 py-0.5 rounded font-sans uppercase font-bold tracking-tight">Date</span>
+                                  )}
+                                  {layer.type === 'list' && (
+                                    <span className="text-[9px] bg-violet-500/10 text-violet-400 px-1.5 py-0.5 rounded font-sans uppercase font-bold tracking-tight">List</span>
+                                  )}
                                 </span>
                               </div>
                               
@@ -2446,7 +2470,7 @@ export default function App() {
                                 </button>
                               </div>
                             </div>
-
+ 
                             <div className="w-full">
                               {layer.type === 'list' ? (
                                 <select
