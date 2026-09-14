@@ -1,5 +1,8 @@
 {
   "name": "My Card Creator",
-  "description": "An interactive and mobile-friendly card creation tool with custom text overlays, font management, and sharing capabilities.",
-  "requestFramePermissions": []
+  "description": "An interactive and mobile-friendly card creation tool with custom text overlays, font management, suffix lists, and sharing capabilities.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

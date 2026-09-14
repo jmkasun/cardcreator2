@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { useDropzone } from "react-dropzone";
-import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check, Lock, Unlock, FileUp, FileDown, Copy, Undo2, List, Eye, EyeOff } from "lucide-react";
+import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check, Lock, Unlock, FileUp, FileDown, Copy, Undo2, List, Eye, EyeOff, Tag, Move } from "lucide-react";
 import { cn } from "@/src/lib/utils";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -34,13 +34,61 @@ interface TextLayer {
   textAlign: 'left' | 'center' | 'right';
   type?: 'text' | 'date' | 'label' | 'list';
   options?: string[];
+  optionLabels?: string[];
+  hasOptionLabel?: boolean;
+  isListLabel?: boolean;
+  linkedListId?: string;
   sinhalaMonthFontSize?: number;
   useSinhalaMonth?: boolean;
   sinhalaMonths?: string[];
   isBold?: boolean;
   isItalic?: boolean;
   isUnderline?: boolean;
+  hasSuffixList?: boolean;
+  suffixList?: string[];
+  selectedSuffix?: string;
+  suffixGap?: number;
+  suffixFontSize?: number;
+  suffixFontFamily?: string;
+  suffixColor?: string;
+  showSuffixLine?: boolean;
+  suffixLineWidth?: number;
+  suffixLineColor?: string;
+  suffixLines?: Record<string, SuffixLineConfig>;
   visible?: boolean;
+}
+
+export interface SuffixLineConfig {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+export function distToSegment(px: number, py: number, x1: number, y1: number, x2: number, y2: number) {
+  const l2 = (x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1);
+  if (l2 === 0) return Math.hypot(px - x1, py - y1);
+  let t = ((px - x1) * (x2 - x1) + (py - y1) * (y2 - y1)) / l2;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(px - (x1 + t * (x2 - x1)), py - (y1 + t * (y2 - y1)));
+}
+
+export function getSuffixLineConfig(layer: TextLayer, suffix?: string, index?: number): SuffixLineConfig {
+  const sufKey = suffix || layer.selectedSuffix || (layer.suffixList?.[0] ?? "");
+  if (layer.suffixLines && layer.suffixLines[sufKey]) {
+    return layer.suffixLines[sufKey];
+  }
+  const idx = index !== undefined && index >= 0 ? index : (layer.suffixList?.indexOf(sufKey) ?? 0);
+  if (layer.suffixLines && layer.suffixLines[`index_${idx}`]) {
+    return layer.suffixLines[`index_${idx}`];
+  }
+  const yOffset = idx >= 0 ? (idx * 3.5) : 0;
+  return {
+    x1: Math.round(Math.max(2, Math.min(85, layer.x))),
+    y1: Math.round(Math.max(2, Math.min(95, layer.y + 4 + yOffset))),
+    x2: Math.round(Math.max(5, Math.min(98, layer.x + 20))),
+    y2: Math.round(Math.max(2, Math.min(95, layer.y + 4 + yOffset))),
+  };
 }
 
 interface ImageProject {
@@ -103,6 +151,9 @@ export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const isDraggingRef = useRef(false);
   const dragStartPos = useRef({ x: 0, y: 0 });
+  const dragTargetRef = useRef<'layer' | 'line-p1' | 'line-p2' | 'line-move' | null>(null);
+  const lineDragStartRef = useRef<{ x1: number; y1: number; x2: number; y2: number; mouseX: number; mouseY: number }>({ x1: 0, y1: 0, x2: 0, y2: 0, mouseX: 0, mouseY: 0 });
+  const isExportingRef = useRef(false);
 
   useEffect(() => {
     if (notification) {
@@ -880,6 +931,17 @@ export default function App() {
       isBold: false,
       isItalic: false,
       isUnderline: false,
+      hasSuffixList: false,
+      suffixList: ["uy;d", "uy;añh", "ñh"],
+      selectedSuffix: "uy;d",
+      suffixGap: 4,
+      showSuffixLine: false,
+      suffixLineWidth: 3,
+      suffixLines: {
+        "uy;d": { x1: 45, y1: 54, x2: 65, y2: 54 },
+        "uy;añh": { x1: 45, y1: 58, x2: 65, y2: 58 },
+        "ñh": { x1: 45, y1: 62, x2: 65, y2: 62 },
+      },
     };
     setLayers([...layers, newLayer]);
     setSelectedLayerId(newLayer.id);
@@ -941,8 +1003,10 @@ export default function App() {
     const newLayer: TextLayer = {
       id: Math.random().toString(36).substr(2, 9),
       name: `List Layer ${layers.filter(l => l.type === 'list').length + 1}`,
-      text: "Select item...",
-      options: ["Item 1", "Item 2", "Item 3"],
+      text: "10",
+      options: ["10", "20", "30"],
+      optionLabels: ["Ten", "Twenty", "Thirty"],
+      hasOptionLabel: false,
       x: 50,
       y: 50,
       fontSize: user?.defaultFontSize || 60,
@@ -963,12 +1027,327 @@ export default function App() {
   };
 
   const updateLayer = (id: string, updates: Partial<TextLayer>) => {
-    setLayers(layers.map((l) => (l.id === id ? { ...l, ...updates } : l)));
+    setLayers(layers.map((l) => {
+      if (l.id === id) {
+        return { ...l, ...updates };
+      }
+      if (l.linkedListId === id && updates.name) {
+        return { ...l, name: `${updates.name} - Label` };
+      }
+      return l;
+    }));
   };
 
   const deleteLayer = (id: string) => {
-    setLayers(layers.filter((l) => l.id !== id));
+    const target = layers.find(l => l.id === id);
+    if (target?.isListLabel && target.linkedListId) {
+      setLayers(layers.filter((l) => l.id !== id).map(l => l.id === target.linkedListId ? { ...l, hasOptionLabel: false } : l));
+    } else {
+      setLayers(layers.filter((l) => l.id !== id && l.linkedListId !== id));
+    }
     if (selectedLayerId === id) setSelectedLayerId(null);
+  };
+
+  const toggleListOptionLabel = (listLayerId: string) => {
+    const listLayer = layers.find(l => l.id === listLayerId);
+    if (!listLayer) return;
+
+    const willEnable = !listLayer.hasOptionLabel;
+    if (willEnable) {
+      const currentOpts = listLayer.options || ["10", "20", "30"];
+      const currentLabels = listLayer.optionLabels && listLayer.optionLabels.length > 0 
+        ? [...listLayer.optionLabels] 
+        : currentOpts.map((opt, i) => i === 0 && opt === "10" ? "Ten" : `Label ${i + 1}`);
+      while (currentLabels.length < currentOpts.length) {
+        currentLabels.push(`Label ${currentLabels.length + 1}`);
+      }
+
+      const optIndex = currentOpts.indexOf(listLayer.text);
+      const activeLabelText = optIndex >= 0 && currentLabels[optIndex] 
+        ? currentLabels[optIndex] 
+        : (currentLabels[0] || "Label");
+
+      const existingLabel = layers.find(l => l.linkedListId === listLayerId);
+      if (existingLabel) {
+        setLayers(layers.map(l => {
+          if (l.id === listLayerId) return { ...l, hasOptionLabel: true, optionLabels: currentLabels };
+          if (l.id === existingLabel.id) return { ...l, visible: true, text: activeLabelText };
+          return l;
+        }));
+        setSelectedLayerId(existingLabel.id);
+      } else {
+        const newLabelLayer: TextLayer = {
+          id: Math.random().toString(36).substr(2, 9),
+          name: `${listLayer.name} - Label`,
+          text: activeLabelText,
+          x: Math.min(listLayer.x + 8, 85),
+          y: Math.min(listLayer.y + 6, 85),
+          fontSize: Math.round(listLayer.fontSize * 0.85),
+          color: listLayer.color,
+          fontFamily: listLayer.fontFamily,
+          strokeColor: listLayer.strokeColor,
+          strokeWidth: listLayer.strokeWidth,
+          shadowBlur: listLayer.shadowBlur,
+          shadowColor: listLayer.shadowColor,
+          textAlign: listLayer.textAlign,
+          type: 'label',
+          isListLabel: true,
+          linkedListId: listLayerId,
+          isBold: listLayer.isBold,
+          isItalic: listLayer.isItalic,
+          isUnderline: listLayer.isUnderline,
+          visible: true,
+        };
+        setLayers([
+          ...layers.map(l => l.id === listLayerId ? { ...l, hasOptionLabel: true, optionLabels: currentLabels } : l),
+          newLabelLayer
+        ]);
+        setSelectedLayerId(newLabelLayer.id);
+      }
+    } else {
+      setLayers(layers.filter(l => l.linkedListId !== listLayerId).map(l => l.id === listLayerId ? { ...l, hasOptionLabel: false } : l));
+      if (selectedLayerId && layers.find(l => l.id === selectedLayerId)?.linkedListId === listLayerId) {
+        setSelectedLayerId(listLayerId);
+      }
+    }
+  };
+
+  const handleListSelectChange = (listLayerId: string, newSelectedVal: string) => {
+    const listLayer = layers.find(l => l.id === listLayerId);
+    if (!listLayer) return;
+
+    const optIndex = listLayer.options ? listLayer.options.indexOf(newSelectedVal) : -1;
+    const newLabelText = optIndex >= 0 && listLayer.optionLabels ? (listLayer.optionLabels[optIndex] || "") : "";
+
+    setLayers(layers.map(l => {
+      if (l.id === listLayerId) return { ...l, text: newSelectedVal };
+      if (l.linkedListId === listLayerId) return { ...l, text: newLabelText };
+      return l;
+    }));
+  };
+
+  const handleListInputChange = (listLayerId: string, newText: string) => {
+    const listLayer = layers.find(l => l.id === listLayerId);
+    if (!listLayer) return;
+
+    const optIndex = listLayer.options ? listLayer.options.indexOf(newText) : -1;
+    const matchingLabel = optIndex >= 0 && listLayer.optionLabels ? listLayer.optionLabels[optIndex] : undefined;
+
+    setLayers(layers.map(l => {
+      if (l.id === listLayerId) return { ...l, text: newText };
+      if (l.linkedListId === listLayerId && matchingLabel !== undefined) {
+        return { ...l, text: matchingLabel };
+      }
+      return l;
+    }));
+  };
+
+  const handleListLabelInputChange = (labelLayerId: string, newLabelText: string) => {
+    const labelLayer = layers.find(l => l.id === labelLayerId);
+    if (!labelLayer) return;
+
+    setLayers(layers.map(l => {
+      if (l.id === labelLayerId) return { ...l, text: newLabelText };
+      if (l.id === labelLayer.linkedListId) {
+        const optIndex = l.options ? l.options.indexOf(l.text) : -1;
+        if (optIndex >= 0 && l.optionLabels) {
+          const nextLabels = [...l.optionLabels];
+          nextLabels[optIndex] = newLabelText;
+          return { ...l, optionLabels: nextLabels };
+        }
+      }
+      return l;
+    }));
+  };
+
+  const updateListOption = (listLayerId: string, index: number, field: 'value' | 'label', newValue: string) => {
+    const listLayer = layers.find(l => l.id === listLayerId);
+    if (!listLayer) return;
+
+    const newOptions = [...(listLayer.options || [])];
+    const newLabels = [...(listLayer.optionLabels || [])];
+
+    while (newLabels.length < newOptions.length) {
+      newLabels.push("");
+    }
+
+    if (field === 'value') {
+      const oldValue = newOptions[index];
+      newOptions[index] = newValue;
+      const isCurrentlySelected = listLayer.text === oldValue;
+      const updatedText = isCurrentlySelected ? newValue : listLayer.text;
+
+      setLayers(layers.map(l => {
+        if (l.id === listLayerId) {
+          return { ...l, options: newOptions, optionLabels: newLabels, text: updatedText };
+        }
+        return l;
+      }));
+    } else {
+      newLabels[index] = newValue;
+      const optIndex = newOptions.indexOf(listLayer.text);
+      const shouldUpdateLinked = optIndex === index;
+
+      setLayers(layers.map(l => {
+        if (l.id === listLayerId) {
+          return { ...l, options: newOptions, optionLabels: newLabels };
+        }
+        if (l.linkedListId === listLayerId && shouldUpdateLinked) {
+          return { ...l, text: newValue };
+        }
+        return l;
+      }));
+    }
+  };
+
+  const addOptionToList = (listLayerId: string) => {
+    const listLayer = layers.find(l => l.id === listLayerId);
+    if (!listLayer) return;
+
+    const count = (listLayer.options?.length || 0) + 1;
+    const newOptions = [...(listLayer.options || []), `Item ${count}`];
+    const newLabels = [...(listLayer.optionLabels || []), `Label ${count}`];
+
+    updateLayer(listLayerId, { options: newOptions, optionLabels: newLabels });
+  };
+
+  const removeOptionFromList = (listLayerId: string, index: number) => {
+    const listLayer = layers.find(l => l.id === listLayerId);
+    if (!listLayer) return;
+
+    const removedValue = listLayer.options?.[index];
+    const newOptions = listLayer.options?.filter((_, idx) => idx !== index) || [];
+    const newLabels = listLayer.optionLabels?.filter((_, idx) => idx !== index) || [];
+
+    let nextSelectedText = listLayer.text;
+    if (listLayer.text === removedValue) {
+      nextSelectedText = newOptions[0] || "";
+    }
+
+    const nextOptIdx = newOptions.indexOf(nextSelectedText);
+    const nextLabelText = nextOptIdx >= 0 && newLabels[nextOptIdx] ? newLabels[nextOptIdx] : "";
+
+    setLayers(layers.map(l => {
+      if (l.id === listLayerId) {
+        return { ...l, options: newOptions, optionLabels: newLabels, text: nextSelectedText };
+      }
+      if (l.linkedListId === listLayerId) {
+        return { ...l, text: nextLabelText };
+      }
+      return l;
+    }));
+  };
+
+  const updateSuffixLineConfig = (layerId: string, suffixKey: string, partial: Partial<SuffixLineConfig>) => {
+    const layer = layers.find(l => l.id === layerId);
+    if (!layer) return;
+    const current = getSuffixLineConfig(layer, suffixKey, layer.suffixList?.indexOf(suffixKey));
+    const updated: SuffixLineConfig = {
+      x1: partial.x1 !== undefined ? Math.round(partial.x1 * 10) / 10 : current.x1,
+      y1: partial.y1 !== undefined ? Math.round(partial.y1 * 10) / 10 : current.y1,
+      x2: partial.x2 !== undefined ? Math.round(partial.x2 * 10) / 10 : current.x2,
+      y2: partial.y2 !== undefined ? Math.round(partial.y2 * 10) / 10 : current.y2,
+    };
+    const newLines = {
+      ...(layer.suffixLines || {}),
+      [suffixKey]: updated,
+    };
+    updateLayer(layerId, { suffixLines: newLines });
+  };
+
+  const toggleSuffixList = (layerId: string) => {
+    const layer = layers.find(l => l.id === layerId);
+    if (!layer) return;
+
+    const willEnable = !layer.hasSuffixList;
+    const defaultSuffixes = ["uy;d", "uy;añh", "ñh"];
+    const suffixList = layer.suffixList && layer.suffixList.length > 0 ? layer.suffixList : defaultSuffixes;
+    const selectedSuffix = layer.selectedSuffix || suffixList[0] || "uy;d";
+
+    const suffixLines = { ...(layer.suffixLines || {}) };
+    suffixList.forEach((suf, idx) => {
+      if (!suffixLines[suf]) {
+        suffixLines[suf] = {
+          x1: Math.round(Math.max(2, Math.min(85, layer.x))),
+          y1: Math.round(Math.max(2, Math.min(95, layer.y + 4 + idx * 3.5))),
+          x2: Math.round(Math.max(5, Math.min(98, layer.x + 20))),
+          y2: Math.round(Math.max(2, Math.min(95, layer.y + 4 + idx * 3.5))),
+        };
+      }
+    });
+
+    updateLayer(layerId, {
+      hasSuffixList: willEnable,
+      suffixList,
+      selectedSuffix: willEnable ? selectedSuffix : layer.selectedSuffix,
+      suffixGap: layer.suffixGap !== undefined ? layer.suffixGap : 4,
+      suffixLines,
+    });
+  };
+
+  const addSuffixOption = (layerId: string) => {
+    const layer = layers.find(l => l.id === layerId);
+    if (!layer) return;
+
+    const count = (layer.suffixList?.length || 0) + 1;
+    const newSuffix = `/${count}`;
+    const newSuffixList = [...(layer.suffixList || []), newSuffix];
+
+    const newSuffixLines = { ...(layer.suffixLines || {}) };
+    if (!newSuffixLines[newSuffix]) {
+      newSuffixLines[newSuffix] = getSuffixLineConfig(layer, newSuffix, newSuffixList.length - 1);
+    }
+
+    updateLayer(layerId, {
+      suffixList: newSuffixList,
+      selectedSuffix: layer.selectedSuffix || newSuffix,
+      suffixLines: newSuffixLines,
+    });
+  };
+
+  const updateSuffixOption = (layerId: string, index: number, newValue: string) => {
+    const layer = layers.find(l => l.id === layerId);
+    if (!layer) return;
+
+    const oldVal = layer.suffixList?.[index];
+    const newSuffixList = [...(layer.suffixList || [])];
+    newSuffixList[index] = newValue;
+
+    const isCurrent = layer.selectedSuffix === oldVal;
+    const newSuffixLines = { ...(layer.suffixLines || {}) };
+    if (oldVal && newSuffixLines[oldVal]) {
+      newSuffixLines[newValue] = newSuffixLines[oldVal];
+      delete newSuffixLines[oldVal];
+    }
+
+    updateLayer(layerId, {
+      suffixList: newSuffixList,
+      selectedSuffix: isCurrent ? newValue : layer.selectedSuffix,
+      suffixLines: newSuffixLines,
+    });
+  };
+
+  const removeSuffixOption = (layerId: string, index: number) => {
+    const layer = layers.find(l => l.id === layerId);
+    if (!layer) return;
+
+    const removedVal = layer.suffixList?.[index];
+    const newSuffixList = (layer.suffixList || []).filter((_, idx) => idx !== index);
+    let nextSelected = layer.selectedSuffix;
+    if (layer.selectedSuffix === removedVal) {
+      nextSelected = newSuffixList[0] || "";
+    }
+
+    const newSuffixLines = { ...(layer.suffixLines || {}) };
+    if (removedVal && newSuffixLines[removedVal]) {
+      delete newSuffixLines[removedVal];
+    }
+
+    updateLayer(layerId, {
+      suffixList: newSuffixList,
+      selectedSuffix: nextSelected,
+      suffixLines: newSuffixLines,
+    });
   };
 
   const copyImageToClipboard = async () => {
@@ -981,20 +1360,28 @@ export default function App() {
         localStorage.setItem(`prev_layers_${currentProjectId}`, JSON.stringify(layers));
       }
 
-      // 2. Copy to clipboard
-      canvas.toBlob(async (blob) => {
-        if (!blob) return;
-        const item = new ClipboardItem({ "image/png": blob });
-        await navigator.clipboard.write([item]);
-        setNotification({ message: "Image copied to clipboard!", type: 'success' });
-      });
+      // 2. Hide editing handles for clean export
+      isExportingRef.current = true;
+      drawCanvas();
 
-      // 3. Clear all layers text except labels
-      setLayers(prev => prev.map(layer => {
-        if (layer.type === 'label') return layer;
-        return { ...layer, text: "" };
-      }));
+      setTimeout(() => {
+        // Copy to clipboard
+        canvas.toBlob(async (blob) => {
+          if (!blob) return;
+          const item = new ClipboardItem({ "image/png": blob });
+          await navigator.clipboard.write([item]);
+          setNotification({ message: "Image copied to clipboard!", type: 'success' });
+        });
+
+        isExportingRef.current = false;
+        // 3. Clear all layers text except labels
+        setLayers(prev => prev.map(layer => {
+          if (layer.type === 'label') return layer;
+          return { ...layer, text: "" };
+        }));
+      }, 50);
     } catch (err) {
+      isExportingRef.current = false;
       console.error("Failed to copy image", err);
       setNotification({ message: "Failed to copy image", type: 'error' });
     }
@@ -1059,6 +1446,15 @@ export default function App() {
             }
           }
 
+          if (layer.hasSuffixList && layer.selectedSuffix && layer.suffixFontFamily && layer.suffixFontFamily !== "sans-serif" && layer.suffixFontFamily !== fontFamily) {
+            const sufFontStr = `${fontStyle}${fontWeight}${layer.suffixFontSize || layer.fontSize}px "${layer.suffixFontFamily}", sans-serif`;
+            if (!document.fonts.check(sufFontStr)) {
+              try {
+                await document.fonts.load(sufFontStr);
+              } catch (_) {}
+            }
+          }
+
           ctx.font = fontStr;
           ctx.textAlign = layer.textAlign || "center";
           ctx.textBaseline = "middle";
@@ -1067,6 +1463,19 @@ export default function App() {
           const y = (layer.y / 100) * canvas.height;
           
           let displayText = layer.text || layer.name || "";
+          if (layer.isListLabel && layer.linkedListId) {
+            const parentList = layers.find(l => l.id === layer.linkedListId);
+            if (parentList) {
+              const optIndex = parentList.options ? parentList.options.indexOf(parentList.text) : -1;
+              if (optIndex >= 0 && parentList.optionLabels && parentList.optionLabels[optIndex] !== undefined && parentList.optionLabels[optIndex] !== "") {
+                displayText = parentList.optionLabels[optIndex];
+              } else if (layer.text) {
+                displayText = layer.text;
+              } else if (parentList.text === "") {
+                displayText = "";
+              }
+            }
+          }
           let isSinhalaDate = false;
           let yearStr = "";
           let monthStr = "";
@@ -1140,6 +1549,45 @@ export default function App() {
 
             ctx.fillStyle = layer.color;
             ctx.fillText(displayText, x, y);
+
+            if (layer.hasSuffixList && layer.selectedSuffix) {
+              const mainMetrics = ctx.measureText(displayText);
+              const mainWidth = mainMetrics.width;
+
+              let lastCharEndX = x;
+              if (ctx.textAlign === 'left') {
+                lastCharEndX = x + mainWidth;
+              } else if (ctx.textAlign === 'center') {
+                lastCharEndX = x + (mainWidth / 2);
+              } else if (ctx.textAlign === 'right') {
+                lastCharEndX = x;
+              }
+
+              const gap = (layer.suffixGap !== undefined ? layer.suffixGap : 4);
+              const suffixX = lastCharEndX + gap;
+
+              const prevFont = ctx.font;
+              const prevAlign = ctx.textAlign;
+
+              const suffixFontSize = layer.suffixFontSize || layer.fontSize;
+              const suffixFontFamily = layer.suffixFontFamily || layer.fontFamily;
+              const suffixFontStr = `${fontStyle}${fontWeight}${suffixFontSize}px "${suffixFontFamily}", sans-serif`;
+
+              ctx.font = suffixFontStr;
+              ctx.textAlign = 'left';
+
+              if (layer.strokeWidth > 0) {
+                ctx.strokeStyle = layer.strokeColor;
+                ctx.lineWidth = layer.strokeWidth * (canvas.width / 1000);
+                ctx.strokeText(layer.selectedSuffix, suffixX, y);
+              }
+
+              ctx.fillStyle = layer.suffixColor || layer.color;
+              ctx.fillText(layer.selectedSuffix, suffixX, y);
+
+              ctx.font = prevFont;
+              ctx.textAlign = prevAlign;
+            }
           }
 
           if (layer.isUnderline) {
@@ -1150,14 +1598,72 @@ export default function App() {
             if (ctx.textAlign === 'center') underlineX = x - width / 2;
             if (ctx.textAlign === 'right') underlineX = x - width;
             
+            let totalWidth = width;
+            if (layer.hasSuffixList && layer.selectedSuffix) {
+              const prevFont = ctx.font;
+              const suffixFontSize = layer.suffixFontSize || layer.fontSize;
+              const suffixFontFamily = layer.suffixFontFamily || layer.fontFamily;
+              ctx.font = `${fontStyle}${fontWeight}${suffixFontSize}px "${suffixFontFamily}", sans-serif`;
+              const sufMetrics = ctx.measureText(layer.selectedSuffix);
+              const gap = (layer.suffixGap !== undefined ? layer.suffixGap : 4);
+              totalWidth += gap + sufMetrics.width;
+              ctx.font = prevFont;
+            }
+
             ctx.beginPath();
             ctx.strokeStyle = layer.color;
             ctx.lineWidth = Math.max(1, layer.fontSize / 15);
             ctx.moveTo(underlineX, y + height / 2);
-            ctx.lineTo(underlineX + width, y + height / 2);
+            ctx.lineTo(underlineX + totalWidth, y + height / 2);
             ctx.stroke();
           }
           ctx.restore();
+
+          // Draw suffix line if enabled and has selected suffix
+          if (layer.hasSuffixList && layer.showSuffixLine && layer.selectedSuffix) {
+            const lineCfg = getSuffixLineConfig(layer, layer.selectedSuffix, layer.suffixList?.indexOf(layer.selectedSuffix));
+            if (lineCfg) {
+              const lx1 = (lineCfg.x1 / 100) * canvas.width;
+              const ly1 = (lineCfg.y1 / 100) * canvas.height;
+              const lx2 = (lineCfg.x2 / 100) * canvas.width;
+              const ly2 = (lineCfg.y2 / 100) * canvas.height;
+
+              ctx.save();
+              ctx.beginPath();
+              ctx.strokeStyle = layer.suffixLineColor || layer.color;
+              const lineThickness = (layer.suffixLineWidth || 3) * (canvas.width / 1000);
+              ctx.lineWidth = Math.max(1, lineThickness);
+              ctx.lineCap = 'round';
+              ctx.moveTo(lx1, ly1);
+              ctx.lineTo(lx2, ly2);
+              ctx.stroke();
+
+              const currentProject = projects.find(p => p.id === currentProjectId);
+              const isLocked = currentProject?.isLocked;
+              if (selectedLayerId === layer.id && !isLocked && !isPreviewMode && !isExportingRef.current) {
+                const handleR = Math.max(5, 7 * (canvas.width / 1000));
+                
+                // Endpoint 1 Handle
+                ctx.beginPath();
+                ctx.arc(lx1, ly1, handleR, 0, Math.PI * 2);
+                ctx.fillStyle = '#0284c7';
+                ctx.fill();
+                ctx.lineWidth = Math.max(1.5, 2 * (canvas.width / 1000));
+                ctx.strokeStyle = '#ffffff';
+                ctx.stroke();
+
+                // Endpoint 2 Handle
+                ctx.beginPath();
+                ctx.arc(lx2, ly2, handleR, 0, Math.PI * 2);
+                ctx.fillStyle = '#0284c7';
+                ctx.fill();
+                ctx.lineWidth = Math.max(1.5, 2 * (canvas.width / 1000));
+                ctx.strokeStyle = '#ffffff';
+                ctx.stroke();
+              }
+              ctx.restore();
+            }
+          }
         }
       });
     }, 16);
@@ -1165,7 +1671,7 @@ export default function App() {
 
   useEffect(() => {
     drawCanvas();
-  }, [image, layers, fonts]);
+  }, [image, layers, fonts, selectedLayerId, isPreviewMode]);
 
   // Auto-save effect
   useEffect(() => {
@@ -1186,7 +1692,18 @@ export default function App() {
 
     return [...layers].reverse().find((layer) => {
       if (layer.visible === false) return false;
-      const displayText = layer.text || layer.name || "Text Layer";
+      let displayText = layer.text || layer.name || "Text Layer";
+      if (layer.isListLabel && layer.linkedListId) {
+        const parentList = layers.find(l => l.id === layer.linkedListId);
+        if (parentList) {
+          const optIndex = parentList.options ? parentList.options.indexOf(parentList.text) : -1;
+          if (optIndex >= 0 && parentList.optionLabels && parentList.optionLabels[optIndex] !== undefined && parentList.optionLabels[optIndex] !== "") {
+            displayText = parentList.optionLabels[optIndex];
+          } else if (layer.text) {
+            displayText = layer.text;
+          }
+        }
+      }
       ctx.font = `${layer.fontSize}px "${layer.fontFamily}"`;
       const metrics = ctx.measureText(displayText);
       const x = (layer.x / 100) * canvas.width;
@@ -1199,9 +1716,19 @@ export default function App() {
       if (layer.textAlign === 'left') startX = x;
       if (layer.textAlign === 'right') startX = x - width;
 
+      let endX = startX + width;
+      if (layer.hasSuffixList && layer.selectedSuffix) {
+        const prevFont = ctx.font;
+        ctx.font = `${layer.suffixFontSize || layer.fontSize}px "${layer.suffixFontFamily || layer.fontFamily}"`;
+        const sufMetrics = ctx.measureText(layer.selectedSuffix);
+        const gap = layer.suffixGap !== undefined ? layer.suffixGap : 4;
+        endX += gap + sufMetrics.width;
+        ctx.font = prevFont;
+      }
+
       return (
         mouseX >= startX &&
-        mouseX <= startX + width &&
+        mouseX <= endX &&
         mouseY >= y - height / 2 &&
         mouseY <= y + height / 2
       );
@@ -1221,11 +1748,78 @@ export default function App() {
     const mouseX = (e.clientX - rect.left) * scaleX;
     const mouseY = (e.clientY - rect.top) * scaleY;
 
+    // 1. Check if clicked on suffix line handle or line for CURRENTLY selected layer
+    if (selectedLayerId && !isLocked) {
+      const selected = layers.find(l => l.id === selectedLayerId);
+      if (selected?.hasSuffixList && selected?.showSuffixLine && selected?.selectedSuffix) {
+        const lineCfg = getSuffixLineConfig(selected, selected.selectedSuffix, selected.suffixList?.indexOf(selected.selectedSuffix));
+        const lx1 = (lineCfg.x1 / 100) * canvas.width;
+        const ly1 = (lineCfg.y1 / 100) * canvas.height;
+        const lx2 = (lineCfg.x2 / 100) * canvas.width;
+        const ly2 = (lineCfg.y2 / 100) * canvas.height;
+        const handleThreshold = Math.max(14, 18 * (canvas.width / 1000));
+
+        if (Math.hypot(mouseX - lx1, mouseY - ly1) <= handleThreshold) {
+          dragTargetRef.current = 'line-p1';
+          isDraggingRef.current = true;
+          return;
+        }
+        if (Math.hypot(mouseX - lx2, mouseY - ly2) <= handleThreshold) {
+          dragTargetRef.current = 'line-p2';
+          isDraggingRef.current = true;
+          return;
+        }
+        if (distToSegment(mouseX, mouseY, lx1, ly1, lx2, ly2) <= handleThreshold) {
+          dragTargetRef.current = 'line-move';
+          isDraggingRef.current = true;
+          lineDragStartRef.current = {
+            x1: lineCfg.x1,
+            y1: lineCfg.y1,
+            x2: lineCfg.x2,
+            y2: lineCfg.y2,
+            mouseX,
+            mouseY,
+          };
+          return;
+        }
+      }
+    }
+
+    // 2. Check if clicked on any layer's suffix line to select it
+    for (const layer of [...layers].reverse()) {
+      if (layer.visible === false || !layer.hasSuffixList || !layer.showSuffixLine || !layer.selectedSuffix) continue;
+      const lineCfg = getSuffixLineConfig(layer, layer.selectedSuffix, layer.suffixList?.indexOf(layer.selectedSuffix));
+      const lx1 = (lineCfg.x1 / 100) * canvas.width;
+      const ly1 = (lineCfg.y1 / 100) * canvas.height;
+      const lx2 = (lineCfg.x2 / 100) * canvas.width;
+      const ly2 = (lineCfg.y2 / 100) * canvas.height;
+      const handleThreshold = Math.max(14, 18 * (canvas.width / 1000));
+
+      if (distToSegment(mouseX, mouseY, lx1, ly1, lx2, ly2) <= handleThreshold) {
+        setSelectedLayerId(layer.id);
+        if (!isLocked) {
+          dragTargetRef.current = 'line-move';
+          isDraggingRef.current = true;
+          lineDragStartRef.current = {
+            x1: lineCfg.x1,
+            y1: lineCfg.y1,
+            x2: lineCfg.x2,
+            y2: lineCfg.y2,
+            mouseX,
+            mouseY,
+          };
+        }
+        return;
+      }
+    }
+
+    // 3. Fallback to text layer selection
     const clickedLayer = getLayerAtPosition(mouseX, mouseY);
 
     if (clickedLayer) {
       setSelectedLayerId(clickedLayer.id);
       if (!isLocked) {
+        dragTargetRef.current = 'layer';
         isDraggingRef.current = true;
         dragStartPos.current = {
           x: mouseX - (clickedLayer.x / 100) * canvas.width,
@@ -1234,6 +1828,7 @@ export default function App() {
       }
     } else {
       setSelectedLayerId(null);
+      dragTargetRef.current = null;
     }
   };
 
@@ -1251,11 +1846,76 @@ export default function App() {
     const mouseY = (e.clientY - rect.top) * scaleY;
 
     if (isDraggingRef.current && selectedLayerId && !isLocked) {
+      const selected = layers.find(l => l.id === selectedLayerId);
+      if (!selected) return;
+
+      if (dragTargetRef.current === 'line-p1' && selected.selectedSuffix) {
+        const newX1 = Math.max(0, Math.min(100, (mouseX / canvas.width) * 100));
+        const newY1 = Math.max(0, Math.min(100, (mouseY / canvas.height) * 100));
+        updateSuffixLineConfig(selectedLayerId, selected.selectedSuffix, {
+          x1: Math.round(newX1 * 10) / 10,
+          y1: Math.round(newY1 * 10) / 10,
+        });
+        canvas.style.cursor = 'crosshair';
+        return;
+      }
+
+      if (dragTargetRef.current === 'line-p2' && selected.selectedSuffix) {
+        const newX2 = Math.max(0, Math.min(100, (mouseX / canvas.width) * 100));
+        const newY2 = Math.max(0, Math.min(100, (mouseY / canvas.height) * 100));
+        updateSuffixLineConfig(selectedLayerId, selected.selectedSuffix, {
+          x2: Math.round(newX2 * 10) / 10,
+          y2: Math.round(newY2 * 10) / 10,
+        });
+        canvas.style.cursor = 'crosshair';
+        return;
+      }
+
+      if (dragTargetRef.current === 'line-move' && selected.selectedSuffix) {
+        const dx = ((mouseX - lineDragStartRef.current.mouseX) / canvas.width) * 100;
+        const dy = ((mouseY - lineDragStartRef.current.mouseY) / canvas.height) * 100;
+        const w = lineDragStartRef.current.x2 - lineDragStartRef.current.x1;
+        const h = lineDragStartRef.current.y2 - lineDragStartRef.current.y1;
+        const newX1 = Math.max(0, Math.min(100 - Math.max(0, w), lineDragStartRef.current.x1 + dx));
+        const newY1 = Math.max(0, Math.min(100 - Math.max(0, h), lineDragStartRef.current.y1 + dy));
+        updateSuffixLineConfig(selectedLayerId, selected.selectedSuffix, {
+          x1: Math.round(newX1 * 10) / 10,
+          y1: Math.round(newY1 * 10) / 10,
+          x2: Math.round((newX1 + w) * 10) / 10,
+          y2: Math.round((newY1 + h) * 10) / 10,
+        });
+        canvas.style.cursor = 'move';
+        return;
+      }
+
+      // Default: dragging layer text
       const newX = ((mouseX - dragStartPos.current.x) / canvas.width) * 100;
       const newY = ((mouseY - dragStartPos.current.y) / canvas.height) * 100;
       updateLayer(selectedLayerId, { x: newX, y: newY });
       canvas.style.cursor = 'move';
     } else {
+      // Check if cursor hovers over selected layer's line handles or line
+      if (selectedLayerId && !isLocked) {
+        const selected = layers.find(l => l.id === selectedLayerId);
+        if (selected?.hasSuffixList && selected?.showSuffixLine && selected?.selectedSuffix) {
+          const lineCfg = getSuffixLineConfig(selected, selected.selectedSuffix, selected.suffixList?.indexOf(selected.selectedSuffix));
+          const lx1 = (lineCfg.x1 / 100) * canvas.width;
+          const ly1 = (lineCfg.y1 / 100) * canvas.height;
+          const lx2 = (lineCfg.x2 / 100) * canvas.width;
+          const ly2 = (lineCfg.y2 / 100) * canvas.height;
+          const handleThreshold = Math.max(14, 18 * (canvas.width / 1000));
+
+          if (Math.hypot(mouseX - lx1, mouseY - ly1) <= handleThreshold || Math.hypot(mouseX - lx2, mouseY - ly2) <= handleThreshold) {
+            canvas.style.cursor = 'crosshair';
+            return;
+          }
+          if (distToSegment(mouseX, mouseY, lx1, ly1, lx2, ly2) <= handleThreshold) {
+            canvas.style.cursor = 'move';
+            return;
+          }
+        }
+      }
+
       const hoveredLayer = getLayerAtPosition(mouseX, mouseY);
       if (hoveredLayer) {
         canvas.style.cursor = isLocked ? 'pointer' : 'move';
@@ -1267,39 +1927,56 @@ export default function App() {
 
   const handleCanvasMouseUp = () => {
     isDraggingRef.current = false;
+    dragTargetRef.current = null;
   };
 
   const downloadImage = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const link = document.createElement("a");
-    link.download = "overlay-image.png";
-    link.href = canvas.toDataURL("image/png");
-    link.click();
+
+    isExportingRef.current = true;
+    drawCanvas();
+
+    setTimeout(() => {
+      const link = document.createElement("a");
+      link.download = "overlay-image.png";
+      link.href = canvas.toDataURL("image/png");
+      link.click();
+      isExportingRef.current = false;
+      drawCanvas();
+    }, 50);
   };
 
   const shareImage = async () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+
+    isExportingRef.current = true;
+    drawCanvas();
     
-    try {
-      const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'));
-      if (!blob) return;
-      
-      const file = new File([blob], 'shared-image.png', { type: 'image/png' });
-      
-      if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
-        await navigator.share({
-          files: [file],
-          title: 'Shared Image',
-          text: 'Check out this image I created!',
-        });
-      } else {
-        setNotification({ message: "Sharing is not supported on this browser. You can download the image instead.", type: 'error' });
+    setTimeout(async () => {
+      try {
+        const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'));
+        if (!blob) return;
+        
+        const file = new File([blob], 'shared-image.png', { type: 'image/png' });
+        
+        if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+          await navigator.share({
+            files: [file],
+            title: 'Shared Image',
+            text: 'Check out this image I created!',
+          });
+        } else {
+          setNotification({ message: "Sharing is not supported on this browser. You can download the image instead.", type: 'error' });
+        }
+      } catch (err) {
+        console.error("Error sharing image:", err);
+      } finally {
+        isExportingRef.current = false;
+        drawCanvas();
       }
-    } catch (err) {
-      console.error("Error sharing image:", err);
-    }
+    }, 50);
   };
 
   const shareWhatsApp = () => {
@@ -2422,15 +3099,28 @@ export default function App() {
                                   style={{ fontFamily: `"${layer.fontFamily}", sans-serif` }}
                                 >
                                   {layer.name}
-                                  {layer.type === 'label' && (
+                                  {layer.isListLabel ? (
+                                    <span className="text-[9px] bg-purple-500/20 text-purple-300 border border-purple-500/30 px-1.5 py-0.5 rounded font-sans uppercase font-bold tracking-tight">Option Label</span>
+                                  ) : layer.type === 'label' ? (
                                     <span className="text-[9px] bg-indigo-500/10 text-indigo-400 px-1.5 py-0.5 rounded font-sans uppercase font-bold tracking-tight">Label</span>
-                                  )}
-                                  {layer.type === 'date' && (
+                                  ) : layer.type === 'date' ? (
                                     <span className="text-[9px] bg-emerald-500/10 text-emerald-400 px-1.5 py-0.5 rounded font-sans uppercase font-bold tracking-tight">Date</span>
-                                  )}
-                                  {layer.type === 'list' && (
-                                    <span className="text-[9px] bg-violet-500/10 text-violet-400 px-1.5 py-0.5 rounded font-sans uppercase font-bold tracking-tight">List</span>
-                                  )}
+                                  ) : layer.type === 'list' ? (
+                                    <span className="text-[9px] bg-violet-500/10 text-violet-400 px-1.5 py-0.5 rounded font-sans uppercase font-bold tracking-tight flex items-center gap-1">
+                                      List {layer.hasOptionLabel && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" title="Option label active" />}
+                                    </span>
+                                  ) : layer.hasSuffixList ? (
+                                    <span className="text-[9px] bg-amber-500/20 text-amber-300 border border-amber-500/30 px-1.5 py-0.5 rounded uppercase font-bold tracking-tight flex items-center gap-1">
+                                      +Suffix{layer.selectedSuffix ? (
+                                        <span 
+                                          style={{ fontFamily: `"${layer.suffixFontFamily || layer.fontFamily}", sans-serif` }}
+                                          className="text-amber-200 normal-case"
+                                        >
+                                          : {layer.selectedSuffix}
+                                        </span>
+                                      ) : ""}
+                                    </span>
+                                  ) : null}
                                 </span>
                               </div>
                               
@@ -2472,20 +3162,149 @@ export default function App() {
                             </div>
  
                             <div className="w-full">
-                              {layer.type === 'list' ? (
-                                <select
-                                  value={layer.text}
-                                  onChange={(e) => updateLayer(layer.id, { text: e.target.value })}
-                                  onFocus={() => setSelectedLayerId(layer.id)}
-                                  onClick={(e) => e.stopPropagation()}
-                                  className="bg-slate-900 border border-slate-700/50 rounded-lg px-2 py-1.5 text-sm w-full outline-none text-inherit focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 cursor-pointer"
-                                  style={{ fontFamily: layer.fontFamily }}
-                                >
-                                  <option value="" disabled>Select item...</option>
-                                  {layer.options?.map((opt, i) => (
-                                    <option key={i} value={opt}>{opt}</option>
-                                  ))}
-                                </select>
+                              {layer.isListLabel ? (() => {
+                                const parentList = layers.find(l => l.id === layer.linkedListId);
+                                return (
+                                  <div className="flex gap-1.5 items-center w-full">
+                                    <input
+                                      type="text"
+                                      value={layer.text}
+                                      placeholder="Type label text..."
+                                      onChange={(e) => handleListLabelInputChange(layer.id, e.target.value)}
+                                      onFocus={() => setSelectedLayerId(layer.id)}
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="bg-slate-900 border border-purple-900/60 focus:border-purple-500 rounded-lg px-2.5 py-1.5 text-sm flex-1 min-w-0 outline-none text-purple-200 focus:ring-1 focus:ring-purple-500/20"
+                                      style={{ 
+                                        fontFamily: `"${layer.fontFamily}", sans-serif`,
+                                        fontWeight: layer.isBold ? 'bold' : 'normal',
+                                        fontStyle: layer.isItalic ? 'italic' : 'normal'
+                                      }}
+                                    />
+                                    {parentList?.options && parentList.options.length > 0 && (
+                                      <select
+                                        value={parentList.text}
+                                        onChange={(e) => {
+                                          e.stopPropagation();
+                                          if (e.target.value) handleListSelectChange(parentList.id, e.target.value);
+                                        }}
+                                        onFocus={() => setSelectedLayerId(layer.id)}
+                                        onClick={(e) => e.stopPropagation()}
+                                        className="bg-slate-900 border border-purple-900/80 hover:border-purple-700 text-purple-300 rounded-lg px-2 py-1.5 text-xs outline-none cursor-pointer shrink-0 max-w-[110px]"
+                                        style={{ 
+                                          fontFamily: `"${layer.fontFamily}", sans-serif`,
+                                          fontWeight: layer.isBold ? 'bold' : 'normal',
+                                          fontStyle: layer.isItalic ? 'italic' : 'normal'
+                                        }}
+                                        title="Pick list option to sync label"
+                                      >
+                                        <option value="" disabled className="bg-slate-900 text-slate-400 font-sans">Options ▼</option>
+                                        {parentList.options.map((opt, i) => (
+                                          <option key={i} value={opt} className="bg-slate-900 text-white" style={{ fontFamily: `"${layer.fontFamily}", sans-serif` }}>
+                                            {parentList.optionLabels?.[i] || opt}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    )}
+                                  </div>
+                                );
+                              })() : layer.type === 'list' ? (
+                                <div className="flex gap-1.5 items-center w-full">
+                                  <input
+                                    type="text"
+                                    value={layer.text}
+                                    placeholder="Type or select..."
+                                    onChange={(e) => handleListInputChange(layer.id, e.target.value)}
+                                    onFocus={() => setSelectedLayerId(layer.id)}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="bg-slate-900 border border-slate-700/50 rounded-lg px-2.5 py-1.5 text-sm flex-1 min-w-0 outline-none text-inherit focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20"
+                                    style={{ 
+                                      fontFamily: `"${layer.fontFamily}", sans-serif`,
+                                      fontWeight: layer.isBold ? 'bold' : 'normal',
+                                      fontStyle: layer.isItalic ? 'italic' : 'normal'
+                                    }}
+                                  />
+                                  <select
+                                    value={layer.options?.includes(layer.text) ? layer.text : ""}
+                                    onChange={(e) => {
+                                      e.stopPropagation();
+                                      if (e.target.value !== undefined) {
+                                        handleListSelectChange(layer.id, e.target.value);
+                                      }
+                                    }}
+                                    onFocus={() => setSelectedLayerId(layer.id)}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="bg-slate-900 border border-slate-700 hover:border-slate-600 rounded-lg px-2 py-1.5 text-xs outline-none cursor-pointer shrink-0 max-w-[110px] text-slate-300"
+                                    style={{ 
+                                      fontFamily: `"${layer.fontFamily}", sans-serif`,
+                                      fontWeight: layer.isBold ? 'bold' : 'normal',
+                                      fontStyle: layer.isItalic ? 'italic' : 'normal'
+                                    }}
+                                    title="Select option from list"
+                                  >
+                                    <option value="" className="bg-slate-900 text-slate-400 font-sans">Options ▼</option>
+                                    {layer.options?.map((opt, i) => {
+                                      const optLabel = layer.optionLabels?.[i];
+                                      return (
+                                        <option 
+                                          key={i} 
+                                          value={opt} 
+                                          className="bg-slate-900 text-white"
+                                          style={{ fontFamily: `"${layer.fontFamily}", sans-serif` }}
+                                        >
+                                          {opt} {layer.hasOptionLabel && optLabel ? `(${optLabel})` : ""}
+                                        </option>
+                                      );
+                                    })}
+                                  </select>
+                                </div>
+                              ) : layer.hasSuffixList ? (
+                                <div className="space-y-1 w-full">
+                                  <div className="flex gap-1.5 items-center w-full">
+                                    <input
+                                      type="text"
+                                      value={layer.text}
+                                      onChange={(e) => updateLayer(layer.id, { text: e.target.value })}
+                                      onFocus={() => setSelectedLayerId(layer.id)}
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="bg-slate-900 border border-slate-700/50 rounded-lg px-2 py-1.5 text-sm flex-1 min-w-0 outline-none text-inherit focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20"
+                                      style={{ fontFamily: layer.fontFamily }}
+                                    />
+                                    <select
+                                      value={layer.selectedSuffix || ""}
+                                      onChange={(e) => {
+                                        e.stopPropagation();
+                                        updateLayer(layer.id, { selectedSuffix: e.target.value });
+                                      }}
+                                      onFocus={() => setSelectedLayerId(layer.id)}
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="bg-slate-900 border border-amber-500/60 hover:border-amber-400 text-amber-300 rounded-lg px-2 py-1.5 text-xs outline-none cursor-pointer shrink-0 max-w-[110px]"
+                                      style={{ 
+                                        fontFamily: `"${layer.suffixFontFamily || layer.fontFamily}", sans-serif`,
+                                        fontWeight: layer.isBold ? 'bold' : 'normal',
+                                        fontStyle: layer.isItalic ? 'italic' : 'normal'
+                                      }}
+                                      title="Selected Suffix"
+                                    >
+                                      <option value="" className="bg-slate-900 text-slate-400 font-sans">(None)</option>
+                                      {layer.suffixList?.map((suf, i) => (
+                                        <option 
+                                          key={i} 
+                                          value={suf} 
+                                          className="bg-slate-900 text-white"
+                                          style={{ fontFamily: `"${layer.suffixFontFamily || layer.fontFamily}", sans-serif` }}
+                                        >
+                                          {suf}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </div>
+                                  {layer.showSuffixLine && layer.selectedSuffix && (
+                                    <div className="flex items-center gap-1 text-[10px] text-sky-400 pl-0.5">
+                                      <Minus size={11} className="stroke-[2.5]" />
+                                      <span>Line ({Math.round(getSuffixLineConfig(layer, layer.selectedSuffix, layer.suffixList?.indexOf(layer.selectedSuffix)).x1)}%, {Math.round(getSuffixLineConfig(layer, layer.selectedSuffix, layer.suffixList?.indexOf(layer.selectedSuffix)).y1)}%)</span>
+                                    </div>
+                                  )}
+                                </div>
                               ) : (
                                 <input
                                   type="text"
@@ -2542,68 +3361,887 @@ export default function App() {
                   )}
                   <div>
                     <label className="text-xs text-slate-500 block mb-1.5">{projects.find(p => p.id === currentProjectId)?.isLocked ? "Editing Content" : "Text Content"}</label>
-                    {selectedLayer.type === 'list' ? (
-                      <select
-                        value={selectedLayer.text}
-                        onChange={(e) => updateLayer(selectedLayer.id, { text: e.target.value })}
-                        className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer"
-                        style={{ fontFamily: `"${selectedLayer.fontFamily}", sans-serif` }}
-                      >
-                        <option value="" disabled>Select item...</option>
-                        {selectedLayer.options?.map((opt, i) => (
-                          <option key={i} value={opt}>{opt}</option>
-                        ))}
-                      </select>
+                    {selectedLayer.isListLabel ? (() => {
+                      const parent = layers.find(l => l.id === selectedLayer.linkedListId);
+                      return (
+                        <div className="bg-purple-950/20 border border-purple-800/40 rounded-xl p-3 text-xs space-y-3">
+                          <div className="flex items-center justify-between">
+                            <span className="font-semibold text-purple-300 flex items-center gap-1.5">
+                              <Tag size={14} /> Option Label
+                            </span>
+                            {parent && (
+                              <button
+                                type="button"
+                                onClick={() => setSelectedLayerId(parent.id)}
+                                className="text-[11px] bg-purple-600/80 hover:bg-purple-600 text-white px-2 py-0.5 rounded transition-all font-medium"
+                              >
+                                Go to List Layer
+                              </button>
+                            )}
+                          </div>
+
+                          <div>
+                            <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Type Label Text</label>
+                            <input
+                              type="text"
+                              value={selectedLayer.text}
+                              onChange={(e) => handleListLabelInputChange(selectedLayer.id, e.target.value)}
+                              placeholder="Type label text..."
+                              className="w-full bg-slate-900 border border-purple-800/60 focus:border-purple-500 rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-purple-500/30 text-purple-200"
+                              style={{ 
+                                fontFamily: `"${selectedLayer.fontFamily}", sans-serif`,
+                                fontWeight: selectedLayer.isBold ? 'bold' : 'normal',
+                                fontStyle: selectedLayer.isItalic ? 'italic' : 'normal'
+                              }}
+                            />
+                          </div>
+
+                          {parent?.options && parent.options.length > 0 && (
+                            <div className="flex items-center justify-between gap-2 pt-2 border-t border-purple-900/30">
+                              <span className="text-[11px] text-slate-400">Sync with Option:</span>
+                              <select
+                                value={parent.text}
+                                onChange={(e) => handleListSelectChange(parent.id, e.target.value)}
+                                className="bg-slate-900 border border-purple-800/80 text-purple-300 rounded px-2 py-1 text-xs outline-none cursor-pointer max-w-[160px]"
+                                style={{ 
+                                  fontFamily: `"${selectedLayer.fontFamily}", sans-serif`,
+                                  fontWeight: selectedLayer.isBold ? 'bold' : 'normal',
+                                  fontStyle: selectedLayer.isItalic ? 'italic' : 'normal'
+                                }}
+                              >
+                                <option value="" disabled className="bg-slate-900 text-slate-400 font-sans">Options ▼</option>
+                                {parent.options.map((opt, i) => (
+                                  <option key={i} value={opt} className="bg-slate-900 text-white" style={{ fontFamily: `"${selectedLayer.fontFamily}", sans-serif` }}>
+                                    {parent.optionLabels?.[i] || opt}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })() : selectedLayer.type === 'list' ? (
+                      <div className="space-y-2">
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={selectedLayer.text}
+                            onChange={(e) => handleListInputChange(selectedLayer.id, e.target.value)}
+                            placeholder="Type or select value..."
+                            className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-blue-500"
+                            style={{ 
+                              fontFamily: `"${selectedLayer.fontFamily}", sans-serif`,
+                              fontWeight: selectedLayer.isBold ? 'bold' : 'normal',
+                              fontStyle: selectedLayer.isItalic ? 'italic' : 'normal'
+                            }}
+                          />
+                          <select
+                            value={selectedLayer.options?.includes(selectedLayer.text) ? selectedLayer.text : ""}
+                            onChange={(e) => {
+                              if (e.target.value) handleListSelectChange(selectedLayer.id, e.target.value);
+                            }}
+                            className="bg-slate-800 border border-slate-700 rounded-lg px-2 py-2 text-xs outline-none cursor-pointer text-slate-300 max-w-[130px]"
+                            style={{ 
+                              fontFamily: `"${selectedLayer.fontFamily}", sans-serif`,
+                              fontWeight: selectedLayer.isBold ? 'bold' : 'normal',
+                              fontStyle: selectedLayer.isItalic ? 'italic' : 'normal'
+                            }}
+                            title="Select from options"
+                          >
+                            <option value="" className="bg-slate-900 text-slate-400 font-sans">Options ▼</option>
+                            {selectedLayer.options?.map((opt, i) => {
+                              const optLabel = selectedLayer.optionLabels?.[i];
+                              return (
+                                <option key={i} value={opt} className="bg-slate-900 text-white" style={{ fontFamily: `"${selectedLayer.fontFamily}", sans-serif` }}>
+                                  {opt} {selectedLayer.hasOptionLabel && optLabel ? `(${optLabel})` : ""}
+                                </option>
+                              );
+                            })}
+                          </select>
+                        </div>
+                        {selectedLayer.hasOptionLabel && (
+                          <div className="text-[11px] text-slate-400 flex items-center justify-between px-0.5">
+                            <span>Type freely or pick from options</span>
+                            <span className="text-purple-300 font-mono text-[10px]">
+                              Label: {layers.find(l => l.linkedListId === selectedLayer.id)?.text || "—"}
+                            </span>
+                          </div>
+                        )}
+                      </div>
                     ) : (
-                      <textarea
-                        value={selectedLayer.text}
-                        onChange={(e) => updateLayer(selectedLayer.id, { text: e.target.value })}
-                        className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-blue-500 resize-none h-20"
-                        style={{ 
-                          fontFamily: `"${selectedLayer.fontFamily}", sans-serif`,
-                          fontWeight: selectedLayer.isBold ? 'bold' : 'normal',
-                          fontStyle: selectedLayer.isItalic ? 'italic' : 'normal'
-                        }}
-                      />
+                      <div className="space-y-2">
+                        <textarea
+                          value={selectedLayer.text}
+                          onChange={(e) => updateLayer(selectedLayer.id, { text: e.target.value })}
+                          className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-blue-500 resize-none h-20"
+                          style={{ 
+                            fontFamily: `"${selectedLayer.fontFamily}", sans-serif`,
+                            fontWeight: selectedLayer.isBold ? 'bold' : 'normal',
+                            fontStyle: selectedLayer.isItalic ? 'italic' : 'normal'
+                          }}
+                        />
+                        {selectedLayer.hasSuffixList && (
+                          <div className="flex items-center justify-between gap-2 bg-slate-900/80 p-2 rounded-lg border border-amber-500/30">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span className="text-[11px] font-semibold text-amber-300 shrink-0 font-sans">Active Suffix:</span>
+                              <select
+                                value={selectedLayer.selectedSuffix || ""}
+                                onChange={(e) => updateLayer(selectedLayer.id, { selectedSuffix: e.target.value })}
+                                className="bg-slate-800 border border-amber-600/50 rounded px-2 py-1 text-xs text-white outline-none cursor-pointer max-w-[120px]"
+                                style={{ 
+                                  fontFamily: `"${selectedLayer.suffixFontFamily || selectedLayer.fontFamily}", sans-serif`,
+                                  fontWeight: selectedLayer.isBold ? 'bold' : 'normal',
+                                  fontStyle: selectedLayer.isItalic ? 'italic' : 'normal'
+                                }}
+                              >
+                                <option value="" className="bg-slate-900 text-slate-400 font-sans">(No suffix)</option>
+                                {selectedLayer.suffixList?.map((suf, i) => (
+                                  <option 
+                                    key={i} 
+                                    value={suf}
+                                    className="bg-slate-900 text-white"
+                                    style={{ fontFamily: `"${selectedLayer.suffixFontFamily || selectedLayer.fontFamily}", sans-serif` }}
+                                  >
+                                    {suf}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                            <div 
+                              className="text-xs text-amber-200 bg-slate-800/90 px-2 py-1 rounded truncate border border-slate-700/40" 
+                              title="Full text preview"
+                              style={{ 
+                                fontFamily: `"${selectedLayer.fontFamily}", sans-serif`,
+                                fontWeight: selectedLayer.isBold ? 'bold' : 'normal',
+                                fontStyle: selectedLayer.isItalic ? 'italic' : 'normal'
+                              }}
+                            >
+                              <span>{selectedLayer.text}</span>
+                              {selectedLayer.selectedSuffix && (
+                                <span 
+                                  className="text-amber-300"
+                                  style={{ fontFamily: `"${selectedLayer.suffixFontFamily || selectedLayer.fontFamily}", sans-serif` }}
+                                >
+                                  {selectedLayer.selectedSuffix}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
                     )}
                   </div>
                   {selectedLayer.type === 'list' && !projects.find(p => p.id === currentProjectId)?.isLocked && (
-                    <div className="space-y-2 bg-slate-900/30 p-3 rounded-xl border border-slate-800/50">
-                       <label className="text-xs text-slate-500 block mb-1.5 font-semibold">Dropdown Options</label>
-                       <div className="space-y-2 max-h-40 overflow-y-auto pr-1 custom-scrollbar">
-                         {selectedLayer.options?.map((opt, i) => (
-                           <div key={i} className="flex gap-2">
-                             <input 
-                               type="text" 
-                               value={opt}
-                               onChange={(e) => {
-                                 const newOpts = [...(selectedLayer.options || [])];
-                                 newOpts[i] = e.target.value;
-                                 updateLayer(selectedLayer.id, { options: newOpts });
-                               }}
-                               className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-[11px] outline-none focus:border-blue-500"
-                             />
-                             <button 
-                               onClick={() => {
-                                 const newOpts = selectedLayer.options?.filter((_, idx) => idx !== i);
-                                 updateLayer(selectedLayer.id, { options: newOpts });
-                               }}
-                               className="p-1 text-slate-500 hover:text-red-400 transition-colors"
-                             >
-                               <Trash2 size={14} />
-                             </button>
-                           </div>
-                         ))}
-                       </div>
-                       <button 
-                        onClick={() => {
-                          const newOpts = [...(selectedLayer.options || []), "New Option"];
-                          updateLayer(selectedLayer.id, { options: newOpts });
-                        }}
-                        className="w-full py-1.5 border border-dashed border-slate-700 rounded-lg text-[10px] uppercase tracking-wider font-bold text-slate-500 hover:text-slate-300 hover:border-slate-500 transition-all flex items-center justify-center gap-1"
-                       >
-                         <Plus size={12} /> Add New Item
-                       </button>
+                    <div className="space-y-3 bg-slate-900/30 p-3 rounded-xl border border-slate-800/50">
+                      {/* Option Label Toggle */}
+                      <div className="flex items-center justify-between bg-slate-800/80 p-2.5 rounded-lg border border-slate-700/60">
+                        <div className="flex items-center gap-2">
+                          <Tag size={15} className={selectedLayer.hasOptionLabel ? "text-purple-400" : "text-slate-400"} />
+                          <div>
+                            <div className="text-xs font-semibold text-slate-200">Option Labels & Placeholder</div>
+                            <div className="text-[10px] text-slate-400">Add label for each option & show separate placeholder on image</div>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => toggleListOptionLabel(selectedLayer.id)}
+                          className={cn(
+                            "relative inline-flex h-5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none",
+                            selectedLayer.hasOptionLabel ? "bg-purple-600" : "bg-slate-700"
+                          )}
+                          title={selectedLayer.hasOptionLabel ? "Disable option labels" : "Enable option labels"}
+                        >
+                          <span
+                            className={cn(
+                              "pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out",
+                              selectedLayer.hasOptionLabel ? "translate-x-5" : "translate-x-0"
+                            )}
+                          />
+                        </button>
+                      </div>
+
+                      {/* Jump to Label Placeholder if enabled */}
+                      {selectedLayer.hasOptionLabel && (
+                        <div className="flex items-center justify-between text-xs bg-purple-950/30 border border-purple-800/40 px-2.5 py-1.5 rounded-lg">
+                          <span className="text-[11px] text-purple-300 flex items-center gap-1.5">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                            Label placeholder is active on image
+                          </span>
+                          {(() => {
+                            const linked = layers.find(l => l.linkedListId === selectedLayer.id);
+                            if (!linked) return null;
+                            return (
+                              <button
+                                type="button"
+                                onClick={() => setSelectedLayerId(linked.id)}
+                                className="text-[10px] text-purple-200 hover:text-white bg-purple-700/50 hover:bg-purple-600 px-2 py-0.5 rounded transition-all font-medium flex items-center gap-1 border border-purple-600/40"
+                              >
+                                <Move size={11} /> Move / Style Label
+                              </button>
+                            );
+                          })()}
+                        </div>
+                      )}
+
+                      {/* Dropdown Options List Editor */}
+                      {(() => {
+                        const linkedLabel = layers.find(l => l.linkedListId === selectedLayer.id);
+                        const labelFont = linkedLabel?.fontFamily || selectedLayer.fontFamily;
+
+                        return (
+                          <div>
+                            <div className="flex items-center justify-between mb-1.5">
+                              <label className="text-xs text-slate-400 font-semibold">
+                                Dropdown Options {selectedLayer.hasOptionLabel && <span className="text-purple-400 font-normal">& Labels</span>}
+                              </label>
+                              <span className="text-[10px] text-slate-500">
+                                {selectedLayer.options?.length || 0} items
+                              </span>
+                            </div>
+
+                            {/* Font Selectors for Option Value & Option Label */}
+                            <div className="grid grid-cols-2 gap-2 p-2 mb-2.5 bg-slate-900/60 rounded-lg border border-slate-800">
+                              <div>
+                                <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1 truncate">
+                                  Value Font
+                                </label>
+                                <select
+                                  value={selectedLayer.fontFamily}
+                                  onChange={(e) => updateLayer(selectedLayer.id, { fontFamily: e.target.value })}
+                                  className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-white outline-none cursor-pointer"
+                                  style={{ fontFamily: `"${selectedLayer.fontFamily}", sans-serif` }}
+                                  title="Font for Option Values"
+                                >
+                                  <option value="sans-serif" className="bg-slate-900 text-white font-sans">System Sans</option>
+                                  {fonts.map((f, idx) => (
+                                    <option key={idx} value={f.name} className="bg-slate-900 text-white" style={{ fontFamily: `"${f.name}", sans-serif` }}>
+                                      {f.name.split('-').slice(1).join('-') || f.name}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+
+                              <div>
+                                <label className="text-[10px] uppercase font-bold text-purple-300 block mb-1 truncate">
+                                  {selectedLayer.hasOptionLabel ? "Label Font" : "Label Font (Disabled)"}
+                                </label>
+                                {selectedLayer.hasOptionLabel ? (
+                                  <select
+                                    value={labelFont}
+                                    onChange={(e) => {
+                                      const newFont = e.target.value;
+                                      if (linkedLabel) {
+                                        updateLayer(linkedLabel.id, { fontFamily: newFont });
+                                      }
+                                    }}
+                                    className="w-full bg-slate-800 border border-purple-800/60 rounded px-2 py-1 text-xs text-purple-200 outline-none cursor-pointer"
+                                    style={{ fontFamily: `"${labelFont}", sans-serif` }}
+                                    title="Font for Option Labels"
+                                  >
+                                    <option value="sans-serif" className="bg-slate-900 text-white font-sans">System Sans</option>
+                                    {fonts.map((f, idx) => (
+                                      <option key={idx} value={f.name} className="bg-slate-900 text-white" style={{ fontFamily: `"${f.name}", sans-serif` }}>
+                                        {f.name.split('-').slice(1).join('-') || f.name}
+                                      </option>
+                                    ))}
+                                  </select>
+                                ) : (
+                                  <div className="text-[10px] text-slate-500 py-1 italic">
+                                    Enable labels above
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+
+                            {selectedLayer.hasOptionLabel && (
+                              <div className="grid grid-cols-[1fr_1fr_28px] gap-2 px-1 mb-1 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                                <span>Option Value</span>
+                                <span>Option Label</span>
+                                <span />
+                              </div>
+                            )}
+
+                            <div className="space-y-2 max-h-48 overflow-y-auto pr-1 custom-scrollbar">
+                              {selectedLayer.options?.map((opt, i) => (
+                                <div key={i} className={cn("gap-2 items-center", selectedLayer.hasOptionLabel ? "grid grid-cols-[1fr_1fr_28px]" : "flex")}>
+                                  <input 
+                                    type="text" 
+                                    value={opt}
+                                    placeholder="Value (e.g. 10)"
+                                    onChange={(e) => updateListOption(selectedLayer.id, i, 'value', e.target.value)}
+                                    className="bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs outline-none focus:border-blue-500 w-full"
+                                    style={{ 
+                                      fontFamily: `"${selectedLayer.fontFamily}", sans-serif`,
+                                      fontWeight: selectedLayer.isBold ? 'bold' : 'normal',
+                                      fontStyle: selectedLayer.isItalic ? 'italic' : 'normal'
+                                    }}
+                                  />
+                                  {selectedLayer.hasOptionLabel && (
+                                    <input 
+                                      type="text" 
+                                      value={selectedLayer.optionLabels?.[i] ?? ""}
+                                      placeholder="Label (e.g. Ten)"
+                                      onChange={(e) => updateListOption(selectedLayer.id, i, 'label', e.target.value)}
+                                      className="bg-slate-800 border border-purple-900/60 focus:border-purple-500 rounded-lg px-2.5 py-1.5 text-xs outline-none w-full text-purple-200"
+                                      style={{ 
+                                        fontFamily: `"${labelFont}", sans-serif`,
+                                        fontWeight: linkedLabel?.isBold ? 'bold' : 'normal',
+                                        fontStyle: linkedLabel?.isItalic ? 'italic' : 'normal'
+                                      }}
+                                    />
+                                  )}
+                                  <button 
+                                    type="button"
+                                    onClick={() => removeOptionFromList(selectedLayer.id, i)}
+                                    className="p-1 text-slate-500 hover:text-red-400 transition-colors shrink-0 flex items-center justify-center"
+                                    title="Delete Option"
+                                  >
+                                    <Trash2 size={14} />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+
+                            <button 
+                              type="button"
+                              onClick={() => addOptionToList(selectedLayer.id)}
+                              className="w-full py-1.5 border border-dashed border-slate-700 rounded-lg text-[10px] uppercase tracking-wider font-bold text-slate-500 hover:text-slate-300 hover:border-slate-500 transition-all flex items-center justify-center gap-1 mt-2"
+                            >
+                              <Plus size={12} /> Add New Item
+                            </button>
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )}
+
+                  {/* Suffix List Section for Text Layers */}
+                  {(selectedLayer.type === 'text' || !selectedLayer.type) && !selectedLayer.isListLabel && !projects.find(p => p.id === currentProjectId)?.isLocked && (
+                    <div className="space-y-3 bg-slate-900/30 p-3 rounded-xl border border-slate-800/50">
+                      {/* Suffix Toggle Header */}
+                      <div className="flex items-center justify-between bg-slate-800/80 p-2.5 rounded-lg border border-slate-700/60">
+                        <div className="flex items-center gap-2">
+                          <div className="w-6 h-6 rounded-md bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 font-mono text-xs font-bold">
+                            +S
+                          </div>
+                          <div>
+                            <div className="text-xs font-semibold text-slate-200">Suffix List</div>
+                            <div className="text-[10px] text-slate-400">Append selected suffix after text on the same line</div>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => toggleSuffixList(selectedLayer.id)}
+                          className={cn(
+                            "relative inline-flex h-5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none",
+                            selectedLayer.hasSuffixList ? "bg-amber-600" : "bg-slate-700"
+                          )}
+                          title={selectedLayer.hasSuffixList ? "Disable suffix list" : "Enable suffix list"}
+                        >
+                          <span
+                            className={cn(
+                              "pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out",
+                              selectedLayer.hasSuffixList ? "translate-x-5" : "translate-x-0"
+                            )}
+                          />
+                        </button>
+                      </div>
+
+                      {/* Suffix Configuration if Enabled */}
+                      {selectedLayer.hasSuffixList && (
+                        <div className="space-y-3 pt-1">
+                          {/* Active Suffix Picker & Quick Chips */}
+                          <div className="bg-slate-800/50 p-2.5 rounded-lg border border-slate-700/40 space-y-2">
+                            <div className="flex items-center justify-between">
+                              <label className="text-[11px] font-semibold text-slate-300 font-sans">Active Suffix on Image</label>
+                              <span 
+                                className="text-xs text-amber-300 bg-amber-950/60 px-2 py-0.5 rounded border border-amber-800/40"
+                                style={{
+                                  fontFamily: `"${selectedLayer.fontFamily}", sans-serif`,
+                                  fontWeight: selectedLayer.isBold ? 'bold' : 'normal',
+                                  fontStyle: selectedLayer.isItalic ? 'italic' : 'normal'
+                                }}
+                              >
+                                <span>{selectedLayer.text}</span>
+                                {selectedLayer.selectedSuffix && (
+                                  <span style={{ fontFamily: `"${selectedLayer.suffixFontFamily || selectedLayer.fontFamily}", sans-serif` }}>
+                                    {selectedLayer.selectedSuffix}
+                                  </span>
+                                )}
+                              </span>
+                            </div>
+                            <div className="flex flex-wrap gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => updateLayer(selectedLayer.id, { selectedSuffix: "" })}
+                                className={cn(
+                                  "px-2 py-1 rounded text-xs transition-all border font-sans",
+                                  !selectedLayer.selectedSuffix
+                                    ? "bg-amber-600 text-white border-amber-500 shadow-sm font-bold"
+                                    : "bg-slate-800 text-slate-400 border-slate-700 hover:border-slate-600 hover:text-slate-200"
+                                )}
+                              >
+                                (None)
+                              </button>
+                              {selectedLayer.suffixList?.map((suf, i) => (
+                                <button
+                                  key={i}
+                                  type="button"
+                                  onClick={() => updateLayer(selectedLayer.id, { selectedSuffix: suf })}
+                                  className={cn(
+                                    "px-2.5 py-1 rounded text-xs transition-all border",
+                                    selectedLayer.selectedSuffix === suf
+                                      ? "bg-amber-600 text-white border-amber-500 shadow-sm font-bold"
+                                      : "bg-slate-800 text-slate-300 border-slate-700 hover:border-amber-600/50 hover:text-amber-300"
+                                  )}
+                                  style={{
+                                    fontFamily: `"${selectedLayer.suffixFontFamily || selectedLayer.fontFamily}", sans-serif`,
+                                    fontWeight: selectedLayer.isBold ? 'bold' : 'normal',
+                                    fontStyle: selectedLayer.isItalic ? 'italic' : 'normal'
+                                  }}
+                                >
+                                  {suf}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+
+                          {/* Suffix Items List Editor */}
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between">
+                              <label className="text-xs text-slate-400 font-semibold font-sans">
+                                Suffix Options ({selectedLayer.suffixList?.length || 0})
+                              </label>
+                              <button
+                                type="button"
+                                onClick={() => addSuffixOption(selectedLayer.id)}
+                                className="text-[10px] text-amber-400 hover:text-amber-300 flex items-center gap-1 font-semibold"
+                              >
+                                <Plus size={11} /> Add Suffix
+                              </button>
+                            </div>
+
+                            <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1 custom-scrollbar">
+                              {selectedLayer.suffixList?.map((suf, i) => {
+                                const isSelected = selectedLayer.selectedSuffix === suf;
+                                return (
+                                  <div key={i} className="flex items-center gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => updateLayer(selectedLayer.id, { selectedSuffix: suf })}
+                                      className={cn(
+                                        "w-5 h-5 rounded-full flex items-center justify-center text-[10px] shrink-0 border transition-all",
+                                        isSelected
+                                          ? "bg-amber-600 border-amber-500 text-white"
+                                          : "border-slate-700 text-slate-500 hover:border-slate-500"
+                                      )}
+                                      title={isSelected ? "Currently selected" : "Click to select this suffix"}
+                                    >
+                                      ✓
+                                    </button>
+                                    <input
+                                      type="text"
+                                      value={suf}
+                                      onChange={(e) => updateSuffixOption(selectedLayer.id, i, e.target.value)}
+                                      className="bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1 text-xs outline-none focus:border-amber-500 w-full text-white"
+                                      style={{
+                                        fontFamily: `"${selectedLayer.suffixFontFamily || selectedLayer.fontFamily}", sans-serif`,
+                                        fontWeight: selectedLayer.isBold ? 'bold' : 'normal',
+                                        fontStyle: selectedLayer.isItalic ? 'italic' : 'normal'
+                                      }}
+                                      placeholder="e.g. /-"
+                                    />
+                                    {selectedLayer.showSuffixLine && (
+                                      <button
+                                        type="button"
+                                        onClick={() => updateLayer(selectedLayer.id, { selectedSuffix: suf })}
+                                        className={cn(
+                                          "text-[10px] px-1.5 py-0.5 rounded border shrink-0 font-mono transition-colors",
+                                          isSelected
+                                            ? "bg-sky-500/20 text-sky-300 border-sky-500/50 font-bold"
+                                            : "bg-slate-800 text-slate-400 border-slate-700 hover:text-slate-200"
+                                        )}
+                                        title={`Line coordinates: (${Math.round(getSuffixLineConfig(selectedLayer, suf, i).x1)}%, ${Math.round(getSuffixLineConfig(selectedLayer, suf, i).y1)}%)`}
+                                      >
+                                        Line
+                                      </button>
+                                    )}
+                                    <button
+                                      type="button"
+                                      onClick={() => removeSuffixOption(selectedLayer.id, i)}
+                                      className="p-1 text-slate-500 hover:text-red-400 transition-colors shrink-0"
+                                      title="Delete suffix"
+                                    >
+                                      <Trash2 size={13} />
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+
+                          {/* Suffix Appearance (Gap, Font Size, Color) */}
+                          <div className="pt-2 border-t border-slate-800/80 space-y-2">
+                            <div className="flex items-center justify-between text-xs">
+                              <label className="text-[11px] font-semibold text-slate-400">Suffix Spacing (Gap)</label>
+                              <span className="text-[11px] font-mono text-amber-300">{selectedLayer.suffixGap ?? 4}px</span>
+                            </div>
+                            <input
+                              type="range"
+                              min="0"
+                              max="40"
+                              value={selectedLayer.suffixGap ?? 4}
+                              onChange={(e) => updateLayer(selectedLayer.id, { suffixGap: parseInt(e.target.value) || 0 })}
+                              className="w-full accent-amber-500"
+                            />
+
+                            <div className="grid grid-cols-2 gap-2 pt-1">
+                              <div>
+                                <label className="text-[10px] uppercase font-bold text-slate-500 block mb-1">Suffix Font Size</label>
+                                <div className="flex items-center gap-1.5">
+                                  <input
+                                    type="number"
+                                    min="8"
+                                    max="300"
+                                    value={selectedLayer.suffixFontSize || selectedLayer.fontSize}
+                                    onChange={(e) => updateLayer(selectedLayer.id, { suffixFontSize: parseInt(e.target.value) || selectedLayer.fontSize })}
+                                    className="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-xs outline-none focus:border-amber-500"
+                                  />
+                                  {selectedLayer.suffixFontSize && selectedLayer.suffixFontSize !== selectedLayer.fontSize && (
+                                    <button
+                                      type="button"
+                                      onClick={() => updateLayer(selectedLayer.id, { suffixFontSize: undefined })}
+                                      className="text-[10px] text-slate-500 hover:text-slate-300 shrink-0"
+                                      title="Reset to main font size"
+                                    >
+                                      Reset
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                              <div>
+                                <label className="text-[10px] uppercase font-bold text-slate-500 block mb-1">Suffix Color</label>
+                                <div className="flex items-center gap-1.5">
+                                  <input
+                                    type="color"
+                                    value={selectedLayer.suffixColor || selectedLayer.color}
+                                    onChange={(e) => updateLayer(selectedLayer.id, { suffixColor: e.target.value })}
+                                    className="w-7 h-7 rounded border border-slate-700 bg-transparent cursor-pointer shrink-0"
+                                  />
+                                  <span className="text-[10px] font-mono text-slate-400 truncate">{selectedLayer.suffixColor || selectedLayer.color}</span>
+                                  {selectedLayer.suffixColor && selectedLayer.suffixColor !== selectedLayer.color && (
+                                    <button
+                                      type="button"
+                                      onClick={() => updateLayer(selectedLayer.id, { suffixColor: undefined })}
+                                      className="text-[10px] text-slate-500 hover:text-slate-300 shrink-0"
+                                      title="Reset to main text color"
+                                    >
+                                      Reset
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="pt-1">
+                              <div className="flex items-center justify-between mb-1">
+                                <label className="text-[10px] uppercase font-bold text-slate-500 block">Suffix Font Override</label>
+                                {selectedLayer.suffixFontFamily && selectedLayer.suffixFontFamily !== selectedLayer.fontFamily && (
+                                  <button
+                                    type="button"
+                                    onClick={() => updateLayer(selectedLayer.id, { suffixFontFamily: undefined })}
+                                    className="text-[10px] text-slate-500 hover:text-slate-300"
+                                    title="Reset to inherit layer font"
+                                  >
+                                    Reset to Layer Font ({selectedLayer.fontFamily})
+                                  </button>
+                                )}
+                              </div>
+                              <select
+                                value={selectedLayer.suffixFontFamily || ""}
+                                onChange={(e) => updateLayer(selectedLayer.id, { suffixFontFamily: e.target.value || undefined })}
+                                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-slate-200 outline-none focus:border-amber-500 cursor-pointer"
+                                style={{ fontFamily: `"${selectedLayer.suffixFontFamily || selectedLayer.fontFamily}", sans-serif` }}
+                              >
+                                <option value="" className="bg-slate-900 text-slate-400 font-sans">
+                                  Default: Inherit from layer ({selectedLayer.fontFamily})
+                                </option>
+                                <option value="sans-serif" className="bg-slate-900 text-white font-sans">System Sans</option>
+                                {fonts.map((f, i) => (
+                                  <option 
+                                    key={i} 
+                                    value={f.name}
+                                    className="bg-slate-900 text-white"
+                                    style={{ fontFamily: `"${f.name}", sans-serif` }}
+                                  >
+                                    {f.name}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+
+                            {/* Show Line Toggle & Per-Option Position Editor */}
+                            <div className="pt-2 border-t border-slate-800/80 space-y-2.5">
+                              <div className="flex items-center justify-between bg-slate-800/80 p-2.5 rounded-lg border border-slate-700/60">
+                                <div className="flex items-center gap-2">
+                                  <div className="w-6 h-6 rounded-md bg-sky-500/10 border border-sky-500/30 flex items-center justify-center text-sky-400">
+                                    <Minus size={14} className="stroke-[2.5]" />
+                                  </div>
+                                  <div>
+                                    <div className="text-xs font-semibold text-slate-200">Show Line</div>
+                                    <div className="text-[10px] text-slate-400">Draw line at custom location for each suffix option</div>
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => updateLayer(selectedLayer.id, { showSuffixLine: !selectedLayer.showSuffixLine })}
+                                  className={cn(
+                                    "relative inline-flex h-5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none",
+                                    selectedLayer.showSuffixLine ? "bg-sky-600" : "bg-slate-700"
+                                  )}
+                                  title={selectedLayer.showSuffixLine ? "Disable line" : "Enable line"}
+                                >
+                                  <span
+                                    className={cn(
+                                      "pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out",
+                                      selectedLayer.showSuffixLine ? "translate-x-5" : "translate-x-0"
+                                    )}
+                                  />
+                                </button>
+                              </div>
+
+                              {selectedLayer.showSuffixLine && (
+                                <div className="bg-slate-800/60 p-3 rounded-xl border border-sky-500/30 space-y-3">
+                                  {/* Suffix Option Selector for Line Position */}
+                                  <div>
+                                    <div className="flex items-center justify-between mb-1.5">
+                                      <label className="text-[11px] font-semibold text-slate-300">
+                                        Suffix Option ({selectedLayer.suffixList?.length || 0})
+                                      </label>
+                                      <span className="text-[10px] text-sky-400 font-medium">
+                                        Location defined per option
+                                      </span>
+                                    </div>
+                                    <div className="flex flex-wrap gap-1.5">
+                                      {selectedLayer.suffixList?.map((suf, i) => {
+                                        const isSelected = selectedLayer.selectedSuffix === suf;
+                                        const cfg = getSuffixLineConfig(selectedLayer, suf, i);
+                                        return (
+                                          <button
+                                            key={i}
+                                            type="button"
+                                            onClick={() => updateLayer(selectedLayer.id, { selectedSuffix: suf })}
+                                            className={cn(
+                                              "px-2.5 py-1 rounded text-xs transition-all border flex items-center gap-1.5",
+                                              isSelected
+                                                ? "bg-sky-600 text-white border-sky-400 shadow-sm font-bold ring-1 ring-sky-400/40"
+                                                : "bg-slate-800 text-slate-300 border-slate-700 hover:border-sky-500/50 hover:text-sky-300"
+                                            )}
+                                            style={{ fontFamily: `"${selectedLayer.suffixFontFamily || selectedLayer.fontFamily}", sans-serif` }}
+                                            title={`Configure line location for "${suf}"`}
+                                          >
+                                            <span>{suf}</span>
+                                            <span className="text-[9px] font-mono opacity-75">
+                                              ({Math.round(cfg.x1)}%,{Math.round(cfg.y1)}%)
+                                            </span>
+                                          </button>
+                                        );
+                                      })}
+                                    </div>
+                                  </div>
+
+                                  {/* Line Coordinates Editor */}
+                                  {selectedLayer.selectedSuffix ? (() => {
+                                    const suf = selectedLayer.selectedSuffix;
+                                    const cfg = getSuffixLineConfig(selectedLayer, suf, selectedLayer.suffixList?.indexOf(suf));
+
+                                    return (
+                                      <div className="space-y-2.5 bg-slate-900/60 p-2.5 rounded-lg border border-slate-800">
+                                        <div className="flex items-center justify-between text-xs">
+                                          <span className="font-semibold text-sky-300 flex items-center gap-1.5">
+                                            <span>Line position for:</span>
+                                            <span className="px-1.5 py-0.5 bg-sky-950 border border-sky-800 rounded font-bold" style={{ fontFamily: `"${selectedLayer.suffixFontFamily || selectedLayer.fontFamily}", sans-serif` }}>
+                                              {suf}
+                                            </span>
+                                          </span>
+                                          <span className="text-[10px] text-slate-400 font-mono">
+                                            ({cfg.x1}%, {cfg.y1}%) → ({cfg.x2}%, {cfg.y2}%)
+                                          </span>
+                                        </div>
+
+                                        {/* Start Point X1, Y1 */}
+                                        <div className="grid grid-cols-2 gap-2">
+                                          <div>
+                                            <div className="flex justify-between text-[10px] text-slate-400 mb-1">
+                                              <span>Start X1</span>
+                                              <span className="font-mono text-sky-300">{cfg.x1}%</span>
+                                            </div>
+                                            <input
+                                              type="range"
+                                              min="0"
+                                              max="100"
+                                              step="0.5"
+                                              value={cfg.x1}
+                                              onChange={(e) => updateSuffixLineConfig(selectedLayer.id, suf, { x1: parseFloat(e.target.value) || 0 })}
+                                              className="w-full accent-sky-500 h-1.5 bg-slate-700 rounded-lg cursor-pointer"
+                                            />
+                                          </div>
+                                          <div>
+                                            <div className="flex justify-between text-[10px] text-slate-400 mb-1">
+                                              <span>Start Y1</span>
+                                              <span className="font-mono text-sky-300">{cfg.y1}%</span>
+                                            </div>
+                                            <input
+                                              type="range"
+                                              min="0"
+                                              max="100"
+                                              step="0.5"
+                                              value={cfg.y1}
+                                              onChange={(e) => updateSuffixLineConfig(selectedLayer.id, suf, { y1: parseFloat(e.target.value) || 0 })}
+                                              className="w-full accent-sky-500 h-1.5 bg-slate-700 rounded-lg cursor-pointer"
+                                            />
+                                          </div>
+                                        </div>
+
+                                        {/* End Point X2, Y2 */}
+                                        <div className="grid grid-cols-2 gap-2">
+                                          <div>
+                                            <div className="flex justify-between text-[10px] text-slate-400 mb-1">
+                                              <span>End X2</span>
+                                              <span className="font-mono text-sky-300">{cfg.x2}%</span>
+                                            </div>
+                                            <input
+                                              type="range"
+                                              min="0"
+                                              max="100"
+                                              step="0.5"
+                                              value={cfg.x2}
+                                              onChange={(e) => updateSuffixLineConfig(selectedLayer.id, suf, { x2: parseFloat(e.target.value) || 0 })}
+                                              className="w-full accent-sky-500 h-1.5 bg-slate-700 rounded-lg cursor-pointer"
+                                            />
+                                          </div>
+                                          <div>
+                                            <div className="flex justify-between text-[10px] text-slate-400 mb-1">
+                                              <span>End Y2</span>
+                                              <span className="font-mono text-sky-300">{cfg.y2}%</span>
+                                            </div>
+                                            <input
+                                              type="range"
+                                              min="0"
+                                              max="100"
+                                              step="0.5"
+                                              value={cfg.y2}
+                                              onChange={(e) => updateSuffixLineConfig(selectedLayer.id, suf, { y2: parseFloat(e.target.value) || 0 })}
+                                              className="w-full accent-sky-500 h-1.5 bg-slate-700 rounded-lg cursor-pointer"
+                                            />
+                                          </div>
+                                        </div>
+
+                                        {/* Quick Positioning Helpers */}
+                                        <div className="pt-1 flex flex-wrap gap-1.5 text-[10px]">
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              updateSuffixLineConfig(selectedLayer.id, suf, { y2: cfg.y1 });
+                                            }}
+                                            className="bg-slate-800 hover:bg-slate-700 text-slate-300 px-2 py-1 rounded border border-slate-700"
+                                            title="Make line perfectly horizontal"
+                                          >
+                                            Horizontal (Level)
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              updateSuffixLineConfig(selectedLayer.id, suf, {
+                                                x1: Math.round(Math.max(2, selectedLayer.x - 2)),
+                                                y1: Math.round(Math.max(2, selectedLayer.y + 4)),
+                                                x2: Math.round(Math.min(98, selectedLayer.x + 18)),
+                                                y2: Math.round(Math.max(2, selectedLayer.y + 4)),
+                                              });
+                                            }}
+                                            className="bg-slate-800 hover:bg-slate-700 text-slate-300 px-2 py-1 rounded border border-slate-700"
+                                            title="Position line near the text layer"
+                                          >
+                                            Place near Text
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              const newLines: Record<string, SuffixLineConfig> = { ...(selectedLayer.suffixLines || {}) };
+                                              selectedLayer.suffixList?.forEach(s => {
+                                                newLines[s] = { ...cfg };
+                                              });
+                                              updateLayer(selectedLayer.id, { suffixLines: newLines });
+                                              setNotification({ message: "Copied line position to all suffix options", type: 'success' });
+                                            }}
+                                            className="bg-slate-800 hover:bg-slate-700 text-sky-400 px-2 py-1 rounded border border-slate-700 ml-auto"
+                                            title="Copy this line position to all suffix options"
+                                          >
+                                            Copy to All
+                                          </button>
+                                        </div>
+                                      </div>
+                                    );
+                                  })() : (
+                                    <div className="text-xs text-amber-400 bg-amber-950/40 p-2 rounded border border-amber-800/40">
+                                      Please select a suffix option above to configure its line location.
+                                    </div>
+                                  )}
+
+                                  {/* Line Styling (Color & Width) */}
+                                  <div className="pt-2 border-t border-slate-700/60 grid grid-cols-2 gap-2">
+                                    <div>
+                                      <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Line Thickness</label>
+                                      <div className="flex items-center gap-2">
+                                        <input
+                                          type="range"
+                                          min="1"
+                                          max="20"
+                                          value={selectedLayer.suffixLineWidth || 3}
+                                          onChange={(e) => updateLayer(selectedLayer.id, { suffixLineWidth: parseInt(e.target.value) || 1 })}
+                                          className="w-full accent-sky-500 h-1.5 bg-slate-700 rounded-lg cursor-pointer"
+                                        />
+                                        <span className="text-xs font-mono text-sky-300 shrink-0 w-8 text-right">
+                                          {selectedLayer.suffixLineWidth || 3}px
+                                        </span>
+                                      </div>
+                                    </div>
+                                    <div>
+                                      <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Line Color</label>
+                                      <div className="flex items-center gap-1.5">
+                                        <input
+                                          type="color"
+                                          value={selectedLayer.suffixLineColor || selectedLayer.color}
+                                          onChange={(e) => updateLayer(selectedLayer.id, { suffixLineColor: e.target.value })}
+                                          className="w-7 h-7 rounded border border-slate-700 bg-transparent cursor-pointer shrink-0"
+                                        />
+                                        <span className="text-[10px] font-mono text-slate-300 truncate">
+                                          {selectedLayer.suffixLineColor || selectedLayer.color}
+                                        </span>
+                                        {selectedLayer.suffixLineColor && selectedLayer.suffixLineColor !== selectedLayer.color && (
+                                          <button
+                                            type="button"
+                                            onClick={() => updateLayer(selectedLayer.id, { suffixLineColor: undefined })}
+                                            className="text-[10px] text-slate-500 hover:text-slate-300 shrink-0"
+                                            title="Reset to text color"
+                                          >
+                                            Reset
+                                          </button>
+                                        )}
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  <div className="text-[10px] text-slate-400 flex items-center gap-1.5 bg-slate-900/40 p-2 rounded border border-slate-800">
+                                    <Move size={12} className="text-sky-400 shrink-0" />
+                                    <span>Drag the line or its blue circular endpoints directly on the image to position!</span>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
 
