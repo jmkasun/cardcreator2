@@ -283,6 +283,53 @@ app.get("/fonts/:name", async (req, res) => {
   app.use("/fonts", express.static(WRITABLE_FONTS_DIR));
 
   // Auth
+  app.post("/api/register", async (req, res) => {
+    try {
+      const { username, password } = req.body;
+      if (!username || !password) {
+        return res.status(400).json({ success: false, message: "Username and password are required" });
+      }
+      const cleanUsername = String(username).trim();
+      if (cleanUsername.length < 2) {
+        return res.status(400).json({ success: false, message: "Username must be at least 2 characters long" });
+      }
+      if (String(password).length < 4) {
+        return res.status(400).json({ success: false, message: "Password must be at least 4 characters long" });
+      }
+
+      if (HAS_POSTGRES) {
+        const existing = await safeQuery(
+          "SELECT username FROM users WHERE LOWER(username) = LOWER($1)",
+          [cleanUsername]
+        );
+        if (existing.rowCount && existing.rowCount > 0) {
+          return res.status(400).json({ success: false, message: "Username is already taken" });
+        }
+
+        await safeQuery(
+          "INSERT INTO users (username, password, role) VALUES ($1, $2, 'user')",
+          [cleanUsername, String(password)]
+        );
+
+        console.log(`Registration successful for user: ${cleanUsername}`);
+        return res.json({ 
+          success: true, 
+          username: cleanUsername, 
+          role: "user",
+          selectedFonts: [],
+          defaultFont: null,
+          defaultFontSize: null,
+          defaultFontColor: null
+        });
+      }
+
+      res.status(500).json({ success: false, message: "Database not connected" });
+    } catch (err) {
+      console.error("Register error details:", err instanceof Error ? err.message : String(err));
+      res.status(500).json({ success: false, message: "Internal server error" });
+    }
+  });
+
   app.post("/api/login", async (req, res) => {
     try {
       const { username, password } = req.body;

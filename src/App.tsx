@@ -105,6 +105,8 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [registerConfirmPassword, setRegisterConfirmPassword] = useState("");
+  const [isRegisterMode, setIsRegisterMode] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -363,6 +365,59 @@ export default function App() {
       }
     } catch (err) {
       setError("Login failed. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmedUser = username.trim();
+    if (!trimmedUser) {
+      setError("Please enter a username");
+      return;
+    }
+    if (trimmedUser.length < 2) {
+      setError("Username must be at least 2 characters long");
+      return;
+    }
+    if (!password) {
+      setError("Please enter a password");
+      return;
+    }
+    if (password.length < 4) {
+      setError("Password must be at least 4 characters long");
+      return;
+    }
+    if (password !== registerConfirmPassword) {
+      setError("Passwords do not match");
+      return;
+    }
+
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch("/api/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: trimmedUser, password }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setUser({ 
+          username: data.username, 
+          role: data.role, 
+          selectedFonts: data.selectedFonts || [],
+          defaultFont: data.defaultFont,
+          defaultFontSize: data.defaultFontSize,
+          defaultFontColor: data.defaultFontColor
+        });
+        setNotification({ message: "Account created successfully! Welcome to FontOverlay Pro.", type: 'success' });
+      } else {
+        setError(data.message || "Registration failed");
+      }
+    } catch (err) {
+      setError("Failed to create account. Please try again.");
     } finally {
       setLoading(false);
     }
@@ -1994,15 +2049,53 @@ export default function App() {
           animate={{ opacity: 1, y: 0 }}
           className="bg-slate-900 border border-slate-800 p-8 rounded-2xl w-full max-w-md shadow-2xl"
         >
-          <div className="flex flex-col items-center mb-8">
+          <div className="flex flex-col items-center mb-6">
             <div className="w-16 h-16 bg-blue-600 rounded-2xl flex items-center justify-center mb-4 shadow-lg shadow-blue-900/20">
               <ImageIcon className="text-white w-8 h-8" />
             </div>
             <h1 className="text-2xl font-bold text-white">FontOverlay Pro</h1>
-            <p className="text-slate-400 text-sm">Sign in to start creating</p>
+            <p className="text-slate-400 text-sm mt-1">
+              {isRegisterMode ? "Create an account to start creating" : "Sign in to start creating"}
+            </p>
           </div>
 
-          <form onSubmit={handleLogin} className="space-y-4">
+          {/* Mode Switcher */}
+          <div className="flex bg-slate-800/80 p-1 rounded-xl mb-6 border border-slate-700/60">
+            <button
+              type="button"
+              onClick={() => {
+                setIsRegisterMode(false);
+                setError("");
+              }}
+              className={cn(
+                "flex-1 py-2 text-xs font-semibold rounded-lg transition-all flex items-center justify-center gap-1.5",
+                !isRegisterMode
+                  ? "bg-blue-600 text-white shadow-sm"
+                  : "text-slate-400 hover:text-white"
+              )}
+            >
+              <UserCircle size={14} />
+              Sign In
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setIsRegisterMode(true);
+                setError("");
+              }}
+              className={cn(
+                "flex-1 py-2 text-xs font-semibold rounded-lg transition-all flex items-center justify-center gap-1.5",
+                isRegisterMode
+                  ? "bg-blue-600 text-white shadow-sm"
+                  : "text-slate-400 hover:text-white"
+              )}
+            >
+              <UserPlus size={14} />
+              Create Account
+            </button>
+          </div>
+
+          <form onSubmit={isRegisterMode ? handleRegister : handleLogin} className="space-y-4">
             <div>
               <label className="block text-sm font-medium text-slate-300 mb-1.5">Username</label>
               <input
@@ -2010,7 +2103,7 @@ export default function App() {
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
-                placeholder="admin"
+                placeholder={isRegisterMode ? "Choose a username" : "Enter your username"}
                 required
               />
             </div>
@@ -2021,22 +2114,76 @@ export default function App() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
-                placeholder="••••"
+                placeholder={isRegisterMode ? "At least 4 characters" : "••••"}
                 required
               />
             </div>
+            {isRegisterMode && (
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-1.5">Confirm Password</label>
+                <input
+                  type="password"
+                  value={registerConfirmPassword}
+                  onChange={(e) => setRegisterConfirmPassword(e.target.value)}
+                  className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+                  placeholder="Re-enter your password"
+                  required
+                />
+              </div>
+            )}
             {error && <p className="text-red-400 text-sm text-center">{error}</p>}
             <button
               type="submit"
               disabled={loading}
               className="w-full bg-blue-600 hover:bg-blue-500 text-white font-semibold py-3 rounded-xl transition-colors shadow-lg shadow-blue-900/20 flex items-center justify-center gap-2"
             >
-              {loading ? "Signing in..." : "Sign In"}
+              {loading ? (
+                isRegisterMode ? "Creating Account..." : "Signing in..."
+              ) : isRegisterMode ? (
+                <>
+                  <UserPlus size={16} />
+                  Create Account
+                </>
+              ) : (
+                <>
+                  <UserCircle size={16} />
+                  Sign In
+                </>
+              )}
             </button>
           </form>
-          <p className="mt-6 text-center text-slate-500 text-xs">
-            Default credentials: <span className="text-slate-400">admin / 1234</span>
-          </p>
+
+          <div className="mt-6 text-center text-xs text-slate-400">
+            {isRegisterMode ? (
+              <p>
+                Already have an account?{" "}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsRegisterMode(false);
+                    setError("");
+                  }}
+                  className="text-blue-400 hover:text-blue-300 font-semibold transition-colors underline-offset-2 hover:underline ml-1"
+                >
+                  Sign In
+                </button>
+              </p>
+            ) : (
+              <p>
+                Don't have an account?{" "}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsRegisterMode(true);
+                    setError("");
+                  }}
+                  className="text-blue-400 hover:text-blue-300 font-semibold transition-colors underline-offset-2 hover:underline ml-1"
+                >
+                  Create Account
+                </button>
+              </p>
+            )}
+          </div>
         </motion.div>
       </div>
     );
