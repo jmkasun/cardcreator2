@@ -44,10 +44,22 @@ const pool = new Pool({
   ssl: {
     rejectUnauthorized: false
   },
-  max: 3, 
-  idleTimeoutMillis: 20000, // Increased to 20s to keep connections alive slightly longer
-  connectionTimeoutMillis: 20000, // Increased to 20s to allow more time for connection establishment
+  max: 6, 
+  idleTimeoutMillis: 30000, 
+  connectionTimeoutMillis: 20000, 
 });
+
+// In-memory LRU-like cache for binary project images to eliminate repeated DB reads
+const projectImageCache = new Map<string, { buffer: Buffer; contentType: string }>();
+const MAX_CACHED_PROJECT_IMAGES = 30;
+
+function setCachedProjectImage(id: string, buffer: Buffer, contentType: string) {
+  if (projectImageCache.size >= MAX_CACHED_PROJECT_IMAGES) {
+    const oldestKey = projectImageCache.keys().next().value;
+    if (oldestKey) projectImageCache.delete(oldestKey);
+  }
+  projectImageCache.set(id, { buffer, contentType });
+}
 
 // Helper for self-contained queries with retry logic on connection errors
 async function safeQuery(text: string, params: any[] = [], retriesValue = 3): Promise<pg.QueryResult<any>> {
@@ -695,7 +707,86 @@ app.get("/fonts/:name", async (req, res) => {
     }
   });
 
-  // Images Metadata
+  // Dedicated Project Image binary streaming endpoint with HTTP caching
+  app.get("/api/images/:id/image", async (req, res) => {
+    try {
+      const { id } = req.params;
+      
+      // 1. Check in-memory cache
+      if (projectImageCache.has(id)) {
+        const cached = projectImageCache.get(id)!;
+        const etag = `"${id}"`;
+        res.setHeader("Content-Type", cached.contentType);
+        res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+        res.setHeader("ETag", etag);
+        if (req.headers["if-none-match"] === etag) {
+          return res.status(304).end();
+        }
+        return res.send(cached.buffer);
+      }
+
+      if (HAS_POSTGRES) {
+        const result = await safeQuery("SELECT image_url FROM font_app_images WHERE id = $1", [id]);
+        if (result.rowCount && result.rowCount > 0) {
+          const rawUrl = result.rows[0].image_url;
+          if (!rawUrl) return res.status(404).send("Image not found");
+
+          if (rawUrl.startsWith("data:")) {
+            const matches = rawUrl.match(/^data:([^;]+);base64,(.+)$/s);
+            if (matches && matches.length === 3) {
+              const contentType = matches[1];
+              const buffer = Buffer.from(matches[2], "base64");
+              setCachedProjectImage(id, buffer, contentType);
+              
+              const etag = `"${id}"`;
+              res.setHeader("Content-Type", contentType);
+              res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+              res.setHeader("ETag", etag);
+              if (req.headers["if-none-match"] === etag) {
+                return res.status(304).end();
+              }
+              return res.send(buffer);
+            }
+          }
+
+          // If external or regular URL, redirect
+          return res.redirect(rawUrl);
+        }
+      }
+
+      res.status(404).send("Image not found");
+    } catch (err) {
+      console.error("Error serving project image:", err);
+      res.status(500).send("Internal server error");
+    }
+  });
+
+  // Single project details endpoint
+  app.get("/api/images/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      if (HAS_POSTGRES) {
+        const result = await safeQuery(
+          `SELECT id, username, layers, name, is_locked as "isLocked", created_at as "createdAt" 
+           FROM font_app_images WHERE id = $1`,
+          [id]
+        );
+        if (result.rowCount && result.rowCount > 0) {
+          const row = result.rows[0];
+          return res.json({
+            ...row,
+            imageUrl: `/api/images/${row.id}/image`
+          });
+        }
+      }
+      res.status(404).json({ success: false, message: "Project not found" });
+    } catch (err) {
+      console.error("Error fetching project:", err);
+      res.status(500).json({ success: false, message: "Internal server error" });
+    }
+  });
+
+  // Images Metadata - Ultra-fast lightweight list without loading massive image_url strings
   app.get("/api/images", async (req, res) => {
     try {
       const { username } = req.query;
@@ -705,9 +796,23 @@ app.get("/fonts/:name", async (req, res) => {
       }
 
       if (HAS_POSTGRES) {
-        const query = "SELECT id, username, image_url as \"imageUrl\", layers, name, is_locked as \"isLocked\", created_at as \"createdAt\" FROM font_app_images WHERE username = $1";
+        const query = `
+          SELECT id, username, layers, name, is_locked as "isLocked", created_at as "createdAt" 
+          FROM font_app_images 
+          WHERE username = $1 
+          ORDER BY created_at DESC
+        `;
         const result = await safeQuery(query, [username]);
-        return res.json(result.rows);
+        const mapped = result.rows.map(row => ({
+          id: row.id,
+          username: row.username,
+          imageUrl: `/api/images/${row.id}/image`,
+          layers: row.layers,
+          name: row.name,
+          isLocked: row.isLocked,
+          createdAt: row.createdAt
+        }));
+        return res.json(mapped);
       }
       res.json([]);
     } catch (err) {
@@ -716,25 +821,55 @@ app.get("/fonts/:name", async (req, res) => {
     }
   });
 
+  // Save / Update Image Project - Fast path for layer edits avoids rewriting multi-megabyte image_url
   app.post("/api/images", async (req, res) => {
     try {
       const { id, username, imageUrl, layers, name, isLocked } = req.body;
       
       if (HAS_POSTGRES) {
-        await safeQuery(
-          `INSERT INTO font_app_images (id, username, image_url, layers, name, is_locked)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           ON CONFLICT (id) DO UPDATE SET
-           username = EXCLUDED.username,
-           image_url = EXCLUDED.image_url,
-           layers = EXCLUDED.layers,
-           name = EXCLUDED.name,
-           is_locked = EXCLUDED.is_locked`,
-          [id, username, imageUrl, JSON.stringify(layers), name, !!isLocked]
-        );
+        const isNewDataImage = typeof imageUrl === "string" && imageUrl.startsWith("data:");
+        
+        if (isNewDataImage) {
+          // New image upload - store the base64 image and layers
+          await safeQuery(
+            `INSERT INTO font_app_images (id, username, image_url, layers, name, is_locked)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (id) DO UPDATE SET
+             username = EXCLUDED.username,
+             image_url = EXCLUDED.image_url,
+             layers = EXCLUDED.layers,
+             name = EXCLUDED.name,
+             is_locked = EXCLUDED.is_locked`,
+            [id, username, imageUrl, JSON.stringify(layers || []), name || "New Project", !!isLocked]
+          );
+          projectImageCache.delete(id);
+        } else {
+          // Existing project update - ONLY update lightweight fields (layers, name, is_locked)
+          // Bypasses TOAST rewrites and prevents heavy database write spikes!
+          const updateRes = await safeQuery(
+            `UPDATE font_app_images 
+             SET layers = $1, name = $2, is_locked = $3 
+             WHERE id = $4 AND username = $5`,
+            [JSON.stringify(layers || []), name || "Project", !!isLocked, id, username]
+          );
+
+          // If row doesn't exist yet (fallback), insert it
+          if (updateRes.rowCount === 0) {
+            await safeQuery(
+              `INSERT INTO font_app_images (id, username, image_url, layers, name, is_locked)
+               VALUES ($1, $2, $3, $4, $5, $6)
+               ON CONFLICT (id) DO UPDATE SET
+               username = EXCLUDED.username,
+               layers = EXCLUDED.layers,
+               name = EXCLUDED.name,
+               is_locked = EXCLUDED.is_locked`,
+              [id, username, imageUrl || "", JSON.stringify(layers || []), name || "New Project", !!isLocked]
+            );
+          }
+        }
       }
       
-      res.json({ success: true });
+      res.json({ success: true, id, imageUrl: `/api/images/${id}/image` });
     } catch (err) {
       console.error("Save image error details:", err instanceof Error ? err.message : String(err));
       res.status(500).json({ success: false, message: "Internal server error" });
@@ -747,6 +882,7 @@ app.get("/fonts/:name", async (req, res) => {
       if (HAS_POSTGRES) {
         await safeQuery("DELETE FROM font_app_images WHERE id = $1", [id]);
       }
+      projectImageCache.delete(id);
       res.json({ success: true });
     } catch (err) {
       console.error("Delete image error details:", err instanceof Error ? err.message : String(err));

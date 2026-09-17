@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { useDropzone } from "react-dropzone";
-import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check, Lock, Unlock, FileUp, FileDown, Copy, Undo2, List, Eye, EyeOff, Tag, Move, Hash, ListOrdered, Coins } from "lucide-react";
+import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check, Lock, Unlock, FileUp, FileDown, Copy, Undo2, List, Eye, EyeOff, Tag, Move, Hash, ListOrdered, Coins, Loader2 } from "lucide-react";
 import { cn } from "@/src/lib/utils";
 import { motion, AnimatePresence } from "motion/react";
 import { convertNumberToSinhala, numberToSinhalaWords, formatNumberForCanvas, isUnicodeFont } from "./utils/sinhalaConverter";
@@ -117,10 +117,12 @@ export default function App() {
   const [loading, setLoading] = useState(false);
 
   const [projects, setProjects] = useState<ImageProject[]>([]);
+  const [isProjectsLoading, setIsProjectsLoading] = useState(false);
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
   const [image, setImage] = useState<string | null>(null);
   const [layers, setLayers] = useState<TextLayer[]>([]);
   const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
+  const lastSavedLayersRef = useRef<string>("");
   const [fonts, setFonts] = useState<Font[]>([]);
   const [isFontLoading, setIsFontLoading] = useState(false);
   const [zoom, setZoom] = useState(1);
@@ -130,6 +132,10 @@ export default function App() {
   const [newAccountPassword, setNewAccountPassword] = useState("");
   const [isCreatingAccount, setIsCreatingAccount] = useState(false);
   const [projectToDeleteId, setProjectToDeleteId] = useState<string | null>(null);
+  const [projectToRename, setProjectToRename] = useState<{ id: string; name: string } | null>(null);
+  const [renameInputVal, setRenameInputVal] = useState("");
+  const [isEditingHeaderName, setIsEditingHeaderName] = useState(false);
+  const [headerNameInput, setHeaderNameInput] = useState("");
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showChangePasswordModal, setShowChangePasswordModal] = useState(false);
   const [showUserManagementModal, setShowUserManagementModal] = useState(false);
@@ -215,6 +221,7 @@ export default function App() {
   useEffect(() => {
     if (image) {
       const img = new Image();
+      img.crossOrigin = "anonymous";
       img.src = image;
       img.onload = () => {
         imageCacheRef.current = img;
@@ -322,6 +329,7 @@ export default function App() {
 
   const fetchProjects = async () => {
     if (!user) return;
+    setIsProjectsLoading(true);
     try {
       const res = await fetch(`/api/images?username=${user.username}`);
       const data = await res.json();
@@ -343,6 +351,8 @@ export default function App() {
       }
     } catch (err) {
       console.error("Failed to fetch projects", err);
+    } finally {
+      setIsProjectsLoading(false);
     }
   };
 
@@ -558,10 +568,13 @@ export default function App() {
     const projectName = existingProject ? existingProject.name : (currentProjectId ? `Project ${new Date().toLocaleDateString()}` : `New Project`);
     const isLocked = existingProject?.isLocked || false;
 
+    // Only send the image blob if it is a brand new data: URL not yet persisted
+    const isDataUrl = typeof image === 'string' && image.startsWith('data:');
+
     const project: ImageProject = {
       id: projectId,
       username: user.username,
-      imageUrl: image,
+      imageUrl: isDataUrl ? image : (existingProject?.imageUrl || `/api/images/${projectId}/image`),
       layers,
       name: projectName,
       createdAt: existingProject?.createdAt || new Date().toISOString(),
@@ -569,17 +582,40 @@ export default function App() {
     };
 
     try {
+      // Lightweight payload: only send imageUrl if it's a new data URL
+      const payload: any = {
+        id: projectId,
+        username: user.username,
+        layers,
+        name: projectName,
+        isLocked,
+      };
+      if (isDataUrl) {
+        payload.imageUrl = image;
+      }
+
       const res = await fetch("/api/images", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(project),
+        body: JSON.stringify(payload),
       });
       if (res.ok) {
+        const resData = await res.json().catch(() => ({}));
         setCurrentProjectId(projectId);
+        lastSavedLayersRef.current = JSON.stringify(layers);
+
+        // If newly saved from data URL, transition local image to endpoint URL
+        if (resData.imageUrl) {
+          project.imageUrl = resData.imageUrl;
+          if (isDataUrl) {
+            setImage(resData.imageUrl);
+          }
+        }
+
         setProjects(prev => {
           const exists = prev.some(p => p.id === project.id);
           if (exists) {
-            return prev.map(p => p.id === project.id ? project : p);
+            return prev.map(p => p.id === project.id ? { ...project, imageUrl: p.imageUrl || project.imageUrl } : p);
           }
           return [project, ...prev];
         });
@@ -651,7 +687,13 @@ export default function App() {
       const res = await fetch("/api/images", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...project, isLocked: newLockedStatus }),
+        body: JSON.stringify({
+          id: project.id,
+          username: user?.username || project.username,
+          layers: project.layers,
+          name: project.name,
+          isLocked: newLockedStatus,
+        }),
       });
       if (res.ok) {
         setNotification({ message: `Project ${newLockedStatus ? 'locked' : 'unlocked'}`, type: 'success' });
@@ -740,7 +782,9 @@ export default function App() {
     setCurrentProjectId(project.id);
     setImage(project.imageUrl);
     // Clear text contents when loading as requested
-    setLayers(project.layers.map(l => ({ ...l, text: "", name: l.name || l.text })));
+    const preparedLayers = project.layers.map(l => ({ ...l, text: "", name: l.name || l.text }));
+    setLayers(preparedLayers);
+    lastSavedLayersRef.current = JSON.stringify(preparedLayers);
     setSelectedLayerId(null);
   };
 
@@ -796,15 +840,19 @@ export default function App() {
         } else {
           console.log(`Project saved successfully for ${file.name}`);
         }
+
+        const resData = await saveRes.json().catch(() => ({}));
+        const serverImageUrl = resData.imageUrl || `/api/images/${projectId}/image`;
+        project.imageUrl = serverImageUrl;
         
         // If it's the last one, load it
         if (file === acceptedFiles[acceptedFiles.length - 1]) {
           console.log(`Loading last uploaded image: ${file.name}`);
-          setImage(base64);
+          setImage(serverImageUrl);
           setLayers([]);
+          lastSavedLayersRef.current = JSON.stringify([]);
           setCurrentProjectId(projectId);
           setSelectedLayerId(null);
-          // We update projects state locally to avoid the race condition with auto-save
           setProjects(prev => [project, ...prev]);
         }
       }
@@ -880,20 +928,34 @@ export default function App() {
   };
 
   const renameProject = async (id: string, newName: string) => {
+    const trimmed = newName.trim();
+    if (!trimmed) return;
     const project = projects.find(p => p.id === id);
-    if (!project || project.name === newName) return;
+    if (!project || project.name === trimmed) return;
     
+    // Optimistic local update
+    setProjects(prev => prev.map(p => p.id === id ? { ...p, name: trimmed } : p));
+
     try {
       const res = await fetch("/api/images", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...project, name: newName }),
+        body: JSON.stringify({
+          id: project.id,
+          username: user?.username || project.username,
+          layers: project.layers,
+          name: trimmed,
+          isLocked: project.isLocked,
+        }),
       });
       if (res.ok) {
-        await fetchProjects();
+        setNotification({ message: `Project renamed to "${trimmed}"`, type: 'success' });
+      } else {
+        setNotification({ message: "Failed to update project name on server.", type: 'error' });
       }
     } catch (err) {
       console.error("Failed to rename project", err);
+      setNotification({ message: "Failed to rename project.", type: 'error' });
     }
   };
 
@@ -1943,14 +2005,24 @@ export default function App() {
 
   // Auto-save effect
   useEffect(() => {
-    if (!user || !image) return;
+    if (!user || !image || !currentProjectId) return;
     
+    // Check if current project is locked
+    const currentProject = projects.find(p => p.id === currentProjectId);
+    if (currentProject?.isLocked) return;
+
+    // Check if layers actually changed from last saved state
+    const currentLayersStr = JSON.stringify(layers);
+    if (currentLayersStr === lastSavedLayersRef.current) {
+      return;
+    }
+
     const timer = setTimeout(() => {
       saveProject();
-    }, 1000); // Debounce save for 1 second
+    }, 1500); // Debounce save for 1.5 seconds
 
     return () => clearTimeout(timer);
-  }, [layers, image]);
+  }, [layers, image, currentProjectId, projects]);
 
   const getLayerAtPosition = (mouseX: number, mouseY: number) => {
     const canvas = canvasRef.current;
@@ -2435,11 +2507,81 @@ export default function App() {
       </AnimatePresence>
       {/* Header */}
       <header className="h-16 border-b border-slate-800 flex items-center justify-between px-6 bg-slate-900/50 backdrop-blur-md sticky top-0 z-[100]">
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center shrink-0">
             <ImageIcon className="text-white w-5 h-5" />
           </div>
-          <span className="font-bold text-lg tracking-tight">My Card Creator</span>
+          <span className="font-bold text-lg tracking-tight hidden sm:inline shrink-0">My Card Creator</span>
+
+          {/* Current Project Name & Quick Rename */}
+          {(() => {
+            const currentProject = projects.find(p => p.id === currentProjectId);
+            if (!currentProject) return null;
+
+            return (
+              <div className="flex items-center gap-1.5 ml-1 sm:ml-3 pl-2 sm:pl-3 border-l border-slate-800 min-w-0">
+                {isEditingHeaderName ? (
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      if (headerNameInput.trim()) {
+                        renameProject(currentProject.id, headerNameInput);
+                      }
+                      setIsEditingHeaderName(false);
+                    }}
+                    className="flex items-center gap-1"
+                  >
+                    <input
+                      type="text"
+                      value={headerNameInput}
+                      onChange={(e) => setHeaderNameInput(e.target.value)}
+                      onBlur={() => {
+                        if (headerNameInput.trim() && headerNameInput.trim() !== currentProject.name) {
+                          renameProject(currentProject.id, headerNameInput);
+                        }
+                        setIsEditingHeaderName(false);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Escape') setIsEditingHeaderName(false);
+                      }}
+                      autoFocus
+                      className="bg-slate-800 border border-blue-500 rounded-lg px-2.5 py-1 text-xs sm:text-sm text-white focus:outline-none w-36 sm:w-56 md:w-72 shadow-inner"
+                    />
+                    <button
+                      type="submit"
+                      className="p-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-colors shrink-0"
+                      title="Save name"
+                    >
+                      <Check size={14} />
+                    </button>
+                    <button
+                      type="button"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        setIsEditingHeaderName(false);
+                      }}
+                      className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white rounded-lg transition-colors shrink-0"
+                      title="Cancel"
+                    >
+                      <X size={14} />
+                    </button>
+                  </form>
+                ) : (
+                  <button
+                    onClick={() => {
+                      setHeaderNameInput(currentProject.name);
+                      setIsEditingHeaderName(true);
+                    }}
+                    className="flex items-center gap-2 text-xs sm:text-sm font-medium text-slate-200 hover:text-white bg-slate-800/70 hover:bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700/60 transition-all group max-w-[150px] sm:max-w-xs md:max-w-sm truncate"
+                    title="Click to rename project"
+                  >
+                    <span className="truncate">{currentProject.name}</span>
+                    <Edit2 size={13} className="text-slate-400 group-hover:text-blue-400 shrink-0 transition-colors" />
+                  </button>
+                )}
+              </div>
+            );
+          })()}
         </div>
         <div className="flex items-center gap-2 md:gap-4">
           {image && (
@@ -3202,6 +3344,70 @@ export default function App() {
             </motion.div>
           </div>
         )}
+
+        {projectToRename && (
+          <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              className="bg-slate-900 border border-slate-800 p-6 rounded-2xl w-full max-w-sm shadow-2xl"
+            >
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                  <Edit2 size={18} className="text-blue-500" />
+                  Rename Project
+                </h3>
+                <button
+                  onClick={() => setProjectToRename(null)}
+                  className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (renameInputVal.trim()) {
+                    renameProject(projectToRename.id, renameInputVal.trim());
+                    setProjectToRename(null);
+                  }
+                }}
+              >
+                <div className="mb-5">
+                  <label className="text-xs text-slate-400 block mb-2 font-medium">Project Name</label>
+                  <input
+                    type="text"
+                    value={renameInputVal}
+                    onChange={(e) => setRenameInputVal(e.target.value)}
+                    autoFocus
+                    onFocus={(e) => e.target.select()}
+                    placeholder="Enter project name..."
+                    className="w-full bg-slate-800/80 border border-slate-700 focus:border-blue-500 rounded-xl px-3.5 py-2.5 text-sm text-white placeholder-slate-500 outline-none transition-colors shadow-inner"
+                  />
+                </div>
+
+                <div className="flex gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setProjectToRename(null)}
+                    className="flex-1 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl transition-all font-medium text-sm"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={!renameInputVal.trim()}
+                    className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl transition-all font-medium text-sm flex items-center justify-center gap-1.5 shadow-lg shadow-blue-600/20"
+                  >
+                    <Check size={16} />
+                    Save
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
       </AnimatePresence>
 
       <div className="flex-1 flex flex-col md:flex-row overflow-hidden relative">
@@ -3291,7 +3497,12 @@ export default function App() {
               </div>
               <div className="p-4 pt-0">
                 <div className="grid grid-cols-4 gap-1.5">
-                  {projects.length === 0 ? (
+                  {isProjectsLoading && projects.length === 0 ? (
+                    <div className="col-span-4 flex items-center justify-center py-6 gap-2 text-xs text-slate-400">
+                      <Loader2 className="w-4 h-4 animate-spin text-blue-500" />
+                      <span>Loading projects...</span>
+                    </div>
+                  ) : projects.length === 0 ? (
                     <p className="text-[10px] text-slate-600 italic col-span-4 text-center py-4">No projects yet</p>
                   ) : (
                     projects.map((proj) => (
@@ -3303,7 +3514,13 @@ export default function App() {
                           currentProjectId === proj.id ? "border-blue-500" : "border-transparent hover:border-slate-700"
                         )}
                       >
-                        <img src={proj.imageUrl} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                        <img 
+                          src={proj.imageUrl} 
+                          alt={proj.name} 
+                          loading="lazy" 
+                          className="w-full h-full object-cover" 
+                          referrerPolicy="no-referrer" 
+                        />
                         
                         {/* Actions Overlay */}
                         <div className="absolute top-1 right-1 flex flex-row gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -3357,6 +3574,18 @@ export default function App() {
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
+                              setProjectToRename({ id: proj.id, name: proj.name });
+                              setRenameInputVal(proj.name);
+                            }}
+                            className="p-1.5 bg-slate-800/80 hover:bg-blue-600 border border-slate-700 rounded text-slate-300 hover:text-white backdrop-blur-sm shadow-lg transition-all"
+                            title="Rename Project"
+                          >
+                            <Edit2 size={14} />
+                          </button>
+
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
                               deleteProject(proj.id);
                             }}
                             className="p-1.5 bg-red-600/80 hover:bg-red-600 rounded text-white backdrop-blur-sm shadow-lg transition-all"
@@ -3367,19 +3596,19 @@ export default function App() {
                         </div>
 
                         {/* Name Overlay */}
-                        <div className="absolute bottom-0 left-0 right-0 p-1.5 bg-black/60 backdrop-blur-md">
-                          <input
-                            type="text"
-                            defaultValue={proj.name}
-                            onClick={(e) => e.stopPropagation()}
-                            onBlur={(e) => renameProject(proj.id, e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') {
-                                (e.target as HTMLInputElement).blur();
-                              }
-                            }}
-                            className="w-full bg-transparent text-[10px] text-white outline-none border-none p-0 text-center font-medium"
-                          />
+                        <div 
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setProjectToRename({ id: proj.id, name: proj.name });
+                            setRenameInputVal(proj.name);
+                          }}
+                          className="absolute bottom-0 left-0 right-0 p-1 bg-black/75 backdrop-blur-md flex items-center justify-center gap-1 cursor-pointer hover:bg-black/90 transition-colors group/name"
+                          title={`Click to rename: ${proj.name}`}
+                        >
+                          <span className="text-[10px] text-white font-medium truncate text-center select-none max-w-[85%]">
+                            {proj.name}
+                          </span>
+                          <Edit2 size={9} className="text-slate-400 group-hover/name:text-blue-400 opacity-0 group-hover/name:opacity-100 transition-opacity shrink-0" />
                         </div>
                       </div>
                     ))
