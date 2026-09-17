@@ -164,7 +164,15 @@ async function initDb() {
         );
       `);
 
-      const adminCheck = await safeQuery("SELECT * FROM users WHERE username = 'admin'");
+      // Performance Indexes: ensures instant lookups for project list and user authentication
+      await safeQuery(`
+        CREATE INDEX IF NOT EXISTS idx_font_app_images_user_created ON font_app_images (username, created_at DESC);
+      `);
+      await safeQuery(`
+        CREATE INDEX IF NOT EXISTS idx_users_lower_username ON users (LOWER(username));
+      `);
+
+      const adminCheck = await safeQuery("SELECT role FROM users WHERE username = 'admin'");
       if (adminCheck.rowCount === 0) {
         await safeQuery("INSERT INTO users (username, password, role) VALUES ('admin', 'admin@1234', 'admin')");
         console.log("Default admin user created.");
@@ -523,6 +531,11 @@ app.get("/fonts/:name", async (req, res) => {
     }
   });
 
+  // In-memory cache for custom font names to avoid querying DB on every /api/fonts request
+  let cachedDbFontNames: string[] | null = null;
+  let lastFontNamesFetch = 0;
+  const FONT_NAMES_CACHE_TTL = 60000; // 60 seconds
+
   // Fonts
   app.get("/api/fonts", async (req, res) => {
     try {
@@ -531,11 +544,19 @@ app.get("/fonts/:name", async (req, res) => {
       
       let dbFiles: string[] = [];
       if (HAS_POSTGRES) {
-        try {
-          const result = await safeQuery("SELECT name FROM custom_fonts");
-          dbFiles = result.rows.map(r => r.name);
-        } catch (err) {
-          console.error("Error fetching fonts from DB:", err);
+        const now = Date.now();
+        if (cachedDbFontNames && (now - lastFontNamesFetch) < FONT_NAMES_CACHE_TTL) {
+          dbFiles = cachedDbFontNames;
+        } else {
+          try {
+            const result = await safeQuery("SELECT name FROM custom_fonts");
+            dbFiles = result.rows.map(r => r.name);
+            cachedDbFontNames = dbFiles;
+            lastFontNamesFetch = now;
+          } catch (err) {
+            console.error("Error fetching fonts from DB:", err);
+            if (cachedDbFontNames) dbFiles = cachedDbFontNames;
+          }
         }
       }
 
@@ -566,6 +587,7 @@ app.get("/fonts/:name", async (req, res) => {
             "INSERT INTO custom_fonts (name, data) VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET data = $2",
             [fileName, file.buffer]
           );
+          cachedDbFontNames = null;
           return res.json({ success: true, url: `/fonts/${fileName}`, name: fileName });
         } catch (err) {
           console.error("DB Font upload error:", err);
@@ -623,6 +645,7 @@ app.get("/fonts/:name", async (req, res) => {
       }
 
       if (deleted) {
+        cachedDbFontNames = null;
         fontCache.delete(name);
         res.json({ success: true });
       } else {
@@ -695,6 +718,7 @@ app.get("/fonts/:name", async (req, res) => {
       }
 
       if (renamed) {
+        cachedDbFontNames = null;
         fontCache.delete(oldName);
         res.json({ success: true });
       } else {
@@ -711,17 +735,21 @@ app.get("/fonts/:name", async (req, res) => {
   app.get("/api/images/:id/image", async (req, res) => {
     try {
       const { id } = req.params;
-      
-      // 1. Check in-memory cache
+      const etag = `"${id}"`;
+
+      // 1. Fast HTTP conditional cache check: if browser already has this image, bypass DB read entirely!
+      if (req.headers["if-none-match"] === etag) {
+        res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+        res.setHeader("ETag", etag);
+        return res.status(304).end();
+      }
+
+      // 2. Check in-memory cache
       if (projectImageCache.has(id)) {
         const cached = projectImageCache.get(id)!;
-        const etag = `"${id}"`;
         res.setHeader("Content-Type", cached.contentType);
         res.setHeader("Cache-Control", "public, max-age=86400, immutable");
         res.setHeader("ETag", etag);
-        if (req.headers["if-none-match"] === etag) {
-          return res.status(304).end();
-        }
         return res.send(cached.buffer);
       }
 

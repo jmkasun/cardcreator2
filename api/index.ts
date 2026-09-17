@@ -138,7 +138,15 @@ async function initDb() {
         );
       `);
 
-      const adminCheck = await client.query("SELECT * FROM users WHERE username = 'admin'");
+      // Performance Indexes: ensures instant lookups for project list and user authentication
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_font_app_images_user_created ON font_app_images (username, created_at DESC);
+      `);
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_users_lower_username ON users (LOWER(username));
+      `);
+
+      const adminCheck = await client.query("SELECT role FROM users WHERE username = 'admin'");
       if (adminCheck.rowCount === 0) {
         await client.query("INSERT INTO users (username, password, role) VALUES ('admin', 'admin@1234', 'admin')");
       }
@@ -678,17 +686,21 @@ app.post("/api/fonts/rename", async (req, res) => {
 app.get("/api/images/:id/image", async (req, res) => {
   try {
     const { id } = req.params;
-    
-    // 1. Check in-memory cache
+    const etag = `"${id}"`;
+
+    // 1. Fast HTTP conditional cache check: if browser already has this image, bypass DB read entirely!
+    if (req.headers["if-none-match"] === etag) {
+      res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+      res.setHeader("ETag", etag);
+      return res.status(304).end();
+    }
+
+    // 2. Check in-memory cache
     if (projectImageCache.has(id)) {
       const cached = projectImageCache.get(id)!;
-      const etag = `"${id}"`;
       res.setHeader("Content-Type", cached.contentType);
       res.setHeader("Cache-Control", "public, max-age=86400, immutable");
       res.setHeader("ETag", etag);
-      if (req.headers["if-none-match"] === etag) {
-        return res.status(304).end();
-      }
       return res.send(cached.buffer);
     }
 
