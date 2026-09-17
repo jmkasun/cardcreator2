@@ -1,8 +1,9 @@
 import React, { useState, useRef, useEffect } from "react";
 import { useDropzone } from "react-dropzone";
-import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check, Lock, Unlock, FileUp, FileDown, Copy, Undo2, List, Eye, EyeOff, Tag, Move } from "lucide-react";
+import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check, Lock, Unlock, FileUp, FileDown, Copy, Undo2, List, Eye, EyeOff, Tag, Move, Hash, ListOrdered, Coins } from "lucide-react";
 import { cn } from "@/src/lib/utils";
 import { motion, AnimatePresence } from "motion/react";
+import { convertNumberToSinhala, numberToSinhalaWords, formatNumberForCanvas, isUnicodeFont } from "./utils/sinhalaConverter";
 
 interface User {
   username: string;
@@ -32,12 +33,17 @@ interface TextLayer {
   shadowBlur: number;
   shadowColor: string;
   textAlign: 'left' | 'center' | 'right';
-  type?: 'text' | 'date' | 'label' | 'list';
+  type?: 'text' | 'date' | 'label' | 'list' | 'number';
   options?: string[];
   optionLabels?: string[];
   hasOptionLabel?: boolean;
   isListLabel?: boolean;
   linkedListId?: string;
+  hasNumberLabel?: boolean;
+  isNumberLabel?: boolean;
+  linkedNumberId?: string;
+  numberFontMode?: 'fm' | 'unicode';
+  numberSuffix?: '$-' | '/-' | 'auto';
   sinhalaMonthFontSize?: number;
   useSinhalaMonth?: boolean;
   sinhalaMonths?: string[];
@@ -633,6 +639,11 @@ export default function App() {
 
     const newLockedStatus = !project.isLocked;
     
+    // When locking, immediately hide properties by clearing active layer selection
+    if (newLockedStatus && targetId === currentProjectId) {
+      setSelectedLayerId(null);
+    }
+
     // Update local state first for immediate feedback
     setProjects(prev => prev.map(p => p.id === targetId ? { ...p, isLocked: newLockedStatus } : p));
     
@@ -1081,13 +1092,150 @@ export default function App() {
     setSelectedLayerId(newLayer.id);
   };
 
+  const addNumberLayer = () => {
+    const newLayer: TextLayer = {
+      id: Math.random().toString(36).substr(2, 9),
+      name: `Price Layer ${layers.filter(l => l.type === 'number').length + 1}`,
+      text: "1000",
+      x: 50,
+      y: 50,
+      fontSize: user?.defaultFontSize || 60,
+      color: user?.defaultFontColor || "#000064",
+      fontFamily: "sans-serif",
+      strokeColor: "#000000",
+      strokeWidth: 0,
+      shadowBlur: 0,
+      shadowColor: "#000000",
+      textAlign: 'left',
+      type: 'number',
+      options: ["500", "1000", "1500", "2000", "2500", "5000", "10000"],
+      hasNumberLabel: false,
+      numberFontMode: 'fm',
+      numberSuffix: 'auto',
+      isBold: false,
+      isItalic: false,
+      isUnderline: false,
+    };
+    setLayers([...layers, newLayer]);
+    setSelectedLayerId(newLayer.id);
+  };
+
+  const toggleNumberOptionLabel = (numberLayerId: string) => {
+    const numberLayer = layers.find(l => l.id === numberLayerId);
+    if (!numberLayer) return;
+
+    const willEnable = !numberLayer.hasNumberLabel;
+    if (willEnable) {
+      const mode = numberLayer.numberFontMode || 'fm';
+      const convertedText = convertNumberToSinhala(numberLayer.text, mode);
+      const existingLabel = layers.find(l => l.linkedNumberId === numberLayerId);
+      const labelFont = mode === 'unicode' ? 'sans-serif' : (fonts[0]?.name || 'sans-serif');
+
+      if (existingLabel) {
+        setLayers(layers.map(l => {
+          if (l.id === numberLayerId) return { ...l, hasNumberLabel: true };
+          if (l.id === existingLabel.id) return { ...l, visible: true, text: convertedText, fontFamily: existingLabel.fontFamily || labelFont };
+          return l;
+        }));
+        setSelectedLayerId(existingLabel.id);
+      } else {
+        const newLabelLayer: TextLayer = {
+          id: Math.random().toString(36).substr(2, 9),
+          name: `${numberLayer.name} - Label`,
+          text: convertedText,
+          x: Math.min(numberLayer.x + 8, 85),
+          y: Math.min(numberLayer.y + 6, 85),
+          fontSize: Math.round(numberLayer.fontSize * 0.85),
+          color: numberLayer.color,
+          fontFamily: labelFont,
+          strokeColor: numberLayer.strokeColor,
+          strokeWidth: numberLayer.strokeWidth,
+          shadowBlur: numberLayer.shadowBlur,
+          shadowColor: numberLayer.shadowColor,
+          textAlign: numberLayer.textAlign,
+          type: 'label',
+          isNumberLabel: true,
+          linkedNumberId: numberLayerId,
+          numberFontMode: mode,
+          isBold: numberLayer.isBold,
+          isItalic: numberLayer.isItalic,
+          isUnderline: numberLayer.isUnderline,
+          visible: true,
+        };
+        setLayers([
+          ...layers.map(l => l.id === numberLayerId ? { ...l, hasNumberLabel: true } : l),
+          newLabelLayer
+        ]);
+        setSelectedLayerId(newLabelLayer.id);
+      }
+    } else {
+      setLayers(layers.filter(l => l.linkedNumberId !== numberLayerId).map(l => l.id === numberLayerId ? { ...l, hasNumberLabel: false } : l));
+      if (selectedLayerId && layers.find(l => l.id === selectedLayerId)?.linkedNumberId === numberLayerId) {
+        setSelectedLayerId(numberLayerId);
+      }
+    }
+  };
+
+  const handleNumberInputChange = (numberLayerId: string, newNumberText: string) => {
+    const numberLayer = layers.find(l => l.id === numberLayerId);
+    if (!numberLayer) return;
+
+    const mode = numberLayer.numberFontMode || 'fm';
+    const convertedLabelText = convertNumberToSinhala(newNumberText, mode);
+
+    setLayers(layers.map(l => {
+      if (l.id === numberLayerId) return { ...l, text: newNumberText };
+      if (l.linkedNumberId === numberLayerId) return { ...l, text: convertedLabelText };
+      return l;
+    }));
+  };
+
+  const handleNumberFontModeChange = (numberLayerId: string, newMode: 'fm' | 'unicode') => {
+    const numberLayer = layers.find(l => l.id === numberLayerId);
+    if (!numberLayer) return;
+
+    const convertedLabelText = convertNumberToSinhala(numberLayer.text, newMode);
+
+    setLayers(layers.map(l => {
+      if (l.id === numberLayerId) {
+        return { 
+          ...l, 
+          numberFontMode: newMode,
+          numberSuffix: newMode === 'unicode' ? '/-' : (l.numberSuffix === '/-' ? 'auto' : l.numberSuffix)
+        };
+      }
+      if (l.linkedNumberId === numberLayerId) {
+        let newFont = l.fontFamily;
+        if (newMode === 'unicode' && fonts.some(f => f.name === l.fontFamily)) {
+          newFont = 'sans-serif';
+        } else if (newMode === 'fm' && (l.fontFamily === 'sans-serif' || !fonts.some(f => f.name === l.fontFamily))) {
+          newFont = fonts[0]?.name || 'sans-serif';
+        }
+        return { ...l, text: convertedLabelText, numberFontMode: newMode, fontFamily: newFont };
+      }
+      return l;
+    }));
+  };
+
   const updateLayer = (id: string, updates: Partial<TextLayer>) => {
     setLayers(layers.map((l) => {
       if (l.id === id) {
-        return { ...l, ...updates };
+        const updated = { ...l, ...updates };
+        // If updating a number layer's text via generic updateLayer, sync linked label
+        return updated;
       }
       if (l.linkedListId === id && updates.name) {
         return { ...l, name: `${updates.name} - Label` };
+      }
+      if (l.linkedNumberId === id && updates.name) {
+        return { ...l, name: `${updates.name} - Label` };
+      }
+      if (l.linkedNumberId === id && updates.text !== undefined) {
+        const parentNumber = layers.find(p => p.id === id);
+        if (parentNumber) {
+          const mode = parentNumber.numberFontMode || 'fm';
+          return { ...l, text: convertNumberToSinhala(updates.text, mode) };
+        }
       }
       return l;
     }));
@@ -1097,8 +1245,10 @@ export default function App() {
     const target = layers.find(l => l.id === id);
     if (target?.isListLabel && target.linkedListId) {
       setLayers(layers.filter((l) => l.id !== id).map(l => l.id === target.linkedListId ? { ...l, hasOptionLabel: false } : l));
+    } else if (target?.isNumberLabel && target.linkedNumberId) {
+      setLayers(layers.filter((l) => l.id !== id).map(l => l.id === target.linkedNumberId ? { ...l, hasNumberLabel: false } : l));
     } else {
-      setLayers(layers.filter((l) => l.id !== id && l.linkedListId !== id));
+      setLayers(layers.filter((l) => l.id !== id && l.linkedListId !== id && l.linkedNumberId !== id));
     }
     if (selectedLayerId === id) setSelectedLayerId(null);
   };
@@ -1291,6 +1441,59 @@ export default function App() {
       }
       return l;
     }));
+  };
+
+  const addPriceOption = (numberLayerId: string) => {
+    const layer = layers.find(l => l.id === numberLayerId);
+    if (!layer) return;
+
+    const currentOptions = layer.options && layer.options.length > 0
+      ? layer.options
+      : ["500", "1000", "1500", "2000", "2500", "5000", "10000"];
+
+    const lastVal = parseInt(currentOptions[currentOptions.length - 1], 10);
+    const nextVal = !isNaN(lastVal) ? (lastVal + 500).toString() : "3000";
+    const newOptions = [...currentOptions, nextVal];
+
+    updateLayer(numberLayerId, { options: newOptions });
+  };
+
+  const updatePriceOption = (numberLayerId: string, index: number, newValue: string) => {
+    const layer = layers.find(l => l.id === numberLayerId);
+    if (!layer) return;
+
+    const currentOptions = layer.options && layer.options.length > 0
+      ? [...layer.options]
+      : ["500", "1000", "1500", "2000", "2500", "5000", "10000"];
+
+    const oldValue = currentOptions[index];
+    currentOptions[index] = newValue;
+    const isCurrentlySelected = layer.text === oldValue;
+    
+    if (isCurrentlySelected) {
+      handleNumberInputChange(numberLayerId, newValue);
+      updateLayer(numberLayerId, { options: currentOptions });
+    } else {
+      updateLayer(numberLayerId, { options: currentOptions });
+    }
+  };
+
+  const removePriceOption = (numberLayerId: string, index: number) => {
+    const layer = layers.find(l => l.id === numberLayerId);
+    if (!layer) return;
+
+    const currentOptions = layer.options && layer.options.length > 0
+      ? layer.options
+      : ["500", "1000", "1500", "2000", "2500", "5000", "10000"];
+
+    const removedVal = currentOptions[index];
+    const newOptions = currentOptions.filter((_, idx) => idx !== index);
+
+    if (layer.text === removedVal && newOptions.length > 0) {
+      handleNumberInputChange(numberLayerId, newOptions[0]);
+    }
+
+    updateLayer(numberLayerId, { options: newOptions });
   };
 
   const updateSuffixLineConfig = (layerId: string, suffixKey: string, partial: Partial<SuffixLineConfig>) => {
@@ -1518,7 +1721,11 @@ export default function App() {
           const y = (layer.y / 100) * canvas.height;
           
           let displayText = layer.text || layer.name || "";
-          if (layer.isListLabel && layer.linkedListId) {
+          if (layer.type === 'number') {
+            const linkedLabel = layers.find(l => l.linkedNumberId === layer.id);
+            const effectiveMode = linkedLabel?.numberFontMode || layer.numberFontMode;
+            displayText = formatNumberForCanvas(layer.text, layer.numberSuffix, layer.fontFamily, effectiveMode);
+          } else if (layer.isListLabel && layer.linkedListId) {
             const parentList = layers.find(l => l.id === layer.linkedListId);
             if (parentList) {
               const optIndex = parentList.options ? parentList.options.indexOf(parentList.text) : -1;
@@ -1529,6 +1736,12 @@ export default function App() {
               } else if (parentList.text === "") {
                 displayText = "";
               }
+            }
+          } else if (layer.isNumberLabel && layer.linkedNumberId) {
+            const parentNumber = layers.find(l => l.id === layer.linkedNumberId);
+            if (parentNumber) {
+              const mode = parentNumber.numberFontMode || layer.numberFontMode || 'fm';
+              displayText = convertNumberToSinhala(parentNumber.text, mode) || layer.text || "";
             }
           }
           let isSinhalaDate = false;
@@ -1748,7 +1961,11 @@ export default function App() {
     return [...layers].reverse().find((layer) => {
       if (layer.visible === false) return false;
       let displayText = layer.text || layer.name || "Text Layer";
-      if (layer.isListLabel && layer.linkedListId) {
+      if (layer.type === 'number') {
+        const linkedLabel = layers.find(l => l.linkedNumberId === layer.id);
+        const effectiveMode = linkedLabel?.numberFontMode || layer.numberFontMode;
+        displayText = formatNumberForCanvas(layer.text, layer.numberSuffix, layer.fontFamily, effectiveMode) || layer.name || "Price";
+      } else if (layer.isListLabel && layer.linkedListId) {
         const parentList = layers.find(l => l.id === layer.linkedListId);
         if (parentList) {
           const optIndex = parentList.options ? parentList.options.indexOf(parentList.text) : -1;
@@ -1757,6 +1974,12 @@ export default function App() {
           } else if (layer.text) {
             displayText = layer.text;
           }
+        }
+      } else if (layer.isNumberLabel && layer.linkedNumberId) {
+        const parentNumber = layers.find(l => l.id === layer.linkedNumberId);
+        if (parentNumber) {
+          const mode = parentNumber.numberFontMode || layer.numberFontMode || 'fm';
+          displayText = convertNumberToSinhala(parentNumber.text, mode) || layer.text || "";
         }
       }
       ctx.font = `${layer.fontSize}px "${layer.fontFamily}"`;
@@ -1851,8 +2074,8 @@ export default function App() {
       const handleThreshold = Math.max(14, 18 * (canvas.width / 1000));
 
       if (distToSegment(mouseX, mouseY, lx1, ly1, lx2, ly2) <= handleThreshold) {
-        setSelectedLayerId(layer.id);
         if (!isLocked) {
+          setSelectedLayerId(layer.id);
           dragTargetRef.current = 'line-move';
           isDraggingRef.current = true;
           lineDragStartRef.current = {
@@ -1872,8 +2095,8 @@ export default function App() {
     const clickedLayer = getLayerAtPosition(mouseX, mouseY);
 
     if (clickedLayer) {
-      setSelectedLayerId(clickedLayer.id);
       if (!isLocked) {
+        setSelectedLayerId(clickedLayer.id);
         dragTargetRef.current = 'layer';
         isDraggingRef.current = true;
         dragStartPos.current = {
@@ -3172,32 +3395,40 @@ export default function App() {
                   <button
                     onClick={addLayer}
                     disabled={!image || projects.find(p => p.id === currentProjectId)?.isLocked}
-                    className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium py-2 rounded-lg flex items-center justify-center gap-2 transition-all text-xs"
+                    className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium py-2 rounded-lg flex items-center justify-center gap-1.5 transition-all text-xs"
                   >
                     <Plus size={14} /> Add Text
                   </button>
                   <button
                     onClick={addLabelLayer}
                     disabled={!image || projects.find(p => p.id === currentProjectId)?.isLocked}
-                    className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium py-2 rounded-lg flex items-center justify-center gap-2 transition-all text-xs"
+                    className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium py-2 rounded-lg flex items-center justify-center gap-1.5 transition-all text-xs"
                   >
                     <Plus size={14} /> Add Label
                   </button>
                 </div>
-                <div className="grid grid-cols-2 gap-2 mb-4">
+                <div className="grid grid-cols-3 gap-1.5 mb-4">
                   <button
                     onClick={addDateLayer}
                     disabled={!image || projects.find(p => p.id === currentProjectId)?.isLocked}
-                    className="bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium py-2 rounded-lg flex items-center justify-center gap-2 transition-all text-xs"
+                    className="bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium py-2 rounded-lg flex items-center justify-center gap-1 transition-all text-xs"
                   >
-                    <Calendar size={14} /> Add Date
+                    <Calendar size={13} /> Date
                   </button>
                   <button
                     onClick={addListLayer}
                     disabled={!image || projects.find(p => p.id === currentProjectId)?.isLocked}
-                    className="bg-violet-600 hover:bg-violet-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium py-2 rounded-lg flex items-center justify-center gap-2 transition-all text-xs"
+                    className="bg-violet-600 hover:bg-violet-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium py-2 rounded-lg flex items-center justify-center gap-1 transition-all text-xs"
                   >
-                    <List size={14} /> Add List
+                    <List size={13} /> List
+                  </button>
+                  <button
+                    onClick={addNumberLayer}
+                    disabled={!image || projects.find(p => p.id === currentProjectId)?.isLocked}
+                    className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium py-2 rounded-lg flex items-center justify-center gap-1 transition-all text-xs shadow-sm"
+                    title="Add Price Layer with automatic Sinhala words conversion"
+                  >
+                    <Coins size={13} /> Price
                   </button>
                 </div>
                 <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Layers</h3>
@@ -3248,6 +3479,14 @@ export default function App() {
                                   {layer.name}
                                   {layer.isListLabel ? (
                                     <span className="text-[9px] bg-purple-500/20 text-purple-300 border border-purple-500/30 px-1.5 py-0.5 rounded font-sans uppercase font-bold tracking-tight">Option Label</span>
+                                  ) : layer.isNumberLabel ? (
+                                    <span className="text-[9px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-1.5 py-0.5 rounded font-sans uppercase font-bold tracking-tight">
+                                      Price Label {layer.numberFontMode === 'unicode' ? '(Unicode)' : '(FM)'}
+                                    </span>
+                                  ) : layer.type === 'number' ? (
+                                    <span className="text-[9px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.5 rounded font-sans uppercase font-bold tracking-tight flex items-center gap-1">
+                                      <Coins size={10} className="shrink-0" /> Price {layer.hasNumberLabel && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" title="Label active" />}
+                                    </span>
                                   ) : layer.type === 'label' ? (
                                     <span className="text-[9px] bg-indigo-500/10 text-indigo-400 px-1.5 py-0.5 rounded font-sans uppercase font-bold tracking-tight">Label</span>
                                   ) : layer.type === 'date' ? (
@@ -3309,7 +3548,113 @@ export default function App() {
                             </div>
  
                             <div className="w-full">
-                              {layer.isListLabel ? (() => {
+                              {layer.isNumberLabel ? (() => {
+                                const parentNum = layers.find(l => l.id === layer.linkedNumberId);
+                                const mode = layer.numberFontMode || parentNum?.numberFontMode || 'fm';
+                                const displayVal = convertNumberToSinhala(parentNum?.text || "0", mode) || layer.text;
+                                return (
+                                  <div className="space-y-1 w-full">
+                                    <div className="flex gap-1.5 items-center w-full">
+                                      <input
+                                        type="text"
+                                        value={layer.text || displayVal}
+                                        placeholder="Sinhala number words..."
+                                        onChange={(e) => updateLayer(layer.id, { text: e.target.value })}
+                                        onFocus={() => setSelectedLayerId(layer.id)}
+                                        onClick={(e) => e.stopPropagation()}
+                                        className="bg-slate-900 border border-emerald-900/60 focus:border-emerald-500 rounded-lg px-2.5 py-1.5 text-sm flex-1 min-w-0 outline-none text-emerald-200 focus:ring-1 focus:ring-emerald-500/20"
+                                        style={{ 
+                                          fontFamily: `"${layer.fontFamily}", sans-serif`,
+                                          fontWeight: layer.isBold ? 'bold' : 'normal',
+                                          fontStyle: layer.isItalic ? 'italic' : 'normal'
+                                        }}
+                                      />
+                                      <span className="text-[10px] bg-emerald-950 text-emerald-300 border border-emerald-800/60 px-2 py-1 rounded font-mono shrink-0">
+                                        {mode.toUpperCase()}
+                                      </span>
+                                    </div>
+                                    <div className="text-[10px] text-slate-500 flex items-center justify-between px-0.5">
+                                      <span>Syncs with {parentNum?.name || "Price"} ({parentNum?.text || "—"})</span>
+                                      {mode === 'fm' && (
+                                        <span className="text-emerald-400/80 font-sans truncate max-w-[140px]" title="Unicode preview">
+                                          {numberToSinhalaWords(parentNum?.text || "0")}
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })() : layer.type === 'number' ? (() => {
+                                const mode = layer.numberFontMode || 'fm';
+                                const convertedPreview = convertNumberToSinhala(layer.text, mode);
+                                const unicodePreview = numberToSinhalaWords(layer.text);
+                                const linkedLabel = layers.find(l => l.linkedNumberId === layer.id);
+
+                                return (
+                                  <div className="space-y-1.5 w-full">
+                                    <div className="flex gap-1.5 items-center w-full">
+                                      <div className="relative flex-1 min-w-0">
+                                        <input
+                                          type="text"
+                                          value={layer.text}
+                                          placeholder="Type price (e.g. 1000)..."
+                                          onChange={(e) => handleNumberInputChange(layer.id, e.target.value)}
+                                          onFocus={() => setSelectedLayerId(layer.id)}
+                                          onClick={(e) => e.stopPropagation()}
+                                          className="bg-slate-900 border border-slate-700/50 rounded-lg pl-6 pr-2.5 py-1.5 text-sm w-full outline-none text-inherit focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500/20"
+                                          style={{ 
+                                            fontFamily: `"${layer.fontFamily}", sans-serif`,
+                                            fontWeight: layer.isBold ? 'bold' : 'normal',
+                                            fontStyle: layer.isItalic ? 'italic' : 'normal'
+                                          }}
+                                        />
+                                        <Coins size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-500 select-none pointer-events-none" />
+                                      </div>
+                                      <select
+                                        value={(layer.options || ["500", "1000", "1500", "2000", "2500", "5000", "10000"]).includes(layer.text) ? layer.text : ""}
+                                        onChange={(e) => {
+                                          e.stopPropagation();
+                                          if (e.target.value) {
+                                            handleNumberInputChange(layer.id, e.target.value);
+                                          }
+                                        }}
+                                        onFocus={() => setSelectedLayerId(layer.id)}
+                                        onClick={(e) => e.stopPropagation()}
+                                        className="bg-slate-900 border border-emerald-900/80 hover:border-emerald-700 text-emerald-300 rounded-lg px-1.5 py-1.5 text-xs outline-none cursor-pointer shrink-0 max-w-[95px] font-mono"
+                                        title="Select pre-entered price"
+                                      >
+                                        <option value="" className="bg-slate-900 text-slate-400 font-sans">Prices ▼</option>
+                                        {(layer.options && layer.options.length > 0 
+                                          ? layer.options 
+                                          : ["500", "1000", "1500", "2000", "2500", "5000", "10000"]
+                                        ).map((priceOpt, i) => (
+                                          <option key={i} value={priceOpt} className="bg-slate-900 text-white font-mono">
+                                            {priceOpt}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </div>
+                                    <div className="flex items-center justify-between text-[11px] bg-slate-900/60 px-2 py-1 rounded border border-slate-800">
+                                      <span className="text-slate-400 flex items-center gap-1">
+                                        <span className="text-[10px] text-slate-500 font-mono">Image:</span>
+                                        <span className="text-emerald-300 font-mono font-medium">
+                                          {formatNumberForCanvas(layer.text, layer.numberSuffix, layer.fontFamily, (linkedLabel?.numberFontMode || layer.numberFontMode)) || "—"}
+                                        </span>
+                                      </span>
+                                      {convertedPreview && (
+                                        <span className="text-slate-400 flex items-center gap-1">
+                                          <span className="text-[10px] text-emerald-400 font-mono">[{mode.toUpperCase()}]:</span>
+                                          <span 
+                                            style={{ fontFamily: mode === 'fm' ? `"${linkedLabel?.fontFamily || fonts[0]?.name || 'sans-serif'}"` : 'sans-serif' }}
+                                            className="text-emerald-300 font-medium"
+                                          >
+                                            {convertedPreview}
+                                          </span>
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })() : layer.isListLabel ? (() => {
                                 const parentList = layers.find(l => l.id === layer.linkedListId);
                                 return (
                                   <div className="flex gap-1.5 items-center w-full">
@@ -3490,7 +3835,7 @@ export default function App() {
                 </div>
               </div>
 
-              {selectedLayer && (
+              {selectedLayer && !projects.find(p => p.id === currentProjectId)?.isLocked && (
                 <div className="pt-4 border-t border-slate-800 space-y-4">
                 <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Properties</h3>
                 <div className="space-y-4">
@@ -3565,6 +3910,254 @@ export default function App() {
                               </select>
                             </div>
                           )}
+                        </div>
+                      );
+                    })() : selectedLayer.isNumberLabel ? (() => {
+                      const parentNum = layers.find(l => l.id === selectedLayer.linkedNumberId);
+                      const mode = selectedLayer.numberFontMode || parentNum?.numberFontMode || 'fm';
+                      const unicodeWords = numberToSinhalaWords(parentNum?.text || "0");
+                      return (
+                        <div className="space-y-2.5 bg-slate-900/50 p-3 rounded-xl border border-emerald-800/40">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-semibold text-emerald-300 flex items-center gap-1.5">
+                              <Tag size={13} />
+                              Linked Price Label
+                            </span>
+                            <div className="flex items-center gap-1 bg-slate-800 p-0.5 rounded border border-slate-700 text-[10px]">
+                              <button
+                                type="button"
+                                onClick={() => parentNum && handleNumberFontModeChange(parentNum.id, 'fm')}
+                                className={cn(
+                                  "px-2 py-0.5 rounded font-medium transition-colors",
+                                  mode === 'fm' ? "bg-emerald-600 text-white font-bold" : "text-slate-400 hover:text-white"
+                                )}
+                              >
+                                FM Font
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => parentNum && handleNumberFontModeChange(parentNum.id, 'unicode')}
+                                className={cn(
+                                  "px-2 py-0.5 rounded font-medium transition-colors",
+                                  mode === 'unicode' ? "bg-emerald-600 text-white font-bold" : "text-slate-400 hover:text-white"
+                                )}
+                              >
+                                Unicode
+                              </button>
+                            </div>
+                          </div>
+
+                          <div>
+                            <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">
+                              Sinhala Text {mode === 'fm' ? '(FM Font Encoded)' : '(Unicode Sinhala)'}
+                            </label>
+                            <input
+                              type="text"
+                              value={selectedLayer.text}
+                              onChange={(e) => updateLayer(selectedLayer.id, { text: e.target.value })}
+                              placeholder="Converted Sinhala text..."
+                              className="w-full bg-slate-800 border border-emerald-700/60 rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-emerald-500 text-emerald-200"
+                              style={{ 
+                                fontFamily: `"${selectedLayer.fontFamily}", sans-serif`,
+                                fontWeight: selectedLayer.isBold ? 'bold' : 'normal',
+                                fontStyle: selectedLayer.isItalic ? 'italic' : 'normal'
+                              }}
+                            />
+                          </div>
+
+                          {parentNum && (
+                            <div className="flex items-center justify-between text-xs bg-slate-800/80 p-2 rounded-lg border border-slate-700">
+                              <span className="text-slate-400">
+                                Parent: <strong className="text-white">{parentNum.name}</strong> ({parentNum.text})
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => setSelectedLayerId(parentNum.id)}
+                                className="text-emerald-400 hover:text-emerald-300 font-medium text-[11px] underline"
+                              >
+                                Edit Price
+                              </button>
+                            </div>
+                          )}
+
+                          {mode === 'fm' && unicodeWords && (
+                            <div className="text-[11px] bg-emerald-950/40 text-emerald-300/90 p-2 rounded border border-emerald-800/30 flex items-center justify-between">
+                              <span className="text-slate-400">Unicode Sinhala:</span>
+                              <span className="font-medium">{unicodeWords}</span>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })() : selectedLayer.type === 'number' ? (() => {
+                      const mode = selectedLayer.numberFontMode || 'fm';
+                      const convertedText = convertNumberToSinhala(selectedLayer.text, mode);
+                      const unicodeWords = numberToSinhalaWords(selectedLayer.text);
+                      const linkedLabel = layers.find(l => l.linkedNumberId === selectedLayer.id);
+
+                      return (
+                        <div className="space-y-3">
+                          <div>
+                            <label className="text-xs text-slate-400 font-semibold block mb-1.5 flex items-center gap-1">
+                              <Coins size={13} className="text-emerald-400" />
+                              Price Value
+                            </label>
+                            <div className="flex gap-2">
+                              <input
+                                type="text"
+                                value={selectedLayer.text}
+                                onChange={(e) => handleNumberInputChange(selectedLayer.id, e.target.value)}
+                                placeholder="Enter price (e.g. 1000, 25000)..."
+                                className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-emerald-500 font-mono"
+                                style={{ 
+                                  fontFamily: `"${selectedLayer.fontFamily}", sans-serif`,
+                                  fontWeight: selectedLayer.isBold ? 'bold' : 'normal',
+                                  fontStyle: selectedLayer.isItalic ? 'italic' : 'normal'
+                                }}
+                              />
+                              <select
+                                value={(selectedLayer.options || ["500", "1000", "1500", "2000", "2500", "5000", "10000"]).includes(selectedLayer.text) ? selectedLayer.text : ""}
+                                onChange={(e) => {
+                                  if (e.target.value) handleNumberInputChange(selectedLayer.id, e.target.value);
+                                }}
+                                className="bg-slate-800 border border-emerald-900/80 hover:border-emerald-700 text-emerald-300 rounded-lg px-2.5 py-2 text-xs outline-none cursor-pointer font-mono shrink-0 max-w-[120px]"
+                                title="Pick from pre-entered prices"
+                              >
+                                <option value="" className="bg-slate-900 text-slate-400 font-sans">Prices ▼</option>
+                                {(selectedLayer.options && selectedLayer.options.length > 0
+                                  ? selectedLayer.options
+                                  : ["500", "1000", "1500", "2000", "2500", "5000", "10000"]
+                                ).map((priceOpt, i) => (
+                                  <option key={i} value={priceOpt} className="bg-slate-900 text-white font-mono">
+                                    {priceOpt}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                            {/* Quick pick pills */}
+                            <div className="flex flex-wrap gap-1.5 mt-2">
+                              {(selectedLayer.options && selectedLayer.options.length > 0
+                                ? selectedLayer.options
+                                : ["500", "1000", "1500", "2000", "2500", "5000", "10000"]
+                              ).map((priceOpt, i) => (
+                                <button
+                                  key={i}
+                                  type="button"
+                                  onClick={() => handleNumberInputChange(selectedLayer.id, priceOpt)}
+                                  className={cn(
+                                    "px-2 py-0.5 rounded text-[11px] font-mono transition-all border",
+                                    selectedLayer.text === priceOpt
+                                      ? "bg-emerald-600/30 text-emerald-300 border-emerald-500 font-bold shadow-sm"
+                                      : "bg-slate-900/80 text-slate-400 border-slate-800 hover:border-slate-700 hover:text-slate-200"
+                                  )}
+                                >
+                                  {priceOpt}
+                                </button>
+                              ))}
+                            </div>
+                            <div className="flex items-center justify-between text-[11px] text-slate-400 mt-2 px-0.5">
+                              <span>Image Canvas Output:</span>
+                              <span className="text-emerald-300 font-mono font-bold">
+                                {formatNumberForCanvas(selectedLayer.text, selectedLayer.numberSuffix, selectedLayer.fontFamily, (linkedLabel?.numberFontMode || selectedLayer.numberFontMode)) || "—"}
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Suffix / Ending Control */}
+                          <div className="bg-slate-900/60 p-2.5 rounded-lg border border-slate-800 space-y-2">
+                            <div className="flex items-center justify-between">
+                              <label className="text-[11px] font-semibold text-slate-300">Price Ending Suffix</label>
+                              <div className="flex items-center gap-1 bg-slate-800 p-0.5 rounded border border-slate-700 text-xs">
+                                <button
+                                  type="button"
+                                  onClick={() => updateLayer(selectedLayer.id, { numberSuffix: 'auto' })}
+                                  className={cn(
+                                    "px-2 py-0.5 rounded font-medium transition-colors text-[10px]",
+                                    (!selectedLayer.numberSuffix || selectedLayer.numberSuffix === 'auto')
+                                      ? "bg-emerald-600 text-white font-bold"
+                                      : "text-slate-400 hover:text-white"
+                                  )}
+                                  title="Auto-detect based on font (/- for Unicode, $- for FM)"
+                                >
+                                  Auto ({isUnicodeFont(selectedLayer.fontFamily, (linkedLabel?.numberFontMode || selectedLayer.numberFontMode)) ? '/-' : '$-'})
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => updateLayer(selectedLayer.id, { numberSuffix: '/-' })}
+                                  className={cn(
+                                    "px-2 py-0.5 rounded font-medium transition-colors text-[10px]",
+                                    selectedLayer.numberSuffix === '/-'
+                                      ? "bg-emerald-600 text-white font-bold"
+                                      : "text-slate-400 hover:text-white"
+                                  )}
+                                  title="Use /- for Unicode fonts"
+                                >
+                                  /- (Unicode)
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => updateLayer(selectedLayer.id, { numberSuffix: '$-' })}
+                                  className={cn(
+                                    "px-2 py-0.5 rounded font-medium transition-colors text-[10px]",
+                                    selectedLayer.numberSuffix === '$-'
+                                      ? "bg-emerald-600 text-white font-bold"
+                                      : "text-slate-400 hover:text-white"
+                                  )}
+                                  title="Use $- for FM fonts"
+                                >
+                                  $- (FM)
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Font Mode: FM Font or Unicode */}
+                          <div className="bg-slate-900/60 p-2.5 rounded-lg border border-slate-800 space-y-2">
+                            <div className="flex items-center justify-between">
+                              <label className="text-[11px] font-semibold text-slate-300">Sinhala Font Mode</label>
+                              <div className="flex items-center gap-1 bg-slate-800 p-0.5 rounded border border-slate-700 text-xs">
+                                <button
+                                  type="button"
+                                  onClick={() => handleNumberFontModeChange(selectedLayer.id, 'fm')}
+                                  className={cn(
+                                    "px-2.5 py-0.5 rounded font-medium transition-colors text-[11px]",
+                                    mode === 'fm' ? "bg-emerald-600 text-white font-bold" : "text-slate-400 hover:text-white"
+                                  )}
+                                >
+                                  FM Font (1000 → oyi)
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleNumberFontModeChange(selectedLayer.id, 'unicode')}
+                                  className={cn(
+                                    "px-2.5 py-0.5 rounded font-medium transition-colors text-[11px]",
+                                    mode === 'unicode' ? "bg-emerald-600 text-white font-bold" : "text-slate-400 hover:text-white"
+                                  )}
+                                >
+                                  Unicode (දහස)
+                                </button>
+                              </div>
+                            </div>
+
+                            {/* Real-time Preview */}
+                            <div className="bg-slate-950/80 p-2 rounded border border-emerald-900/40 text-xs flex items-center justify-between">
+                              <div className="text-slate-400 text-[11px]">
+                                Automatic Sinhala name:
+                              </div>
+                              <div className="text-right">
+                                <div 
+                                  className="text-emerald-300 font-medium"
+                                  style={{ fontFamily: mode === 'fm' ? `"${linkedLabel?.fontFamily || fonts[0]?.name || 'sans-serif'}"` : 'sans-serif' }}
+                                >
+                                  {convertedText || "—"}
+                                </div>
+                                {mode === 'fm' && unicodeWords && (
+                                  <div className="text-[10px] text-slate-500 font-sans">
+                                    {unicodeWords}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </div>
                         </div>
                       );
                     })() : selectedLayer.type === 'list' ? (
@@ -3859,6 +4452,168 @@ export default function App() {
                           </div>
                         );
                       })()}
+                    </div>
+                  )}
+
+                  {/* Number Layer Option Label Section */}
+                  {selectedLayer.type === 'number' && !projects.find(p => p.id === currentProjectId)?.isLocked && (() => {
+                    const linkedLabel = layers.find(l => l.linkedNumberId === selectedLayer.id);
+                    const mode = selectedLayer.numberFontMode || 'fm';
+                    const convertedVal = convertNumberToSinhala(selectedLayer.text, mode);
+
+                    return (
+                      <div className="space-y-3 bg-slate-900/30 p-3 rounded-xl border border-slate-800/50">
+                        {/* Option Label Toggle */}
+                        <div className="flex items-center justify-between bg-slate-800/80 p-2.5 rounded-lg border border-slate-700/60">
+                          <div className="flex items-center gap-2">
+                            <Tag size={15} className={selectedLayer.hasNumberLabel ? "text-emerald-400" : "text-slate-400"} />
+                            <div>
+                              <div className="text-xs font-semibold text-slate-200">Option Label (Sinhala Words)</div>
+                              <div className="text-[10px] text-slate-400">Creates another field on the image typing Sinhala words automatically</div>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => toggleNumberOptionLabel(selectedLayer.id)}
+                            className={cn(
+                              "relative inline-flex h-5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none",
+                              selectedLayer.hasNumberLabel ? "bg-emerald-600" : "bg-slate-700"
+                            )}
+                            title={selectedLayer.hasNumberLabel ? "Disable option label" : "Enable option label"}
+                          >
+                            <span
+                              className={cn(
+                                "pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out",
+                                selectedLayer.hasNumberLabel ? "translate-x-5" : "translate-x-0"
+                              )}
+                            />
+                          </button>
+                        </div>
+
+                        {/* If Option Label is Enabled */}
+                        {selectedLayer.hasNumberLabel && linkedLabel && (
+                          <div className="space-y-2.5 bg-emerald-950/20 border border-emerald-800/40 p-2.5 rounded-lg">
+                            <div className="flex items-center justify-between text-xs">
+                              <span className="text-[11px] text-emerald-300 flex items-center gap-1.5 font-medium">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                                Linked Label Active on Image
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => setSelectedLayerId(linkedLabel.id)}
+                                className="text-emerald-400 hover:text-emerald-300 text-[11px] underline font-medium"
+                              >
+                                Edit Label Layer →
+                              </button>
+                            </div>
+
+                            {/* Label Font Picker */}
+                            <div className="space-y-1">
+                              <label className="text-[10px] uppercase font-bold text-emerald-400 block">
+                                Label Font Family ({mode === 'fm' ? 'FM Font Recommended' : 'Unicode Recommended'})
+                              </label>
+                              <select
+                                value={linkedLabel.fontFamily}
+                                onChange={(e) => {
+                                  const newFont = e.target.value;
+                                  const isUni = isUnicodeFont(newFont);
+                                  const newMode = isUni ? 'unicode' : 'fm';
+                                  updateLayer(linkedLabel.id, { fontFamily: newFont, numberFontMode: newMode });
+                                  updateLayer(selectedLayer.id, { 
+                                    numberFontMode: newMode,
+                                    numberSuffix: newMode === 'unicode' ? '/-' : selectedLayer.numberSuffix 
+                                  });
+                                }}
+                                className="w-full bg-slate-800 border border-emerald-800/60 rounded px-2 py-1 text-xs text-emerald-200 outline-none cursor-pointer"
+                                style={{ fontFamily: `"${linkedLabel.fontFamily}", sans-serif` }}
+                              >
+                                <option value="sans-serif" className="bg-slate-900 text-white font-sans">System Sans (Unicode)</option>
+                                {fonts.map((f, idx) => (
+                                  <option key={idx} value={f.name} className="bg-slate-900 text-white" style={{ fontFamily: `"${f.name}", sans-serif` }}>
+                                    {f.name.split('-').slice(1).join('-') || f.name}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+
+                            {/* Live Value Preview */}
+                            <div className="text-[11px] text-slate-400 flex items-center justify-between pt-1 border-t border-emerald-900/40">
+                              <span>Output on Canvas:</span>
+                              <span 
+                                className="text-white font-medium"
+                                style={{ fontFamily: `"${linkedLabel.fontFamily}", sans-serif` }}
+                              >
+                                {convertedVal}
+                              </span>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+
+                  {/* Pre-entered Prices Management Section for Price Layer */}
+                  {selectedLayer.type === 'number' && !projects.find(p => p.id === currentProjectId)?.isLocked && (
+                    <div className="space-y-3 bg-slate-900/30 p-3 rounded-xl border border-slate-800/50">
+                      <div className="flex items-center justify-between bg-slate-800/80 p-2.5 rounded-lg border border-slate-700/60">
+                        <div className="flex items-center gap-2">
+                          <ListOrdered size={15} className="text-emerald-400" />
+                          <div>
+                            <div className="text-xs font-semibold text-slate-200">Pre-entered Prices</div>
+                            <div className="text-[10px] text-slate-400">Configure prices available in the dropdown selector</div>
+                          </div>
+                        </div>
+                        <span className="text-[10px] font-mono text-emerald-400 bg-emerald-950/60 border border-emerald-800/50 px-2 py-0.5 rounded">
+                          {(selectedLayer.options || ["500", "1000", "1500", "2000", "2500", "5000", "10000"]).length} presets
+                        </span>
+                      </div>
+
+                      <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                        {(selectedLayer.options && selectedLayer.options.length > 0
+                          ? selectedLayer.options
+                          : ["500", "1000", "1500", "2000", "2500", "5000", "10000"]
+                        ).map((priceOpt, idx) => (
+                          <div key={idx} className="flex items-center gap-2 bg-slate-800/40 p-1.5 rounded-lg border border-slate-700/40">
+                            <span className="text-[10px] text-slate-500 font-mono w-5 text-center shrink-0">#{idx + 1}</span>
+                            <input
+                              type="text"
+                              value={priceOpt}
+                              onChange={(e) => updatePriceOption(selectedLayer.id, idx, e.target.value)}
+                              placeholder="Price..."
+                              className="flex-1 bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-white font-mono outline-none focus:border-emerald-500"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => handleNumberInputChange(selectedLayer.id, priceOpt)}
+                              className={cn(
+                                "px-2 py-1 rounded text-[10px] font-medium transition-all shrink-0",
+                                selectedLayer.text === priceOpt
+                                  ? "bg-emerald-600 text-white font-bold"
+                                  : "bg-slate-700 text-slate-300 hover:bg-slate-600"
+                              )}
+                              title="Set as current price"
+                            >
+                              {selectedLayer.text === priceOpt ? "Active" : "Apply"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => removePriceOption(selectedLayer.id, idx)}
+                              className="p-1 text-slate-500 hover:text-red-400 rounded transition-colors shrink-0"
+                              title="Delete preset"
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          </div>
+                        ))}
+
+                        <button
+                          type="button"
+                          onClick={() => addPriceOption(selectedLayer.id)}
+                          className="w-full py-1.5 border border-dashed border-slate-700 rounded-lg text-[10px] uppercase tracking-wider font-bold text-slate-500 hover:text-slate-300 hover:border-slate-500 transition-all flex items-center justify-center gap-1 mt-2"
+                        >
+                          <Plus size={12} /> Add Price Preset
+                        </button>
+                      </div>
                     </div>
                   )}
 
