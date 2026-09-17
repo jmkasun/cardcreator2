@@ -43,7 +43,7 @@ interface TextLayer {
   isNumberLabel?: boolean;
   linkedNumberId?: string;
   numberFontMode?: 'fm' | 'unicode';
-  numberSuffix?: '$-' | '/-' | 'auto';
+  numberSuffix?: '$-' | '/-' | '$=' | '/=' | 'auto';
   sinhalaMonthFontSize?: number;
   useSinhalaMonth?: boolean;
   sinhalaMonths?: string[];
@@ -1201,7 +1201,7 @@ export default function App() {
         return { 
           ...l, 
           numberFontMode: newMode,
-          numberSuffix: newMode === 'unicode' ? '/-' : (l.numberSuffix === '/-' ? 'auto' : l.numberSuffix)
+          numberSuffix: newMode === 'unicode' ? '/=' : (l.numberSuffix === '/=' ? 'auto' : l.numberSuffix)
         };
       }
       if (l.linkedNumberId === numberLayerId) {
@@ -4076,9 +4076,35 @@ export default function App() {
                                       ? "bg-emerald-600 text-white font-bold"
                                       : "text-slate-400 hover:text-white"
                                   )}
-                                  title="Auto-detect based on font (/- for Unicode, $- for FM)"
+                                  title="Auto-detect based on font (/= for Unicode, $= for FM)"
                                 >
-                                  Auto ({isUnicodeFont(selectedLayer.fontFamily, (linkedLabel?.numberFontMode || selectedLayer.numberFontMode)) ? '/-' : '$-'})
+                                  Auto ({isUnicodeFont(selectedLayer.fontFamily) ? '/=' : '$='})
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => updateLayer(selectedLayer.id, { numberSuffix: '/=' })}
+                                  className={cn(
+                                    "px-2 py-0.5 rounded font-medium transition-colors text-[10px]",
+                                    selectedLayer.numberSuffix === '/='
+                                      ? "bg-emerald-600 text-white font-bold"
+                                      : "text-slate-400 hover:text-white"
+                                  )}
+                                  title="Use /= for price suffix"
+                                >
+                                  /=
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => updateLayer(selectedLayer.id, { numberSuffix: '$=' })}
+                                  className={cn(
+                                    "px-2 py-0.5 rounded font-medium transition-colors text-[10px]",
+                                    selectedLayer.numberSuffix === '$='
+                                      ? "bg-emerald-600 text-white font-bold"
+                                      : "text-slate-400 hover:text-white"
+                                  )}
+                                  title="Use $= (renders as /= in FM fonts)"
+                                >
+                                  $= (FM)
                                 </button>
                                 <button
                                   type="button"
@@ -4089,22 +4115,9 @@ export default function App() {
                                       ? "bg-emerald-600 text-white font-bold"
                                       : "text-slate-400 hover:text-white"
                                   )}
-                                  title="Use /- for Unicode fonts"
+                                  title="Use /-"
                                 >
-                                  /- (Unicode)
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => updateLayer(selectedLayer.id, { numberSuffix: '$-' })}
-                                  className={cn(
-                                    "px-2 py-0.5 rounded font-medium transition-colors text-[10px]",
-                                    selectedLayer.numberSuffix === '$-'
-                                      ? "bg-emerald-600 text-white font-bold"
-                                      : "text-slate-400 hover:text-white"
-                                  )}
-                                  title="Use $- for FM fonts"
-                                >
-                                  $- (FM)
+                                  /-
                                 </button>
                               </div>
                             </div>
@@ -4521,7 +4534,7 @@ export default function App() {
                                   updateLayer(linkedLabel.id, { fontFamily: newFont, numberFontMode: newMode });
                                   updateLayer(selectedLayer.id, { 
                                     numberFontMode: newMode,
-                                    numberSuffix: newMode === 'unicode' ? '/-' : selectedLayer.numberSuffix 
+                                    numberSuffix: newMode === 'unicode' ? '/=' : selectedLayer.numberSuffix 
                                   });
                                 }}
                                 className="w-full bg-slate-800 border border-emerald-800/60 rounded px-2 py-1 text-xs text-emerald-200 outline-none cursor-pointer"

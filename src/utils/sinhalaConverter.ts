@@ -282,19 +282,18 @@ export function convertNumberToSinhala(
 /**
  * Detects whether a font family name is a Unicode font or a legacy FM/DL ANSI font.
  * - Legacy ANSI fonts typically start with FM, DL, DS, KDU, etc.
- * - System fonts (sans-serif, Arial, etc.) and Sinhala Unicode fonts (Nidahasa, Aragalaya, Iskoola Pota, Noto Sans Sinhala, etc.) are Unicode.
+ * - System fonts (sans-serif, Arial, Calibri, etc.) and Sinhala Unicode fonts (Nidahasa, Aragalaya, Iskoola Pota, Noto Sans Sinhala, etc.) are Unicode.
  */
 export function isUnicodeFont(fontFamily?: string, mode?: 'fm' | 'unicode'): boolean {
-  if (mode === 'unicode') return true;
-  if (mode === 'fm') return false;
-  if (!fontFamily) return true;
-  const lower = fontFamily.toLowerCase().trim();
-  if (lower === 'sans-serif' || lower === 'system sans' || lower === 'serif' || lower === 'monospace') {
+  if (fontFamily) {
+    const lower = fontFamily.toLowerCase().trim();
+    if (/^(fm[-_\s]?|dl[-_\s]?|ds[-_\s]?)/i.test(lower)) {
+      return false;
+    }
     return true;
   }
-  if (/^(fm[-_\s]?|dl[-_\s]?|ds[-_\s]?)/i.test(lower)) {
-    return false;
-  }
+  if (mode === 'unicode') return true;
+  if (mode === 'fm') return false;
   return true;
 }
 
@@ -302,9 +301,10 @@ export function isUnicodeFont(fontFamily?: string, mode?: 'fm' | 'unicode'): boo
  * Formats a numeric value or string for rendering on the image canvas:
  * - If value is greater than or equal to 10000, formats with thousand separator commas (e.g. 10,000 / 25,000).
  * - Suffix at end of number:
- *   - For Unicode fonts (or unicode mode): uses '/-' instead of '$-' (e.g. 10,000/- or 1000/-)
- *   - For FM fonts (or fm mode): uses '$-' (which renders as '/-' in FM fonts)
- *   - Or uses explicit suffix if provided ('/-' or '$-')
+ *   - If explicit suffix ('/=', '$=', '/-', '$-') is provided, it is used directly.
+ *   - If 'auto' or unspecified:
+ *     - For Unicode fonts (Calibri, Arial, etc.): uses '/='
+ *     - For FM fonts: uses '$=' (which renders as '/=' in FM fonts)
  */
 export function formatNumberForCanvas(
   numInput: string | number,
@@ -316,18 +316,19 @@ export function formatNumberForCanvas(
   let str = String(numInput).trim();
   if (!str) return '';
 
-  // Determine suffix: explicit > font/mode check
-  let suffix = explicitSuffix;
-  if (!suffix || suffix === 'auto') {
+  // Determine suffix:
+  let suffix: string;
+  if (explicitSuffix && explicitSuffix !== 'auto') {
+    // Directly respect the user's explicitly selected suffix (/=, $=, /-, $-, etc.)
+    suffix = explicitSuffix;
+  } else {
+    // Auto-detect based on font
     const isUnicode = isUnicodeFont(fontFamily, mode);
-    suffix = isUnicode ? '/-' : '$-';
-  } else if (mode === 'unicode' && suffix === '$-') {
-    // When Linked Number Label is unicode, use '/-' instead of '$-'
-    suffix = '/-';
+    suffix = isUnicode ? '/=' : '$=';
   }
 
-  // Strip existing trailing /- or $- if already present
-  str = str.replace(/(\/-|\$-)\s*$/, '').trim();
+  // Strip existing trailing /-, $-, /=, or $= if already present
+  str = str.replace(/(\/[-=]|\$[-=])\s*$/, '').trim();
   if (!str) return '';
 
   // Remove commas to parse number
