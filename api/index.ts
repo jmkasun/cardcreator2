@@ -161,11 +161,18 @@ async function initDb() {
           id SERIAL PRIMARY KEY,
           image_id TEXT NOT NULL,
           type TEXT NOT NULL,
+          username TEXT,
           created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
       `);
       await client.query(`
+        ALTER TABLE font_app_image_creations ADD COLUMN IF NOT EXISTS username TEXT;
+      `);
+      await client.query(`
         CREATE INDEX IF NOT EXISTS idx_creations_image_time ON font_app_image_creations (image_id, created_at DESC);
+      `);
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_creations_user_time ON font_app_image_creations (username, created_at DESC);
       `);
 
       const adminCheck = await client.query("SELECT role FROM users WHERE username = 'admin'");
@@ -963,7 +970,7 @@ app.delete("/api/images/:id", async (req, res) => {
 app.post(["/api/images/:id/creation", "/api/images/:id/track"], async (req, res) => {
   try {
     const { id } = req.params;
-    const { type } = req.body; // 'copy' | 'download' | 'share'
+    const { type, username } = req.body; // 'copy' | 'download' | 'share'
 
     let column = "copies_count";
     if (type === "download") column = "downloads_count";
@@ -974,8 +981,9 @@ app.post(["/api/images/:id/creation", "/api/images/:id/track"], async (req, res)
     if (HAS_POSTGRES) {
       await initDb();
       pool.query(
-        `INSERT INTO font_app_image_creations (image_id, type, created_at) VALUES ($1, $2, CURRENT_TIMESTAMP)`,
-        [id, type]
+        `INSERT INTO font_app_image_creations (image_id, type, username, created_at) 
+         VALUES ($1, $2, COALESCE($3, (SELECT username FROM font_app_images WHERE id = $1)), CURRENT_TIMESTAMP)`,
+        [id, type, username || null]
       ).catch(err => console.error("Error logging creation in api/index.ts:", err));
 
       const result = await pool.query(
@@ -1009,6 +1017,7 @@ app.post(["/api/images/:id/creation", "/api/images/:id/track"], async (req, res)
         id: Date.now().toString(),
         imageId: id,
         type,
+        username: username || null,
         createdAt: new Date().toISOString()
       });
 
@@ -1035,6 +1044,44 @@ app.post(["/api/images/:id/creation", "/api/images/:id/track"], async (req, res)
     res.status(500).json({ success: false, message: "Internal server error" });
   }
 });
+
+// Helper to parse date ranges for creation metrics
+function parseDateRange(range?: string, startDate?: string, endDate?: string) {
+  if (range === "alltime" && !startDate && !endDate) {
+    return { start: null, end: null };
+  }
+
+  let start: Date | null = null;
+  let end: Date | null = null;
+
+  if (startDate) {
+    start = new Date(startDate);
+  }
+  if (endDate) {
+    end = new Date(endDate);
+  }
+
+  if (!start || !end) {
+    const now = new Date();
+    if (range === "today") {
+      start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+      end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+    } else if (range === "yesterday") {
+      const y = new Date(now);
+      y.setDate(y.getDate() - 1);
+      start = new Date(y.getFullYear(), y.getMonth(), y.getDate(), 0, 0, 0, 0);
+      end = new Date(y.getFullYear(), y.getMonth(), y.getDate(), 23, 59, 59, 999);
+    } else if (range === "week") {
+      start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+      end = now;
+    } else if (range === "month") {
+      start = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+      end = now;
+    }
+  }
+
+  return { start, end };
+}
 
 // Fetch Image Creation Metrics with Date Range Filter
 app.get("/api/images/:id/metrics", async (req, res) => {
@@ -1064,7 +1111,9 @@ app.get("/api/images/:id/metrics", async (req, res) => {
       const allDownloads = Number(imgRow.downloadsCount || 0);
       const allShares = Number(imgRow.sharesCount || 0);
 
-      if (range === "alltime" && !startDate && !endDate) {
+      const { start, end } = parseDateRange(range, startDate, endDate);
+
+      if (!start || !end) {
         return res.json({
           success: true,
           id,
@@ -1076,77 +1125,213 @@ app.get("/api/images/:id/metrics", async (req, res) => {
         });
       }
 
-      let start: Date | null = null;
-      let end: Date | null = null;
-
-      if (startDate) {
-        start = new Date(startDate);
-      }
-      if (endDate) {
-        end = new Date(endDate);
-      }
-
-      if (!start || !end) {
-        const now = new Date();
-        if (range === "today") {
-          start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
-          end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
-        } else if (range === "yesterday") {
-          const y = new Date(now);
-          y.setDate(y.getDate() - 1);
-          start = new Date(y.getFullYear(), y.getMonth(), y.getDate(), 0, 0, 0, 0);
-          end = new Date(y.getFullYear(), y.getMonth(), y.getDate(), 23, 59, 59, 999);
-        } else if (range === "week") {
-          start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-          end = now;
-        } else if (range === "month") {
-          start = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-          end = now;
-        }
-      }
-
-      if (start && end) {
-        const logsRes = await pool.query(
-          `SELECT 
-             COUNT(*) FILTER (WHERE type = 'copy') as copies,
-             COUNT(*) FILTER (WHERE type = 'download') as downloads,
-             COUNT(*) FILTER (WHERE type = 'share') as shares,
-             COUNT(*) as total
-           FROM font_app_image_creations
-           WHERE image_id = $1 AND created_at >= $2 AND created_at <= $3`,
-          [id, start.toISOString(), end.toISOString()]
-        );
-        const lRow = logsRes.rows[0] || {};
-        const copies = Number(lRow.copies || 0);
-        const downloads = Number(lRow.downloads || 0);
-        const shares = Number(lRow.shares || 0);
-        return res.json({
-          success: true,
-          id,
-          range,
-          startDate: start.toISOString(),
-          endDate: end.toISOString(),
-          copiesCount: copies,
-          downloadsCount: downloads,
-          sharesCount: shares,
-          creationsCount: copies + downloads + shares
-        });
-      }
-
+      const logsRes = await pool.query(
+        `SELECT 
+           COUNT(*) FILTER (WHERE type = 'copy') as copies,
+           COUNT(*) FILTER (WHERE type = 'download') as downloads,
+           COUNT(*) FILTER (WHERE type = 'share') as shares,
+           COUNT(*) as total
+         FROM font_app_image_creations
+         WHERE image_id = $1 AND created_at >= $2 AND created_at <= $3`,
+        [id, start.toISOString(), end.toISOString()]
+      );
+      const lRow = logsRes.rows[0] || {};
+      const copies = Number(lRow.copies || 0);
+      const downloads = Number(lRow.downloads || 0);
+      const shares = Number(lRow.shares || 0);
       return res.json({
         success: true,
         id,
-        range: "alltime",
-        copiesCount: allCopies,
-        downloadsCount: allDownloads,
-        sharesCount: allShares,
-        creationsCount: allCopies + allDownloads + allShares
+        range,
+        startDate: start.toISOString(),
+        endDate: end.toISOString(),
+        copiesCount: copies,
+        downloadsCount: downloads,
+        sharesCount: shares,
+        creationsCount: copies + downloads + shares
       });
     }
 
     res.status(404).json({ success: false, message: "Not implemented" });
   } catch (err) {
     console.error("Error fetching metrics in api/index.ts:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+// Admin: View Image Creation Metrics for Each User, Each Project
+app.get("/api/admin/creation-metrics", async (req, res) => {
+  try {
+    const { range = "alltime", startDate, endDate, username } = req.query as {
+      range?: string;
+      startDate?: string;
+      endDate?: string;
+      username?: string;
+    };
+
+    if (!HAS_POSTGRES) {
+      return res.json({
+        success: true,
+        range: "alltime",
+        summary: {
+          totalCreations: 0,
+          totalCopies: 0,
+          totalDownloads: 0,
+          totalShares: 0,
+          totalProjects: 0,
+          totalUsers: 0
+        },
+        users: []
+      });
+    }
+
+    await initDb();
+    const { start, end } = parseDateRange(range, startDate, endDate);
+
+    // 1. Fetch Users
+    let usersQuery = "SELECT username, role FROM users";
+    const usersParams: any[] = [];
+    if (username) {
+      usersQuery += " WHERE username = $1";
+      usersParams.push(username);
+    }
+    usersQuery += " ORDER BY username ASC";
+    const usersRes = await pool.query(usersQuery, usersParams);
+
+    // 2. Fetch Projects and their Metrics
+    let projectsRows: any[] = [];
+    if (!start || !end) {
+      // All-Time metrics
+      let q = `
+        SELECT 
+          id,
+          username,
+          name,
+          is_locked as "isLocked",
+          created_at as "createdAt",
+          COALESCE(copies_count, 0) as "copiesCount",
+          COALESCE(downloads_count, 0) as "downloadsCount",
+          COALESCE(shares_count, 0) as "sharesCount",
+          (COALESCE(copies_count, 0) + COALESCE(downloads_count, 0) + COALESCE(shares_count, 0)) as "creationsCount"
+        FROM font_app_images
+      `;
+      const qParams: any[] = [];
+      if (username) {
+        q += " WHERE username = $1";
+        qParams.push(username);
+      }
+      q += ` ORDER BY "creationsCount" DESC, created_at DESC`;
+      const pRes = await pool.query(q, qParams);
+      projectsRows = pRes.rows;
+    } else {
+      // Date-filtered metrics using creation event logs
+      let q = `
+        SELECT 
+          img.id,
+          img.username,
+          img.name,
+          img.is_locked as "isLocked",
+          img.created_at as "createdAt",
+          COUNT(c.id) FILTER (WHERE c.type = 'copy') as "copiesCount",
+          COUNT(c.id) FILTER (WHERE c.type = 'download') as "downloadsCount",
+          COUNT(c.id) FILTER (WHERE c.type = 'share') as "sharesCount",
+          COUNT(c.id) as "creationsCount"
+        FROM font_app_images img
+        LEFT JOIN font_app_image_creations c 
+          ON c.image_id = img.id 
+          AND c.created_at >= $1 
+          AND c.created_at <= $2
+      `;
+      const qParams: any[] = [start.toISOString(), end.toISOString()];
+      if (username) {
+        q += " WHERE img.username = $3";
+        qParams.push(username);
+      }
+      q += `
+        GROUP BY img.id, img.username, img.name, img.is_locked, img.created_at
+        ORDER BY "creationsCount" DESC, img.created_at DESC
+      `;
+      const pRes = await pool.query(q, qParams);
+      projectsRows = pRes.rows;
+    }
+
+    // Group projects by user
+    const projectsByUser = new Map<string, any[]>();
+    for (const row of projectsRows) {
+      const u = row.username;
+      if (!projectsByUser.has(u)) {
+        projectsByUser.set(u, []);
+      }
+      projectsByUser.get(u)!.push({
+        id: row.id,
+        name: row.name,
+        imageUrl: `/api/images/${row.id}/image`,
+        isLocked: !!row.isLocked,
+        createdAt: row.createdAt,
+        copiesCount: Number(row.copiesCount || 0),
+        downloadsCount: Number(row.downloadsCount || 0),
+        sharesCount: Number(row.sharesCount || 0),
+        creationsCount: Number(row.creationsCount || 0)
+      });
+    }
+
+    let grandTotalCreations = 0;
+    let grandTotalCopies = 0;
+    let grandTotalDownloads = 0;
+    let grandTotalShares = 0;
+    const grandTotalProjects = projectsRows.length;
+
+    const userResults = usersRes.rows.map(userRow => {
+      const uProjects = projectsByUser.get(userRow.username) || [];
+      let userCreations = 0;
+      let userCopies = 0;
+      let userDownloads = 0;
+      let userShares = 0;
+
+      for (const p of uProjects) {
+        userCreations += p.creationsCount;
+        userCopies += p.copiesCount;
+        userDownloads += p.downloadsCount;
+        userShares += p.sharesCount;
+      }
+
+      grandTotalCreations += userCreations;
+      grandTotalCopies += userCopies;
+      grandTotalDownloads += userDownloads;
+      grandTotalShares += userShares;
+
+      return {
+        username: userRow.username,
+        role: userRow.role,
+        totalCreations: userCreations,
+        totalCopies: userCopies,
+        totalDownloads: userDownloads,
+        totalShares: userShares,
+        projectCount: uProjects.length,
+        projects: uProjects
+      };
+    });
+
+    // Sort users by totalCreations desc, then projectCount desc
+    userResults.sort((a, b) => b.totalCreations - a.totalCreations || b.projectCount - a.projectCount);
+
+    return res.json({
+      success: true,
+      range,
+      startDate: start ? start.toISOString() : undefined,
+      endDate: end ? end.toISOString() : undefined,
+      summary: {
+        totalCreations: grandTotalCreations,
+        totalCopies: grandTotalCopies,
+        totalDownloads: grandTotalDownloads,
+        totalShares: grandTotalShares,
+        totalProjects: grandTotalProjects,
+        totalUsers: userResults.length
+      },
+      users: userResults
+    });
+  } catch (err) {
+    console.error("Error fetching admin creation metrics in api/index.ts:", err);
     res.status(500).json({ success: false, message: "Internal server error" });
   }
 });

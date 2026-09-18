@@ -62,6 +62,7 @@ interface TextLayer {
   suffixLineColor?: string;
   suffixLines?: Record<string, SuffixLineConfig>;
   visible?: boolean;
+  resetAfterCopy?: boolean;
 }
 
 export interface SuffixLineConfig {
@@ -1257,6 +1258,7 @@ export default function App() {
         "uy;añh": { x1: 45, y1: 58, x2: 65, y2: 58 },
         "ñh": { x1: 45, y1: 62, x2: 65, y2: 62 },
       },
+      resetAfterCopy: false,
     };
     setLayers([...layers, newLayer]);
     setSelectedLayerId(newLayer.id);
@@ -1285,6 +1287,7 @@ export default function App() {
       isBold: false,
       isItalic: false,
       isUnderline: false,
+      resetAfterCopy: false,
     };
     setLayers([...layers, newLayer]);
     setSelectedLayerId(newLayer.id);
@@ -1309,6 +1312,7 @@ export default function App() {
       isBold: false,
       isItalic: false,
       isUnderline: false,
+      resetAfterCopy: false,
     };
     setLayers([...layers, newLayer]);
     setSelectedLayerId(newLayer.id);
@@ -1336,6 +1340,7 @@ export default function App() {
       isBold: false,
       isItalic: false,
       isUnderline: false,
+      resetAfterCopy: false,
     };
     setLayers([...layers, newLayer]);
     setSelectedLayerId(newLayer.id);
@@ -1364,6 +1369,7 @@ export default function App() {
       isBold: false,
       isItalic: false,
       isUnderline: false,
+      resetAfterCopy: false,
     };
     setLayers([...layers, newLayer]);
     setSelectedLayerId(newLayer.id);
@@ -1410,6 +1416,7 @@ export default function App() {
           isItalic: numberLayer.isItalic,
           isUnderline: numberLayer.isUnderline,
           visible: true,
+          resetAfterCopy: false,
         };
         setLayers([
           ...layers.map(l => l.id === numberLayerId ? { ...l, hasNumberLabel: true } : l),
@@ -1551,6 +1558,7 @@ export default function App() {
           isItalic: listLayer.isItalic,
           isUnderline: listLayer.isUnderline,
           visible: true,
+          resetAfterCopy: false,
         };
         setLayers([
           ...layers.map(l => l.id === listLayerId ? { ...l, hasOptionLabel: true, optionLabels: currentLabels } : l),
@@ -1889,11 +1897,25 @@ export default function App() {
         });
 
         isExportingRef.current = false;
-        // 3. Clear all layers text except labels
-        setLayers(prev => prev.map(layer => {
-          if (layer.type === 'label') return layer;
-          return { ...layer, text: "" };
-        }));
+        // 3. Reset content ONLY for layers where resetAfterCopy is ticked. Otherwise stay unchanged!
+        setLayers(prev => {
+          const resettingParentIds = new Set(
+            prev.filter(l => !!l.resetAfterCopy).map(l => l.id)
+          );
+
+          return prev.map(layer => {
+            const shouldReset = !!layer.resetAfterCopy;
+            const parentIsResetting = Boolean(
+              (layer.linkedListId && resettingParentIds.has(layer.linkedListId)) ||
+              (layer.linkedNumberId && resettingParentIds.has(layer.linkedNumberId))
+            );
+
+            if (shouldReset || parentIsResetting) {
+              return { ...layer, text: "" };
+            }
+            return layer;
+          });
+        });
       }, 50);
     } catch (err) {
       isExportingRef.current = false;
@@ -4712,6 +4734,24 @@ export default function App() {
                               </div>
                               
                               <div className="flex items-center gap-1 shrink-0">
+                                <button
+                                  type="button"
+                                  tabIndex={-1}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    updateLayer(layer.id, { resetAfterCopy: !layer.resetAfterCopy });
+                                  }}
+                                  className={cn(
+                                    "px-1.5 py-0.5 rounded text-[10px] font-sans font-medium flex items-center gap-1 transition-all border shrink-0",
+                                    layer.resetAfterCopy
+                                      ? "bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/30"
+                                      : "bg-slate-800/80 text-slate-400 border-slate-700/60 hover:text-slate-200 hover:border-slate-600"
+                                  )}
+                                  title={layer.resetAfterCopy ? "Reset after copy: Ticked (content clears on copy)" : "Reset after copy: Unticked (stays unchanged on copy)"}
+                                >
+                                  <RefreshCw size={10} className={layer.resetAfterCopy ? "text-amber-400" : "text-slate-500"} />
+                                  <span>{layer.resetAfterCopy ? "Reset" : "Stay"}</span>
+                                </button>
                                 {layer.type === 'date' && (
                                   <div className="relative group/date">
                                     <button
@@ -5047,6 +5087,26 @@ export default function App() {
                     })()}
                   </button>
                 </div>
+
+                {/* Reset on Copy status indicator */}
+                <div className="mt-2.5">
+                  {layers.some(l => l.resetAfterCopy) ? (
+                    <div className="text-[11px] text-amber-300 bg-amber-950/40 border border-amber-800/40 rounded-lg px-2.5 py-1.5 flex items-center justify-between">
+                      <span className="flex items-center gap-1.5">
+                        <RefreshCw size={11} className="text-amber-400 shrink-0" />
+                        <span><strong>{layers.filter(l => l.resetAfterCopy).length}</strong> layer(s) will reset on copy</span>
+                      </span>
+                      <span className="text-[10px] text-amber-400/70 font-mono">
+                        {layers.filter(l => !l.resetAfterCopy).length} stay unchanged
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="text-[11px] text-slate-400 bg-slate-900/50 border border-slate-800/80 rounded-lg px-2.5 py-1.5 flex items-center gap-1.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-slate-500 shrink-0" />
+                      <span>All layers stay unchanged after copy</span>
+                    </div>
+                  )}
+                </div>
               </div>
 
               {selectedLayer && !projects.find(p => p.id === currentProjectId)?.isLocked && (
@@ -5065,6 +5125,50 @@ export default function App() {
                       />
                     </div>
                   )}
+
+                  {/* Reset After Copy Setting for Selected Layer */}
+                  <div className="bg-slate-900/70 p-3 rounded-xl border border-slate-700/60 space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <div className={cn(
+                          "w-6 h-6 rounded-md flex items-center justify-center transition-colors shrink-0",
+                          selectedLayer.resetAfterCopy 
+                            ? "bg-amber-500/20 text-amber-300 border border-amber-500/40" 
+                            : "bg-slate-800 text-slate-400 border border-slate-700"
+                        )}>
+                          <RefreshCw size={12} className={selectedLayer.resetAfterCopy ? "text-amber-400" : "text-slate-400"} />
+                        </div>
+                        <div>
+                          <div className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+                            Reset after copy
+                            {selectedLayer.resetAfterCopy ? (
+                              <span className="text-[9px] bg-amber-500/20 text-amber-300 border border-amber-500/30 px-1 py-0.5 rounded font-medium">
+                                Active
+                              </span>
+                            ) : (
+                              <span className="text-[9px] bg-slate-800 text-slate-400 border border-slate-700 px-1 py-0.5 rounded font-normal">
+                                Off
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                      <label className="relative inline-flex items-center cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={!!selectedLayer.resetAfterCopy}
+                          onChange={(e) => updateLayer(selectedLayer.id, { resetAfterCopy: e.target.checked })}
+                          className="sr-only peer"
+                        />
+                        <div className="w-9 h-5 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-amber-600"></div>
+                      </label>
+                    </div>
+                    <p className="text-[11px] text-slate-400 leading-tight">
+                      {selectedLayer.resetAfterCopy
+                        ? "Content will be cleared after clicking Copy. Untick to stay unchanged."
+                        : "Content stays unchanged after clicking Copy. Tick to reset after copy."}
+                    </p>
+                  </div>
                   <div>
                     <label className="text-xs text-slate-500 block mb-1.5">{projects.find(p => p.id === currentProjectId)?.isLocked ? "Editing Content" : "Text Content"}</label>
                     {selectedLayer.isListLabel ? (() => {
