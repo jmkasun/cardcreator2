@@ -6175,9 +6175,10 @@ export default function App() {
                                             </span>
                                           </button>
                                         );
-                                      })}
+                                      })} 
                                     </div>
-                                  </div>
+                                  </div> 
+
 
                                   {/* Line Coordinates Editor */}
                                   {selectedLayer.selectedSuffix ? (() => {
