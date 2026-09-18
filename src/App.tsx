@@ -4734,6 +4734,28 @@ export default function App() {
                               </div>
                               
                               <div className="flex items-center gap-1 shrink-0">
+                                {layer.type === 'date' && (
+                                  <div className="relative group/date mr-1.5">
+                                    <button
+                                      tabIndex={-1}
+                                      className="p-1 hover:text-blue-400 transition-all flex items-center justify-center"
+                                    >
+                                      <Calendar size={14} />
+                                    </button>
+                                    <input
+                                      type="date"
+                                      tabIndex={-1}
+                                      className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+                                      onClick={(e) => e.stopPropagation()}
+                                      onFocus={() => setSelectedLayerId(layer.id)}
+                                      onChange={(e) => {
+                                        if (e.target.value) {
+                                          updateLayer(layer.id, { text: e.target.value });
+                                        }
+                                      }}
+                                    />
+                                  </div>
+                                )}
                                 <button
                                   type="button"
                                   tabIndex={-1}
@@ -4752,28 +4774,6 @@ export default function App() {
                                   <RefreshCw size={10} className={layer.resetAfterCopy ? "text-amber-400" : "text-slate-500"} />
                                   <span>{layer.resetAfterCopy ? "Reset" : "Stay"}</span>
                                 </button>
-                                {layer.type === 'date' && (
-                                  <div className="relative group/date">
-                                    <button
-                                      tabIndex={-1}
-                                      className="p-1 hover:text-blue-400 transition-all"
-                                    >
-                                      <Calendar size={14} />
-                                    </button>
-                                    <input
-                                      type="date"
-                                      tabIndex={-1}
-                                      className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
-                                      onClick={(e) => e.stopPropagation()}
-                                      onFocus={() => setSelectedLayerId(layer.id)}
-                                      onChange={(e) => {
-                                        if (e.target.value) {
-                                          updateLayer(layer.id, { text: e.target.value });
-                                        }
-                                      }}
-                                    />
-                                  </div>
-                                )}
                                 <button
                                   tabIndex={-1}
                                   disabled={projects.find(p => p.id === currentProjectId)?.isLocked}
