@@ -5,7 +5,7 @@ import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
 import multer from "multer";
-import pg from "pg"; 
+import pg from "pg";
 
 // Force bypass for self-signed certificates globally as a fallback
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
