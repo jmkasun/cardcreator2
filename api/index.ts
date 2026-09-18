@@ -131,6 +131,16 @@ async function initDb() {
       `);
       
       await client.query(`
+        ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS copies_count INTEGER DEFAULT 0;
+      `);
+      await client.query(`
+        ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS downloads_count INTEGER DEFAULT 0;
+      `);
+      await client.query(`
+        ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS shares_count INTEGER DEFAULT 0;
+      `);
+      
+      await client.query(`
         CREATE TABLE IF NOT EXISTS custom_fonts (
           name TEXT PRIMARY KEY,
           data BYTEA NOT NULL,
@@ -760,15 +770,25 @@ app.get("/api/images/:id", async (req, res) => {
     if (HAS_POSTGRES) {
       await initDb();
       const result = await pool.query(
-        `SELECT id, username, layers, name, is_locked as "isLocked", created_at as "createdAt" 
+        `SELECT id, username, layers, name, is_locked as "isLocked", created_at as "createdAt",
+                COALESCE(copies_count, 0) as "copiesCount",
+                COALESCE(downloads_count, 0) as "downloadsCount",
+                COALESCE(shares_count, 0) as "sharesCount" 
          FROM font_app_images WHERE id = $1`,
         [id]
       );
       if (result.rowCount && result.rowCount > 0) {
         const row = result.rows[0];
+        const copies = Number(row.copiesCount || 0);
+        const downloads = Number(row.downloadsCount || 0);
+        const shares = Number(row.sharesCount || 0);
         return res.json({
           ...row,
-          imageUrl: `/api/images/${row.id}/image`
+          imageUrl: `/api/images/${row.id}/image`,
+          copiesCount: copies,
+          downloadsCount: downloads,
+          sharesCount: shares,
+          creationsCount: copies + downloads + shares
         });
       }
     }
@@ -787,7 +807,10 @@ app.get("/api/images", async (req, res) => {
     if (HAS_POSTGRES) {
       await initDb();
       let query = `
-        SELECT id, username, layers, name, is_locked as "isLocked", created_at as "createdAt" 
+        SELECT id, username, layers, name, is_locked as "isLocked", created_at as "createdAt",
+               COALESCE(copies_count, 0) as "copiesCount",
+               COALESCE(downloads_count, 0) as "downloadsCount",
+               COALESCE(shares_count, 0) as "sharesCount" 
         FROM font_app_images
       `;
       const params = [];
@@ -799,22 +822,43 @@ app.get("/api/images", async (req, res) => {
       query += " ORDER BY created_at DESC";
       
       const result = await pool.query(query, params);
-      const mapped = result.rows.map(row => ({
-        id: row.id,
-        username: row.username,
-        imageUrl: `/api/images/${row.id}/image`,
-        layers: row.layers,
-        name: row.name,
-        isLocked: row.isLocked,
-        createdAt: row.createdAt
-      }));
+      const mapped = result.rows.map(row => {
+        const copies = Number(row.copiesCount || 0);
+        const downloads = Number(row.downloadsCount || 0);
+        const shares = Number(row.sharesCount || 0);
+        return {
+          id: row.id,
+          username: row.username,
+          imageUrl: `/api/images/${row.id}/image`,
+          layers: row.layers,
+          name: row.name,
+          isLocked: row.isLocked,
+          createdAt: row.createdAt,
+          copiesCount: copies,
+          downloadsCount: downloads,
+          sharesCount: shares,
+          creationsCount: copies + downloads + shares
+        };
+      });
       return res.json(mapped);
     } else {
       const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
       const userImages = username 
         ? data.images.filter((img: any) => img.username === username)
         : data.images;
-      res.json(userImages);
+      const mapped = (userImages || []).map((img: any) => {
+        const copies = Number(img.copiesCount || 0);
+        const downloads = Number(img.downloadsCount || 0);
+        const shares = Number(img.sharesCount || 0);
+        return {
+          ...img,
+          copiesCount: copies,
+          downloadsCount: downloads,
+          sharesCount: shares,
+          creationsCount: copies + downloads + shares
+        };
+      });
+      res.json(mapped);
     }
   } catch (err) {
     console.error("Fetch images error:", err);
@@ -899,6 +943,70 @@ app.delete("/api/images/:id", async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error("Delete image error:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+// Track Image Creation (copy, download, share)
+app.post(["/api/images/:id/creation", "/api/images/:id/track"], async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { type } = req.body; // 'copy' | 'download' | 'share'
+
+    let column = "copies_count";
+    if (type === "download") column = "downloads_count";
+    else if (type === "share") column = "shares_count";
+    else if (type === "copy") column = "copies_count";
+    else return res.status(400).json({ success: false, message: "Invalid creation type" });
+
+    if (HAS_POSTGRES) {
+      await initDb();
+      const result = await pool.query(
+        `UPDATE font_app_images 
+         SET ${column} = COALESCE(${column}, 0) + 1 
+         WHERE id = $1 
+         RETURNING id, 
+                   COALESCE(copies_count, 0) as "copiesCount", 
+                   COALESCE(downloads_count, 0) as "downloadsCount", 
+                   COALESCE(shares_count, 0) as "sharesCount"`,
+        [id]
+      );
+      if (result.rowCount && result.rowCount > 0) {
+        const row = result.rows[0];
+        const copies = Number(row.copiesCount || 0);
+        const downloads = Number(row.downloadsCount || 0);
+        const shares = Number(row.sharesCount || 0);
+        return res.json({
+          success: true,
+          id: row.id,
+          copiesCount: copies,
+          downloadsCount: downloads,
+          sharesCount: shares,
+          creationsCount: copies + downloads + shares
+        });
+      }
+    } else {
+      const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
+      const img = data.images.find((i: any) => i.id === id);
+      if (img) {
+        if (type === 'copy') img.copiesCount = (img.copiesCount || 0) + 1;
+        else if (type === 'download') img.downloadsCount = (img.downloadsCount || 0) + 1;
+        else if (type === 'share') img.sharesCount = (img.sharesCount || 0) + 1;
+        img.creationsCount = (img.copiesCount || 0) + (img.downloadsCount || 0) + (img.sharesCount || 0);
+        fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+        return res.json({
+          success: true,
+          id: img.id,
+          copiesCount: img.copiesCount,
+          downloadsCount: img.downloadsCount,
+          sharesCount: img.sharesCount,
+          creationsCount: img.creationsCount
+        });
+      }
+    }
+    res.json({ success: true, message: "Tracked" });
+  } catch (err) {
+    console.error("Error tracking creation in api/index.ts:", err);
     res.status(500).json({ success: false, message: "Internal server error" });
   }
 });

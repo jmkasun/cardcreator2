@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { useDropzone } from "react-dropzone";
-import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check, Lock, Unlock, FileUp, FileDown, Copy, Undo2, List, Eye, EyeOff, Tag, Move, Hash, ListOrdered, Coins, Loader2 } from "lucide-react";
+import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check, Lock, Unlock, FileUp, FileDown, Copy, Undo2, List, Eye, EyeOff, Tag, Move, Hash, ListOrdered, Coins, Loader2, Sparkles, BarChart3 } from "lucide-react";
 import { cn } from "@/src/lib/utils";
 import { motion, AnimatePresence } from "motion/react";
 import { convertNumberToSinhala, numberToSinhalaWords, formatNumberForCanvas, isUnicodeFont } from "./utils/sinhalaConverter";
@@ -105,6 +105,10 @@ interface ImageProject {
   name: string;
   createdAt: string;
   isLocked?: boolean;
+  copiesCount?: number;
+  downloadsCount?: number;
+  sharesCount?: number;
+  creationsCount?: number;
 }
 
 export default function App() {
@@ -119,6 +123,9 @@ export default function App() {
   const [projects, setProjects] = useState<ImageProject[]>([]);
   const [isProjectsLoading, setIsProjectsLoading] = useState(false);
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
+  const [selectedStatsProject, setSelectedStatsProject] = useState<ImageProject | null>(null);
+  const [canvasContextMenu, setCanvasContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const [projectSortMode, setProjectSortMode] = useState<'recent' | 'creations'>('recent');
   const [image, setImage] = useState<string | null>(null);
   const [layers, setLayers] = useState<TextLayer[]>([]);
   const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
@@ -353,6 +360,48 @@ export default function App() {
       console.error("Failed to fetch projects", err);
     } finally {
       setIsProjectsLoading(false);
+    }
+  };
+
+  const recordCreationEvent = async (projectId: string | null, type: 'copy' | 'download' | 'share') => {
+    if (!projectId) return;
+
+    // 1. Optimistic update
+    setProjects(prev => prev.map(p => {
+      if (p.id !== projectId) return p;
+      const copies = (p.copiesCount || 0) + (type === 'copy' ? 1 : 0);
+      const downloads = (p.downloadsCount || 0) + (type === 'download' ? 1 : 0);
+      const shares = (p.sharesCount || 0) + (type === 'share' ? 1 : 0);
+      return {
+        ...p,
+        copiesCount: copies,
+        downloadsCount: downloads,
+        sharesCount: shares,
+        creationsCount: copies + downloads + shares
+      };
+    }));
+
+    // 2. Persist to API
+    try {
+      const res = await fetch(`/api/images/${projectId}/creation`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.creationsCount !== undefined) {
+          setProjects(prev => prev.map(p => p.id === projectId ? {
+            ...p,
+            copiesCount: data.copiesCount,
+            downloadsCount: data.downloadsCount,
+            sharesCount: data.sharesCount,
+            creationsCount: data.creationsCount
+          } : p));
+        }
+      }
+    } catch (err) {
+      console.error("Failed to record creation metric:", err);
     }
   };
 
@@ -1688,9 +1737,17 @@ export default function App() {
         // Copy to clipboard
         canvas.toBlob(async (blob) => {
           if (!blob) return;
-          const item = new ClipboardItem({ "image/png": blob });
-          await navigator.clipboard.write([item]);
-          setNotification({ message: "Image copied to clipboard!", type: 'success' });
+          try {
+            const item = new ClipboardItem({ "image/png": blob });
+            await navigator.clipboard.write([item]);
+            setNotification({ message: "Image copied to clipboard!", type: 'success' });
+            if (currentProjectId) {
+              recordCreationEvent(currentProjectId, 'copy');
+            }
+          } catch (clipErr) {
+            console.error("Clipboard copy error:", clipErr);
+            setNotification({ message: "Failed to copy image to clipboard", type: 'error' });
+          }
         });
 
         isExportingRef.current = false;
@@ -2294,6 +2351,10 @@ export default function App() {
       link.click();
       isExportingRef.current = false;
       drawCanvas();
+      if (currentProjectId) {
+        recordCreationEvent(currentProjectId, 'download');
+      }
+      setNotification({ message: "Image downloaded successfully!", type: 'success' });
     }, 50);
   };
 
@@ -2317,6 +2378,9 @@ export default function App() {
             title: 'Shared Image',
             text: 'Check out this image I created!',
           });
+          if (currentProjectId) {
+            recordCreationEvent(currentProjectId, 'share');
+          }
         } else {
           setNotification({ message: "Sharing is not supported on this browser. You can download the image instead.", type: 'error' });
         }
@@ -2334,7 +2398,28 @@ export default function App() {
     const text = `Check out this image: ${currentProject?.name || 'Image'}`;
     const url = `https://wa.me/?text=${encodeURIComponent(text)}`;
     window.open(url, '_blank');
+    if (currentProjectId) {
+      recordCreationEvent(currentProjectId, 'share');
+    }
   };
+
+  // Keyboard shortcut Ctrl+C / Cmd+C on canvas to copy and track creation
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C')) {
+        if (image && currentProjectId) {
+          e.preventDefault();
+          copyImageToClipboard();
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [image, currentProjectId, layers]);
 
   if (!user) {
     return (
@@ -2579,6 +2664,18 @@ export default function App() {
                     <Edit2 size={13} className="text-slate-400 group-hover:text-blue-400 shrink-0 transition-colors" />
                   </button>
                 )}
+
+                {/* Creation Count Pill */}
+                <button
+                  type="button"
+                  onClick={() => setSelectedStatsProject(currentProject)}
+                  className="flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 transition-all shadow-sm group shrink-0"
+                  title={`Image Creations: ${currentProject.creationsCount || 0} (${currentProject.copiesCount || 0} copies, ${currentProject.downloadsCount || 0} downloads, ${currentProject.sharesCount || 0} shares). Click for details.`}
+                >
+                  <Sparkles size={13} className="text-amber-400 group-hover:scale-110 transition-transform" />
+                  <span>{currentProject.creationsCount || 0}</span>
+                  <span className="text-amber-400/80 hidden sm:inline text-[11px] font-normal">Creations</span>
+                </button>
               </div>
             );
           })()}
@@ -3408,6 +3505,133 @@ export default function App() {
             </motion.div>
           </div>
         )}
+
+        {/* Image Creation Analytics Modal */}
+        {selectedStatsProject && (
+          <div 
+            className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+            onClick={() => setSelectedStatsProject(null)}
+          >
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-md shadow-2xl overflow-hidden"
+            >
+              {/* Modal Header */}
+              <div className="p-4 border-b border-slate-800 flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-lg bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400">
+                    <Sparkles size={16} />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-white">Image Creation Metrics</h3>
+                    <p className="text-xs text-slate-400 truncate max-w-[240px]">{selectedStatsProject.name}</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setSelectedStatsProject(null)}
+                  className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              {/* Modal Content */}
+              <div className="p-5 space-y-4">
+                {/* Total creations showcase banner */}
+                <div className="bg-gradient-to-br from-amber-500/15 via-amber-500/5 to-transparent border border-amber-500/30 rounded-xl p-4 text-center">
+                  <div className="text-[11px] font-semibold text-amber-400 uppercase tracking-wider mb-1">
+                    Total Creations Recorded
+                  </div>
+                  <div className="text-4xl font-extrabold text-amber-300 font-mono tracking-tight">
+                    {selectedStatsProject.creationsCount || 0}
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-1.5">
+                    Accumulated copies (button or right-click), shares, and downloads
+                  </p>
+                </div>
+
+                {/* Breakdown cards */}
+                <div className="grid grid-cols-3 gap-2.5">
+                  {/* Copies */}
+                  <div className="bg-slate-800/60 border border-slate-700/60 rounded-xl p-3 text-center flex flex-col items-center">
+                    <div className="w-7 h-7 rounded-lg bg-teal-500/20 border border-teal-500/30 flex items-center justify-center text-teal-400 mb-1.5">
+                      <Copy size={14} />
+                    </div>
+                    <div className="text-xl font-bold text-white font-mono">
+                      {selectedStatsProject.copiesCount || 0}
+                    </div>
+                    <div className="text-[11px] font-medium text-slate-300 mt-0.5">Copies</div>
+                    <div className="text-[9px] text-slate-500">Button & R-click</div>
+                  </div>
+
+                  {/* Downloads */}
+                  <div className="bg-slate-800/60 border border-slate-700/60 rounded-xl p-3 text-center flex flex-col items-center">
+                    <div className="w-7 h-7 rounded-lg bg-blue-500/20 border border-blue-500/30 flex items-center justify-center text-blue-400 mb-1.5">
+                      <Download size={14} />
+                    </div>
+                    <div className="text-xl font-bold text-white font-mono">
+                      {selectedStatsProject.downloadsCount || 0}
+                    </div>
+                    <div className="text-[11px] font-medium text-slate-300 mt-0.5">Downloads</div>
+                    <div className="text-[9px] text-slate-500">PNG exports</div>
+                  </div>
+
+                  {/* Shares */}
+                  <div className="bg-slate-800/60 border border-slate-700/60 rounded-xl p-3 text-center flex flex-col items-center">
+                    <div className="w-7 h-7 rounded-lg bg-green-500/20 border border-green-500/30 flex items-center justify-center text-green-400 mb-1.5">
+                      <Share2 size={14} />
+                    </div>
+                    <div className="text-xl font-bold text-white font-mono">
+                      {selectedStatsProject.sharesCount || 0}
+                    </div>
+                    <div className="text-[11px] font-medium text-slate-300 mt-0.5">Shares</div>
+                    <div className="text-[9px] text-slate-500">Direct / WhatsApp</div>
+                  </div>
+                </div>
+
+                {/* Project Details Footer */}
+                <div className="flex items-center gap-3 p-2.5 bg-slate-800/40 rounded-xl border border-slate-800">
+                  <img 
+                    src={selectedStatsProject.imageUrl} 
+                    alt={selectedStatsProject.name} 
+                    className="w-11 h-11 rounded-lg object-cover border border-slate-700 shrink-0" 
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-xs font-semibold text-white truncate">{selectedStatsProject.name}</div>
+                    <div className="text-[10px] text-slate-400">
+                      ID: <span className="font-mono">{selectedStatsProject.id.slice(0, 8)}</span>
+                    </div>
+                  </div>
+                  {currentProjectId !== selectedStatsProject.id && (
+                    <button
+                      onClick={() => {
+                        loadProject(selectedStatsProject);
+                        setSelectedStatsProject(null);
+                      }}
+                      className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-medium transition-colors shrink-0"
+                    >
+                      Open Project
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Modal Footer */}
+              <div className="p-3.5 bg-slate-900/90 border-t border-slate-800 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => setSelectedStatsProject(null)}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-semibold transition-colors"
+                >
+                  Close
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
       </AnimatePresence>
 
       <div className="flex-1 flex flex-col md:flex-row overflow-hidden relative">
@@ -3492,8 +3716,28 @@ export default function App() {
           <div className="flex-1 overflow-y-auto custom-scrollbar">
             {/* Projects Section */}
             <div className="border-b border-slate-800">
-              <div className="p-4 pb-2">
-                <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">My Projects</h3>
+              <div className="p-4 pb-2 flex items-center justify-between gap-1">
+                <div className="flex items-center gap-1.5">
+                  <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">My Projects</h3>
+                  {projects.length > 0 && (
+                    <span className="text-[10px] text-slate-500 font-mono">({projects.length})</span>
+                  )}
+                </div>
+                {projects.length > 1 && (
+                  <button
+                    onClick={() => setProjectSortMode(prev => prev === 'recent' ? 'creations' : 'recent')}
+                    className={cn(
+                      "text-[10px] px-2 py-0.5 rounded-md flex items-center gap-1 border transition-all",
+                      projectSortMode === 'creations'
+                        ? "bg-amber-500/20 text-amber-300 border-amber-500/40"
+                        : "bg-slate-800 text-slate-400 border-slate-700 hover:text-slate-200"
+                    )}
+                    title="Toggle sorting between Most Recent and Top Creations"
+                  >
+                    <Sparkles size={10} className={projectSortMode === 'creations' ? 'text-amber-400' : 'text-slate-500'} />
+                    <span>{projectSortMode === 'creations' ? 'Top Creations' : 'Recent'}</span>
+                  </button>
+                )}
               </div>
               <div className="p-4 pt-0">
                 <div className="grid grid-cols-4 gap-1.5">
@@ -3505,7 +3749,16 @@ export default function App() {
                   ) : projects.length === 0 ? (
                     <p className="text-[10px] text-slate-600 italic col-span-4 text-center py-4">No projects yet</p>
                   ) : (
-                    projects.map((proj) => (
+                    [...projects]
+                      .sort((a, b) => {
+                        if (projectSortMode === 'creations') {
+                          return (b.creationsCount || 0) - (a.creationsCount || 0);
+                        }
+                        const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+                        const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+                        return timeB - timeA;
+                      })
+                      .map((proj) => (
                       <div
                         key={proj.id}
                         onClick={() => loadProject(proj)}
@@ -3521,6 +3774,19 @@ export default function App() {
                           className="w-full h-full object-cover" 
                           referrerPolicy="no-referrer" 
                         />
+
+                        {/* Creation Count Badge (Top-Left) */}
+                        <div
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedStatsProject(proj);
+                          }}
+                          className="absolute top-1 left-1 px-1.5 py-0.5 rounded bg-black/80 hover:bg-black text-[9px] font-bold text-amber-300 border border-amber-500/40 backdrop-blur-sm flex items-center gap-1 shadow-md z-10 transition-all cursor-pointer hover:scale-105"
+                          title={`Total creations: ${proj.creationsCount || 0} (${proj.copiesCount || 0} copies, ${proj.downloadsCount || 0} downloads, ${proj.sharesCount || 0} shares). Click for breakdown.`}
+                        >
+                          <Sparkles size={9} className="text-amber-400 shrink-0" />
+                          <span>{proj.creationsCount || 0}</span>
+                        </div>
                         
                         {/* Actions Overlay */}
                         <div className="absolute top-1 right-1 flex flex-row gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -4057,9 +4323,22 @@ export default function App() {
                   <button
                     onClick={copyImageToClipboard}
                     disabled={!image}
-                    className="bg-teal-600 hover:bg-teal-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-2.5 rounded-xl flex items-center justify-center gap-2 transition-all text-xs shadow-lg"
+                    className="bg-teal-600 hover:bg-teal-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-2.5 rounded-xl flex items-center justify-center gap-1.5 transition-all text-xs shadow-lg relative group"
+                    title="Copy image to clipboard & count as creation (Shortcut: Ctrl+C)"
                   >
-                    <Copy size={16} /> Copy
+                    <Copy size={15} /> 
+                    <span>Copy</span>
+                    {(() => {
+                      const cur = projects.find(p => p.id === currentProjectId);
+                      if (cur && (cur.copiesCount || 0) > 0) {
+                        return (
+                          <span className="text-[10px] bg-teal-900/90 text-teal-200 border border-teal-400/30 px-1.5 py-0.5 rounded-full font-mono ml-0.5" title={`${cur.copiesCount} copies recorded`}>
+                            {cur.copiesCount}
+                          </span>
+                        );
+                      }
+                      return null;
+                    })()}
                   </button>
                 </div>
               </div>
@@ -5780,6 +6059,12 @@ export default function App() {
                       onMouseMove={handleCanvasMouseMove}
                       onMouseUp={handleCanvasMouseUp}
                       onMouseLeave={handleCanvasMouseUp}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        const x = Math.min(e.clientX, window.innerWidth - 240);
+                        const y = Math.min(e.clientY, window.innerHeight - 250);
+                        setCanvasContextMenu({ x, y });
+                      }}
                     />
                   </div>
                 </div>
@@ -5788,6 +6073,90 @@ export default function App() {
           )}
         </main>
       </div>
+
+      {/* Custom Context Menu on Canvas Right Click */}
+      {canvasContextMenu && (
+        <div 
+          className="fixed inset-0 z-[100]" 
+          onClick={() => setCanvasContextMenu(null)}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            setCanvasContextMenu(null);
+          }}
+        >
+          <div 
+            style={{ top: canvasContextMenu.y, left: canvasContextMenu.x }}
+            className="absolute bg-slate-900/95 backdrop-blur-md border border-slate-700/80 rounded-xl shadow-2xl p-1.5 w-56 animate-in fade-in zoom-in-95 duration-100 flex flex-col gap-0.5 text-xs z-[101]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-2.5 py-1.5 text-[10px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-800">
+              Image Actions
+            </div>
+            <button
+              onClick={() => {
+                setCanvasContextMenu(null);
+                copyImageToClipboard();
+              }}
+              className="flex items-center justify-between px-2.5 py-2 text-slate-200 hover:text-white hover:bg-blue-600/20 rounded-lg transition-colors group text-left"
+            >
+              <div className="flex items-center gap-2">
+                <Copy size={14} className="text-teal-400 group-hover:text-teal-300" />
+                <span className="font-medium">Copy Image</span>
+              </div>
+              <span className="text-[10px] text-slate-500 font-mono">Ctrl+C</span>
+            </button>
+
+            <button
+              onClick={() => {
+                setCanvasContextMenu(null);
+                downloadImage();
+              }}
+              className="flex items-center gap-2 px-2.5 py-2 text-slate-200 hover:text-white hover:bg-blue-600/20 rounded-lg transition-colors group text-left"
+            >
+              <Download size={14} className="text-blue-400 group-hover:text-blue-300" />
+              <span className="font-medium">Download Image</span>
+            </button>
+
+            <button
+              onClick={() => {
+                setCanvasContextMenu(null);
+                shareImage();
+              }}
+              className="flex items-center gap-2 px-2.5 py-2 text-slate-200 hover:text-white hover:bg-blue-600/20 rounded-lg transition-colors group text-left"
+            >
+              <Share2 size={14} className="text-indigo-400 group-hover:text-indigo-300" />
+              <span className="font-medium">Share Image</span>
+            </button>
+
+            {currentProjectId && (
+              <>
+                <div className="my-1 border-t border-slate-800" />
+                <button
+                  onClick={() => {
+                    const cur = projects.find(p => p.id === currentProjectId);
+                    setCanvasContextMenu(null);
+                    if (cur) setSelectedStatsProject(cur);
+                  }}
+                  className="flex items-center justify-between px-2.5 py-2 text-amber-300 hover:bg-amber-500/10 rounded-lg transition-colors group text-left"
+                >
+                  <div className="flex items-center gap-2">
+                    <Sparkles size={14} className="text-amber-400" />
+                    <span className="font-medium">Creation Stats</span>
+                  </div>
+                  {(() => {
+                    const cur = projects.find(p => p.id === currentProjectId);
+                    return cur ? (
+                      <span className="text-[10px] font-bold bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded-full font-mono">
+                        {cur.creationsCount || 0}
+                      </span>
+                    ) : null;
+                  })()}
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
