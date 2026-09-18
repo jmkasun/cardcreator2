@@ -156,6 +156,18 @@ async function initDb() {
         CREATE INDEX IF NOT EXISTS idx_users_lower_username ON users (LOWER(username));
       `);
 
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS font_app_image_creations (
+          id SERIAL PRIMARY KEY,
+          image_id TEXT NOT NULL,
+          type TEXT NOT NULL,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_creations_image_time ON font_app_image_creations (image_id, created_at DESC);
+      `);
+
       const adminCheck = await client.query("SELECT role FROM users WHERE username = 'admin'");
       if (adminCheck.rowCount === 0) {
         await client.query("INSERT INTO users (username, password, role) VALUES ('admin', 'admin@1234', 'admin')");
@@ -961,6 +973,11 @@ app.post(["/api/images/:id/creation", "/api/images/:id/track"], async (req, res)
 
     if (HAS_POSTGRES) {
       await initDb();
+      pool.query(
+        `INSERT INTO font_app_image_creations (image_id, type, created_at) VALUES ($1, $2, CURRENT_TIMESTAMP)`,
+        [id, type]
+      ).catch(err => console.error("Error logging creation in api/index.ts:", err));
+
       const result = await pool.query(
         `UPDATE font_app_images 
          SET ${column} = COALESCE(${column}, 0) + 1 
@@ -987,6 +1004,14 @@ app.post(["/api/images/:id/creation", "/api/images/:id/track"], async (req, res)
       }
     } else {
       const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
+      data.creations = data.creations || [];
+      data.creations.push({
+        id: Date.now().toString(),
+        imageId: id,
+        type,
+        createdAt: new Date().toISOString()
+      });
+
       const img = data.images.find((i: any) => i.id === id);
       if (img) {
         if (type === 'copy') img.copiesCount = (img.copiesCount || 0) + 1;
@@ -1007,6 +1032,121 @@ app.post(["/api/images/:id/creation", "/api/images/:id/track"], async (req, res)
     res.json({ success: true, message: "Tracked" });
   } catch (err) {
     console.error("Error tracking creation in api/index.ts:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+// Fetch Image Creation Metrics with Date Range Filter
+app.get("/api/images/:id/metrics", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { range = "alltime", startDate, endDate } = req.query as {
+      range?: string;
+      startDate?: string;
+      endDate?: string;
+    };
+
+    if (HAS_POSTGRES) {
+      await initDb();
+      const imgRes = await pool.query(
+        `SELECT id, name, 
+                COALESCE(copies_count, 0) as "copiesCount", 
+                COALESCE(downloads_count, 0) as "downloadsCount", 
+                COALESCE(shares_count, 0) as "sharesCount" 
+         FROM font_app_images WHERE id = $1`,
+        [id]
+      );
+      if (!imgRes.rowCount || imgRes.rowCount === 0) {
+        return res.status(404).json({ success: false, message: "Project not found" });
+      }
+      const imgRow = imgRes.rows[0];
+      const allCopies = Number(imgRow.copiesCount || 0);
+      const allDownloads = Number(imgRow.downloadsCount || 0);
+      const allShares = Number(imgRow.sharesCount || 0);
+
+      if (range === "alltime" && !startDate && !endDate) {
+        return res.json({
+          success: true,
+          id,
+          range: "alltime",
+          copiesCount: allCopies,
+          downloadsCount: allDownloads,
+          sharesCount: allShares,
+          creationsCount: allCopies + allDownloads + allShares
+        });
+      }
+
+      let start: Date | null = null;
+      let end: Date | null = null;
+
+      if (startDate) {
+        start = new Date(startDate);
+      }
+      if (endDate) {
+        end = new Date(endDate);
+      }
+
+      if (!start || !end) {
+        const now = new Date();
+        if (range === "today") {
+          start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+          end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+        } else if (range === "yesterday") {
+          const y = new Date(now);
+          y.setDate(y.getDate() - 1);
+          start = new Date(y.getFullYear(), y.getMonth(), y.getDate(), 0, 0, 0, 0);
+          end = new Date(y.getFullYear(), y.getMonth(), y.getDate(), 23, 59, 59, 999);
+        } else if (range === "week") {
+          start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+          end = now;
+        } else if (range === "month") {
+          start = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+          end = now;
+        }
+      }
+
+      if (start && end) {
+        const logsRes = await pool.query(
+          `SELECT 
+             COUNT(*) FILTER (WHERE type = 'copy') as copies,
+             COUNT(*) FILTER (WHERE type = 'download') as downloads,
+             COUNT(*) FILTER (WHERE type = 'share') as shares,
+             COUNT(*) as total
+           FROM font_app_image_creations
+           WHERE image_id = $1 AND created_at >= $2 AND created_at <= $3`,
+          [id, start.toISOString(), end.toISOString()]
+        );
+        const lRow = logsRes.rows[0] || {};
+        const copies = Number(lRow.copies || 0);
+        const downloads = Number(lRow.downloads || 0);
+        const shares = Number(lRow.shares || 0);
+        return res.json({
+          success: true,
+          id,
+          range,
+          startDate: start.toISOString(),
+          endDate: end.toISOString(),
+          copiesCount: copies,
+          downloadsCount: downloads,
+          sharesCount: shares,
+          creationsCount: copies + downloads + shares
+        });
+      }
+
+      return res.json({
+        success: true,
+        id,
+        range: "alltime",
+        copiesCount: allCopies,
+        downloadsCount: allDownloads,
+        sharesCount: allShares,
+        creationsCount: allCopies + allDownloads + allShares
+      });
+    }
+
+    res.status(404).json({ success: false, message: "Not implemented" });
+  } catch (err) {
+    console.error("Error fetching metrics in api/index.ts:", err);
     res.status(500).json({ success: false, message: "Internal server error" });
   }
 });

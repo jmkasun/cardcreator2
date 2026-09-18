@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { useDropzone } from "react-dropzone";
-import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check, Lock, Unlock, FileUp, FileDown, Copy, Undo2, List, Eye, EyeOff, Tag, Move, Hash, ListOrdered, Coins, Loader2, Sparkles, BarChart3 } from "lucide-react";
+import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, ChevronUp, RefreshCw, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check, Lock, Unlock, FileUp, FileDown, Copy, Undo2, List, Eye, EyeOff, Tag, Move, Hash, ListOrdered, Coins, Loader2, Sparkles, BarChart3, MoreVertical } from "lucide-react";
 import { cn } from "@/src/lib/utils";
 import { motion, AnimatePresence } from "motion/react";
 import { convertNumberToSinhala, numberToSinhalaWords, formatNumberForCanvas, isUnicodeFont } from "./utils/sinhalaConverter";
@@ -124,6 +124,16 @@ export default function App() {
   const [isProjectsLoading, setIsProjectsLoading] = useState(false);
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
   const [selectedStatsProject, setSelectedStatsProject] = useState<ImageProject | null>(null);
+  const [openKebabProjectId, setOpenKebabProjectId] = useState<string | null>(null);
+  const [metricsDateRange, setMetricsDateRange] = useState<'alltime' | 'today' | 'yesterday' | 'week' | 'month' | 'custom'>('alltime');
+  const [metricsCustomStartDate, setMetricsCustomStartDate] = useState<string>(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 7);
+    return d.toISOString().split('T')[0];
+  });
+  const [metricsCustomEndDate, setMetricsCustomEndDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
+  const [metricsData, setMetricsData] = useState<{ copiesCount: number; downloadsCount: number; sharesCount: number; creationsCount: number } | null>(null);
+  const [isMetricsLoading, setIsMetricsLoading] = useState(false);
   const [canvasContextMenu, setCanvasContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [projectSortMode, setProjectSortMode] = useState<'recent' | 'creations'>('recent');
   const [image, setImage] = useState<string | null>(null);
@@ -146,6 +156,52 @@ export default function App() {
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showChangePasswordModal, setShowChangePasswordModal] = useState(false);
   const [showUserManagementModal, setShowUserManagementModal] = useState(false);
+  const [userManagementTab, setUserManagementTab] = useState<'users' | 'metrics'>('users');
+  const [adminMetricsRange, setAdminMetricsRange] = useState<'alltime' | 'today' | 'yesterday' | 'week' | 'month' | 'custom'>('alltime');
+  const [adminMetricsStartDate, setAdminMetricsStartDate] = useState<string>(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 7);
+    return d.toISOString().split('T')[0];
+  });
+  const [adminMetricsEndDate, setAdminMetricsEndDate] = useState<string>(() => {
+    return new Date().toISOString().split('T')[0];
+  });
+  const [adminMetricsUserFilter, setAdminMetricsUserFilter] = useState('');
+  const [adminMetricsData, setAdminMetricsData] = useState<{
+    range: string;
+    startDate?: string;
+    endDate?: string;
+    summary: {
+      totalCreations: number;
+      totalCopies: number;
+      totalDownloads: number;
+      totalShares: number;
+      totalProjects: number;
+      totalUsers: number;
+    };
+    users: Array<{
+      username: string;
+      role: string;
+      totalCreations: number;
+      totalCopies: number;
+      totalDownloads: number;
+      totalShares: number;
+      projectCount: number;
+      projects: Array<{
+        id: string;
+        name: string;
+        imageUrl: string;
+        isLocked: boolean;
+        createdAt: string;
+        copiesCount: number;
+        downloadsCount: number;
+        sharesCount: number;
+        creationsCount: number;
+      }>;
+    }>;
+  } | null>(null);
+  const [isAdminMetricsLoading, setIsAdminMetricsLoading] = useState(false);
+  const [expandedUsers, setExpandedUsers] = useState<Record<string, boolean>>({});
   const [showFontManagementModal, setShowFontManagementModal] = useState(false);
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -386,7 +442,7 @@ export default function App() {
       const res = await fetch(`/api/images/${projectId}/creation`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type })
+        body: JSON.stringify({ type, username: user?.username })
       });
       if (res.ok) {
         const data = await res.json();
@@ -404,6 +460,49 @@ export default function App() {
       console.error("Failed to record creation metric:", err);
     }
   };
+
+  // Fetch detailed metrics for the selectedStatsProject when range/dates change
+  useEffect(() => {
+    if (!selectedStatsProject) {
+      setMetricsData(null);
+      return;
+    }
+
+    let isMounted = true;
+    const fetchImageMetrics = async () => {
+      setIsMetricsLoading(true);
+      try {
+        let url = `/api/images/${selectedStatsProject.id}/metrics?range=${metricsDateRange}`;
+        if (metricsDateRange === 'custom') {
+          if (metricsCustomStartDate && metricsCustomEndDate) {
+            url += `&startDate=${encodeURIComponent(metricsCustomStartDate + 'T00:00:00.000')}&endDate=${encodeURIComponent(metricsCustomEndDate + 'T23:59:59.999')}`;
+          }
+        }
+        const res = await fetch(url);
+        if (res.ok) {
+          const data = await res.json();
+          if (isMounted) {
+            setMetricsData({
+              copiesCount: Number(data.copiesCount || 0),
+              downloadsCount: Number(data.downloadsCount || 0),
+              sharesCount: Number(data.sharesCount || 0),
+              creationsCount: Number(data.creationsCount || 0),
+            });
+          }
+        }
+      } catch (err) {
+        console.error("Error fetching metrics:", err);
+      } finally {
+        if (isMounted) setIsMetricsLoading(false);
+      }
+    };
+
+    fetchImageMetrics();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [selectedStatsProject?.id, metricsDateRange, metricsCustomStartDate, metricsCustomEndDate]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -605,6 +704,45 @@ export default function App() {
       setNotification({ message: "Failed to delete user", type: 'error' });
     }
   };
+
+  const fetchAdminCreationMetrics = async (
+    range = adminMetricsRange,
+    start = adminMetricsStartDate,
+    end = adminMetricsEndDate,
+    userFilter = adminMetricsUserFilter
+  ) => {
+    if (!user || user.role !== 'admin') return;
+    setIsAdminMetricsLoading(true);
+    try {
+      let url = `/api/admin/creation-metrics?range=${range}`;
+      if (range === 'custom') {
+        if (start) url += `&startDate=${encodeURIComponent(start + 'T00:00:00.000')}`;
+        if (end) url += `&endDate=${encodeURIComponent(end + 'T23:59:59.999')}`;
+      }
+      if (userFilter) {
+        url += `&username=${encodeURIComponent(userFilter)}`;
+      }
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setAdminMetricsData(data);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to fetch admin creation metrics", err);
+    } finally {
+      setIsAdminMetricsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (showUserManagementModal && user?.role === 'admin') {
+      if (adminMetricsRange !== 'custom') {
+        fetchAdminCreationMetrics(adminMetricsRange, '', '', adminMetricsUserFilter);
+      }
+    }
+  }, [showUserManagementModal, adminMetricsRange, adminMetricsUserFilter]);
 
   const saveProject = async () => {
     if (!user || !image) return;
@@ -2796,13 +2934,28 @@ export default function App() {
                           <button 
                             onClick={() => {
                               setShowUserMenu(false);
+                              setUserManagementTab('users');
                               fetchAllUsers();
+                              fetchAdminCreationMetrics();
                               setShowUserManagementModal(true);
                             }}
                             className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors"
                           >
                             <Users size={16} />
                             Manage Users
+                          </button>
+                          <button 
+                            onClick={() => {
+                              setShowUserMenu(false);
+                              setUserManagementTab('metrics');
+                              fetchAllUsers();
+                              fetchAdminCreationMetrics();
+                              setShowUserManagementModal(true);
+                            }}
+                            className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors"
+                          >
+                            <Sparkles size={16} className="text-amber-400" />
+                            Creation Metrics
                           </button>
                         </>
                       )}
@@ -3220,7 +3373,7 @@ export default function App() {
 
         {showUserManagementModal && (
           <div 
-            className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+            className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
             onClick={() => setShowUserManagementModal(false)}
           >
             <motion.div
@@ -3228,98 +3381,503 @@ export default function App() {
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
               onClick={(e) => e.stopPropagation()}
-              className="bg-slate-900 border border-slate-800 p-6 rounded-2xl w-full max-w-2xl shadow-2xl max-h-[80vh] flex flex-col"
+              className="bg-slate-900 border border-slate-800 p-6 rounded-2xl w-full max-w-4xl shadow-2xl max-h-[88vh] flex flex-col"
             >
-              <div className="flex items-center justify-between mb-6">
-                <div className="flex items-center gap-2">
-                  <Users className="text-blue-400" />
-                  <h3 className="text-lg font-bold text-white">User Management</h3>
+              {/* Modal Top Header */}
+              <div className="flex items-center justify-between pb-4 border-b border-slate-800">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-blue-500/15 border border-blue-500/30 flex items-center justify-center text-blue-400">
+                    <Users size={20} />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-bold text-white">User Management</h3>
+                    <p className="text-xs text-slate-400">Manage user accounts and view creation metrics across all projects</p>
+                  </div>
                 </div>
-                <button onClick={() => setShowUserManagementModal(false)} className="text-slate-500 hover:text-white">
+                <button 
+                  onClick={() => setShowUserManagementModal(false)} 
+                  className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
+                >
                   <Plus size={20} className="rotate-45" />
                 </button>
               </div>
 
-              <div className="flex-1 overflow-y-auto space-y-6 pr-2 custom-scrollbar">
-                {/* Create New User Section */}
-                <div className="bg-slate-800/50 border border-slate-800 p-4 rounded-xl">
-                  <h4 className="text-sm font-bold text-white mb-4 flex items-center gap-2">
-                    <UserPlus size={16} className="text-green-400" />
-                    Create New User
-                  </h4>
-                  <form onSubmit={handleCreateAccount} className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div>
-                      <input
-                        type="text"
-                        value={newAccountUsername}
-                        onChange={(e) => setNewAccountUsername(e.target.value)}
-                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:ring-1 focus:ring-blue-500 transition-all"
-                        placeholder="Username"
-                        required
-                      />
-                    </div>
-                    <div>
-                      <input
-                        type="password"
-                        value={newAccountPassword}
-                        onChange={(e) => setNewAccountPassword(e.target.value)}
-                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:ring-1 focus:ring-blue-500 transition-all"
-                        placeholder="Password"
-                        required
-                      />
-                    </div>
-                    <button
-                      type="submit"
-                      disabled={isCreatingAccount}
-                      className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 rounded-lg text-sm transition-all"
-                    >
-                      {isCreatingAccount ? "Creating..." : "Add User"}
-                    </button>
-                  </form>
-                </div>
+              {/* Tabs Switcher */}
+              <div className="flex items-center gap-2 py-3 border-b border-slate-800/80 mb-4">
+                <button
+                  type="button"
+                  onClick={() => setUserManagementTab('users')}
+                  className={cn(
+                    "flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition-all",
+                    userManagementTab === 'users'
+                      ? "bg-blue-600 text-white shadow-md shadow-blue-900/30"
+                      : "bg-slate-800/60 text-slate-400 hover:text-slate-200 hover:bg-slate-800"
+                  )}
+                >
+                  <Users size={14} />
+                  <span>User Accounts</span>
+                  <span className={cn(
+                    "text-[10px] px-1.5 py-0.5 rounded-full font-mono font-bold ml-1",
+                    userManagementTab === 'users' ? "bg-white/20 text-white" : "bg-slate-700 text-slate-300"
+                  )}>
+                    {allUsers.length}
+                  </span>
+                </button>
 
-                {/* User List Section */}
-                <div className="space-y-3">
-                  <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Existing Users</h4>
-                  <div className="grid grid-cols-1 gap-2">
-                    {allUsers.map((u, index) => (
-                      <div key={`${u.username}-${index}`} className="bg-slate-800/30 border border-slate-800 p-3 rounded-xl flex items-center justify-between group">
-                        <div className="flex items-center gap-3">
-                          <div className="w-10 h-10 bg-slate-800 rounded-full flex items-center justify-center">
-                            <span className="text-slate-400 font-bold">{u.username[0].toUpperCase()}</span>
-                          </div>
-                          <div>
-                            <p className="text-sm font-bold text-white flex items-center gap-2">
-                              {u.username}
-                              {u.role === 'admin' && <Shield size={12} className="text-blue-400" />}
-                            </p>
-                            <p className="text-[10px] text-slate-500 uppercase tracking-widest">{u.role}</p>
-                          </div>
-                        </div>
-                        
-                        <div className="flex items-center gap-2">
-                          <button 
-                            onClick={() => setEditingUser(u)}
-                            className="p-2 hover:bg-blue-600/20 text-slate-400 hover:text-blue-400 rounded-lg transition-all"
-                            title="Edit User"
-                          >
-                            <Edit2 size={16} />
-                          </button>
-                          {u.username !== 'admin' && (
-                            <button 
-                              onClick={() => setUserToDelete(u.username)}
-                              className="p-2 hover:bg-red-600/20 text-slate-400 hover:text-red-400 rounded-lg transition-all"
-                              title="Delete User"
-                            >
-                              <UserMinus size={16} />
-                            </button>
-                          )}
-                        </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setUserManagementTab('metrics');
+                    if (!adminMetricsData) {
+                      fetchAdminCreationMetrics();
+                    }
+                  }}
+                  className={cn(
+                    "flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition-all",
+                    userManagementTab === 'metrics'
+                      ? "bg-amber-500 text-slate-950 font-bold shadow-md shadow-amber-500/20"
+                      : "bg-slate-800/60 text-slate-400 hover:text-slate-200 hover:bg-slate-800"
+                  )}
+                >
+                  <Sparkles size={14} className={userManagementTab === 'metrics' ? "text-slate-950" : "text-amber-400"} />
+                  <span>Image Creation Metrics</span>
+                  {adminMetricsData && (
+                    <span className={cn(
+                      "text-[10px] px-1.5 py-0.5 rounded-full font-mono font-bold ml-1",
+                      userManagementTab === 'metrics' ? "bg-black/20 text-slate-950" : "bg-amber-500/20 text-amber-300"
+                    )}>
+                      {adminMetricsData.summary.totalCreations}
+                    </span>
+                  )}
+                </button>
+              </div>
+
+              {/* Tab 1: Users & Accounts */}
+              {userManagementTab === 'users' && (
+                <div className="flex-1 overflow-y-auto space-y-6 pr-2 custom-scrollbar">
+                  {/* Create New User Section */}
+                  <div className="bg-slate-800/50 border border-slate-800 p-4 rounded-xl">
+                    <h4 className="text-sm font-bold text-white mb-4 flex items-center gap-2">
+                      <UserPlus size={16} className="text-green-400" />
+                      Create New User
+                    </h4>
+                    <form onSubmit={handleCreateAccount} className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                      <div>
+                        <input
+                          type="text"
+                          value={newAccountUsername}
+                          onChange={(e) => setNewAccountUsername(e.target.value)}
+                          className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:ring-1 focus:ring-blue-500 transition-all"
+                          placeholder="Username"
+                          required
+                        />
                       </div>
-                    ))}
+                      <div>
+                        <input
+                          type="password"
+                          value={newAccountPassword}
+                          onChange={(e) => setNewAccountPassword(e.target.value)}
+                          className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:ring-1 focus:ring-blue-500 transition-all"
+                          placeholder="Password"
+                          required
+                        />
+                      </div>
+                      <button
+                        type="submit"
+                        disabled={isCreatingAccount}
+                        className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 rounded-lg text-sm transition-all"
+                      >
+                        {isCreatingAccount ? "Creating..." : "Add User"}
+                      </button>
+                    </form>
+                  </div>
+
+                  {/* User List Section */}
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Existing Users ({allUsers.length})</h4>
+                      <p className="text-[11px] text-slate-500">Click a user's creation badge to inspect their metrics</p>
+                    </div>
+                    <div className="grid grid-cols-1 gap-2">
+                      {allUsers.map((u, index) => {
+                        const userMetric = adminMetricsData?.users.find(m => m.username === u.username);
+                        const creationsCount = userMetric ? userMetric.totalCreations : 0;
+                        return (
+                          <div key={`${u.username}-${index}`} className="bg-slate-800/30 border border-slate-800 p-3 rounded-xl flex items-center justify-between group">
+                            <div className="flex items-center gap-3">
+                              <div className="w-10 h-10 bg-slate-800 rounded-full flex items-center justify-center">
+                                <span className="text-slate-400 font-bold">{u.username[0].toUpperCase()}</span>
+                              </div>
+                              <div>
+                                <p className="text-sm font-bold text-white flex items-center gap-2">
+                                  {u.username}
+                                  {u.role === 'admin' && <Shield size={12} className="text-blue-400" />}
+                                </p>
+                                <p className="text-[10px] text-slate-500 uppercase tracking-widest">{u.role}</p>
+                              </div>
+                            </div>
+                            
+                            <div className="flex items-center gap-2">
+                              {/* Quick jump to User Creation Metrics */}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setUserManagementTab('metrics');
+                                  setAdminMetricsUserFilter(u.username);
+                                  fetchAdminCreationMetrics(adminMetricsRange, adminMetricsStartDate, adminMetricsEndDate, u.username);
+                                }}
+                                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/25 text-xs font-semibold transition-all group/pill"
+                                title={`View creation metrics for ${u.username}`}
+                              >
+                                <Sparkles size={12} className="text-amber-400 group-hover/pill:scale-110 transition-transform" />
+                                <span>{creationsCount}</span>
+                                <span className="hidden sm:inline text-amber-400/80 font-normal text-[11px]">Creations</span>
+                              </button>
+
+                              <button 
+                                onClick={() => setEditingUser(u)}
+                                className="p-2 hover:bg-blue-600/20 text-slate-400 hover:text-blue-400 rounded-lg transition-all"
+                                title="Edit User"
+                              >
+                                <Edit2 size={16} />
+                              </button>
+                              {u.username !== 'admin' && (
+                                <button 
+                                  onClick={() => setUserToDelete(u.username)}
+                                  className="p-2 hover:bg-red-600/20 text-slate-400 hover:text-red-400 rounded-lg transition-all"
+                                  title="Delete User"
+                                >
+                                  <UserMinus size={16} />
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
                 </div>
-              </div>
+              )}
+
+              {/* Tab 2: Image Creation Metrics for each user & each project */}
+              {userManagementTab === 'metrics' && (
+                <div className="flex-1 overflow-y-auto space-y-4 pr-2 custom-scrollbar">
+                  {/* Filter Toolbar */}
+                  <div className="bg-slate-800/50 border border-slate-800 p-3.5 rounded-xl space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      {/* Date Range Dropdown */}
+                      <div className="flex items-center gap-2">
+                        <label className="text-xs font-semibold text-slate-400 flex items-center gap-1.5">
+                          <Calendar size={13} className="text-blue-400" />
+                          <span>Date Range:</span>
+                        </label>
+                        <select
+                          value={adminMetricsRange}
+                          onChange={(e) => {
+                            const val = e.target.value as any;
+                            setAdminMetricsRange(val);
+                            if (val !== 'custom') {
+                              fetchAdminCreationMetrics(val, '', '', adminMetricsUserFilter);
+                            }
+                          }}
+                          className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:ring-1 focus:ring-amber-500 cursor-pointer"
+                        >
+                          <option value="alltime">All Time</option>
+                          <option value="today">Today</option>
+                          <option value="yesterday">Yesterday</option>
+                          <option value="week">Past 7 Days</option>
+                          <option value="month">Past 30 Days</option>
+                          <option value="custom">Custom Date Range...</option>
+                        </select>
+                      </div>
+
+                      {/* User Filter Dropdown */}
+                      <div className="flex items-center gap-2">
+                        <label className="text-xs font-semibold text-slate-400 flex items-center gap-1.5">
+                          <UserCircle size={13} className="text-indigo-400" />
+                          <span>Filter User:</span>
+                        </label>
+                        <select
+                          value={adminMetricsUserFilter}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setAdminMetricsUserFilter(val);
+                            fetchAdminCreationMetrics(adminMetricsRange, adminMetricsStartDate, adminMetricsEndDate, val);
+                          }}
+                          className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:ring-1 focus:ring-amber-500 cursor-pointer"
+                        >
+                          <option value="">All Users ({allUsers.length})</option>
+                          {allUsers.map(u => (
+                            <option key={u.username} value={u.username}>
+                              {u.username} {u.role === 'admin' ? '(Admin)' : ''}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {/* Refresh Button */}
+                      <button
+                        type="button"
+                        onClick={() => fetchAdminCreationMetrics(adminMetricsRange, adminMetricsStartDate, adminMetricsEndDate, adminMetricsUserFilter)}
+                        disabled={isAdminMetricsLoading}
+                        className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors ml-auto"
+                        title="Refresh Metrics"
+                      >
+                        <RefreshCw size={12} className={cn(isAdminMetricsLoading && "animate-spin text-amber-400")} />
+                        <span>Refresh</span>
+                      </button>
+                    </div>
+
+                    {/* Custom Range Inputs */}
+                    {adminMetricsRange === 'custom' && (
+                      <div className="pt-2.5 border-t border-slate-700/50 flex flex-wrap items-center gap-3">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[11px] text-slate-400 font-medium">From:</span>
+                          <input
+                            type="date"
+                            value={adminMetricsStartDate}
+                            onChange={(e) => setAdminMetricsStartDate(e.target.value)}
+                            className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-white outline-none focus:ring-1 focus:ring-amber-500"
+                          />
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[11px] text-slate-400 font-medium">To:</span>
+                          <input
+                            type="date"
+                            value={adminMetricsEndDate}
+                            onChange={(e) => setAdminMetricsEndDate(e.target.value)}
+                            className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-white outline-none focus:ring-1 focus:ring-amber-500"
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => fetchAdminCreationMetrics('custom', adminMetricsStartDate, adminMetricsEndDate, adminMetricsUserFilter)}
+                          className="px-3 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-lg text-xs font-bold transition-colors shadow-sm"
+                        >
+                          Apply Custom Range
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Summary Metric KPI Cards */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <div className="bg-gradient-to-br from-amber-500/15 via-amber-500/5 to-transparent border border-amber-500/30 rounded-xl p-3 text-center">
+                      <div className="flex items-center justify-center gap-1.5 text-amber-400 mb-1">
+                        <Sparkles size={14} />
+                        <span className="text-[11px] font-bold uppercase tracking-wider">Total Creations</span>
+                      </div>
+                      <div className="text-2xl font-extrabold text-amber-300 font-mono">
+                        {isAdminMetricsLoading ? <Loader2 size={20} className="animate-spin inline text-amber-400" /> : (adminMetricsData?.summary.totalCreations || 0)}
+                      </div>
+                      <div className="text-[10px] text-slate-400 mt-0.5">Copies + Downloads + Shares</div>
+                    </div>
+
+                    <div className="bg-slate-800/40 border border-slate-700/60 rounded-xl p-3 text-center">
+                      <div className="flex items-center justify-center gap-1.5 text-teal-400 mb-1">
+                        <Copy size={14} />
+                        <span className="text-[11px] font-bold uppercase tracking-wider">Total Copies</span>
+                      </div>
+                      <div className="text-2xl font-extrabold text-white font-mono">
+                        {isAdminMetricsLoading ? <Loader2 size={20} className="animate-spin inline text-teal-400" /> : (adminMetricsData?.summary.totalCopies || 0)}
+                      </div>
+                      <div className="text-[10px] text-slate-400 mt-0.5">Direct button & clipboard</div>
+                    </div>
+
+                    <div className="bg-slate-800/40 border border-slate-700/60 rounded-xl p-3 text-center">
+                      <div className="flex items-center justify-center gap-1.5 text-blue-400 mb-1">
+                        <Download size={14} />
+                        <span className="text-[11px] font-bold uppercase tracking-wider">Total Downloads</span>
+                      </div>
+                      <div className="text-2xl font-extrabold text-white font-mono">
+                        {isAdminMetricsLoading ? <Loader2 size={20} className="animate-spin inline text-blue-400" /> : (adminMetricsData?.summary.totalDownloads || 0)}
+                      </div>
+                      <div className="text-[10px] text-slate-400 mt-0.5">PNG image files saved</div>
+                    </div>
+
+                    <div className="bg-slate-800/40 border border-slate-700/60 rounded-xl p-3 text-center">
+                      <div className="flex items-center justify-center gap-1.5 text-green-400 mb-1">
+                        <Share2 size={14} />
+                        <span className="text-[11px] font-bold uppercase tracking-wider">Total Shares</span>
+                      </div>
+                      <div className="text-2xl font-extrabold text-white font-mono">
+                        {isAdminMetricsLoading ? <Loader2 size={20} className="animate-spin inline text-green-400" /> : (adminMetricsData?.summary.totalShares || 0)}
+                      </div>
+                      <div className="text-[10px] text-slate-400 mt-0.5">WhatsApp & Web Share</div>
+                    </div>
+                  </div>
+
+                  {/* Users and their respective Projects Breakdown */}
+                  <div className="space-y-3.5 pt-1">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">
+                        Image Creation Metrics Per User & Project
+                      </h4>
+                      <span className="text-[11px] text-slate-500 font-mono">
+                        {adminMetricsData?.users.length || 0} user{adminMetricsData?.users.length === 1 ? '' : 's'} · {adminMetricsData?.summary.totalProjects || 0} project{adminMetricsData?.summary.totalProjects === 1 ? '' : 's'}
+                      </span>
+                    </div>
+
+                    {isAdminMetricsLoading && !adminMetricsData ? (
+                      <div className="flex items-center justify-center py-12 text-slate-400 gap-2">
+                        <Loader2 size={20} className="animate-spin text-amber-400" />
+                        <span className="text-sm">Loading user & project metrics...</span>
+                      </div>
+                    ) : (!adminMetricsData || adminMetricsData.users.length === 0) ? (
+                      <div className="text-center py-10 bg-slate-800/20 border border-slate-800 rounded-xl">
+                        <p className="text-sm text-slate-400">No creation metrics or projects found for this period.</p>
+                      </div>
+                    ) : (
+                      adminMetricsData.users.map((u) => {
+                        const isExpanded = expandedUsers[u.username] !== false; // default open
+                        return (
+                          <div key={u.username} className="bg-slate-800/30 border border-slate-800 rounded-xl overflow-hidden transition-all">
+                            {/* User Row Header */}
+                            <div 
+                              onClick={() => setExpandedUsers(prev => ({ ...prev, [u.username]: !isExpanded }))}
+                              className="p-3.5 bg-slate-800/60 hover:bg-slate-800/80 cursor-pointer flex flex-wrap items-center justify-between gap-3 select-none transition-colors"
+                            >
+                              <div className="flex items-center gap-3">
+                                <div className="w-9 h-9 bg-slate-700/60 border border-slate-600/40 rounded-xl flex items-center justify-center text-sm font-bold text-white shadow-inner">
+                                  {u.username[0].toUpperCase()}
+                                </div>
+                                <div>
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-sm font-bold text-white">{u.username}</span>
+                                    {u.role === 'admin' && (
+                                      <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300 font-semibold border border-blue-500/30">
+                                        <Shield size={10} /> Admin
+                                      </span>
+                                    )}
+                                  </div>
+                                  <p className="text-[11px] text-slate-400 mt-0.5">
+                                    {u.projectCount} {u.projectCount === 1 ? "project" : "projects"}
+                                  </p>
+                                </div>
+                              </div>
+
+                              {/* User Total Creations Badge & Counts */}
+                              <div className="flex items-center gap-2.5">
+                                <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-300 text-xs font-bold">
+                                  <Sparkles size={12} className="text-amber-400" />
+                                  <span>{u.totalCreations}</span>
+                                  <span className="text-amber-400/80 text-[10px] font-normal uppercase">Creations</span>
+                                </div>
+
+                                <div className="hidden sm:flex items-center gap-1.5 text-[11px] text-slate-400 bg-slate-900/60 px-2.5 py-1 rounded-md border border-slate-700/50 font-mono">
+                                  <span title="Copies" className="text-teal-400">{u.totalCopies} Copies</span>
+                                  <span className="text-slate-600">·</span>
+                                  <span title="Downloads" className="text-blue-400">{u.totalDownloads} Downloads</span>
+                                  <span className="text-slate-600">·</span>
+                                  <span title="Shares" className="text-green-400">{u.totalShares} Shares</span>
+                                </div>
+
+                                <div className="p-1 text-slate-400 hover:text-white transition-transform">
+                                  {isExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* User Projects Grid */}
+                            {isExpanded && (
+                              <div className="p-3.5 border-t border-slate-800/80 bg-slate-900/30">
+                                {u.projects.length === 0 ? (
+                                  <p className="text-xs text-slate-500 italic py-2 text-center">
+                                    No projects created by {u.username} yet
+                                  </p>
+                                ) : (
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                                    {u.projects.map((proj) => (
+                                      <div 
+                                        key={proj.id}
+                                        className="bg-slate-800/50 hover:bg-slate-800/80 border border-slate-700/60 hover:border-amber-500/40 rounded-xl p-3 flex flex-col justify-between transition-all group"
+                                      >
+                                        <div>
+                                          {/* Project Image & Name */}
+                                          <div className="flex gap-3 mb-2.5">
+                                            <div className="w-14 h-14 rounded-lg bg-slate-900 border border-slate-700 overflow-hidden shrink-0 relative">
+                                              <img
+                                                src={proj.imageUrl}
+                                                alt={proj.name}
+                                                className="w-full h-full object-cover"
+                                                onError={(e) => {
+                                                  (e.target as HTMLElement).style.display = 'none';
+                                                }}
+                                              />
+                                              {proj.isLocked && (
+                                                <div className="absolute top-1 left-1 p-0.5 rounded bg-amber-500/90 text-slate-950" title="Locked">
+                                                  <Lock size={10} />
+                                                </div>
+                                              )}
+                                            </div>
+                                            <div className="min-w-0 flex-1">
+                                              <h5 className="text-xs font-bold text-white truncate group-hover:text-amber-300 transition-colors" title={proj.name}>
+                                                {proj.name}
+                                              </h5>
+                                              <p className="text-[10px] text-slate-400 mt-0.5">
+                                                {new Date(proj.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+                                              </p>
+                                              <div className="mt-1 flex items-center gap-1">
+                                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-bold text-[10px] border border-amber-500/30">
+                                                  <Sparkles size={10} className="text-amber-400" />
+                                                  {proj.creationsCount} Creations
+                                                </span>
+                                              </div>
+                                            </div>
+                                          </div>
+
+                                          {/* Metrics Breakdown Chips */}
+                                          <div className="grid grid-cols-3 gap-1.5 text-center my-2">
+                                            <div className="bg-slate-900/60 rounded p-1 border border-slate-700/40">
+                                              <div className="text-[11px] font-bold text-teal-400 font-mono">{proj.copiesCount}</div>
+                                              <div className="text-[9px] text-slate-400">Copies</div>
+                                            </div>
+                                            <div className="bg-slate-900/60 rounded p-1 border border-slate-700/40">
+                                              <div className="text-[11px] font-bold text-blue-400 font-mono">{proj.downloadsCount}</div>
+                                              <div className="text-[9px] text-slate-400">Downloads</div>
+                                            </div>
+                                            <div className="bg-slate-900/60 rounded p-1 border border-slate-700/40">
+                                              <div className="text-[11px] font-bold text-green-400 font-mono">{proj.sharesCount}</div>
+                                              <div className="text-[9px] text-slate-400">Shares</div>
+                                            </div>
+                                          </div>
+                                        </div>
+
+                                        {/* View Date Breakdown Button */}
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setSelectedStatsProject({
+                                              id: proj.id,
+                                              name: proj.name,
+                                              imageUrl: proj.imageUrl,
+                                              layers: [],
+                                              isLocked: proj.isLocked,
+                                              createdAt: proj.createdAt,
+                                              copiesCount: proj.copiesCount,
+                                              downloadsCount: proj.downloadsCount,
+                                              sharesCount: proj.sharesCount,
+                                              creationsCount: proj.creationsCount
+                                            });
+                                          }}
+                                          className="w-full mt-2 py-1.5 px-2 bg-slate-700/50 hover:bg-amber-500/20 text-slate-300 hover:text-amber-300 border border-slate-700 hover:border-amber-500/30 rounded-lg text-[11px] font-medium flex items-center justify-center gap-1.5 transition-all"
+                                        >
+                                          <Sparkles size={11} className="text-amber-400" />
+                                          <span>View Date Breakdown</span>
+                                        </button>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              )}
 
               {/* Edit User Modal Overlay */}
               <AnimatePresence>
@@ -3509,7 +4067,7 @@ export default function App() {
         {/* Image Creation Analytics Modal */}
         {selectedStatsProject && (
           <div 
-            className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+            className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
             onClick={() => setSelectedStatsProject(null)}
           >
             <motion.div 
@@ -3540,16 +4098,81 @@ export default function App() {
 
               {/* Modal Content */}
               <div className="p-5 space-y-4">
-                {/* Total creations showcase banner */}
-                <div className="bg-gradient-to-br from-amber-500/15 via-amber-500/5 to-transparent border border-amber-500/30 rounded-xl p-4 text-center">
-                  <div className="text-[11px] font-semibold text-amber-400 uppercase tracking-wider mb-1">
-                    Total Creations Recorded
+                {/* Date Range Dropdown Selector */}
+                <div className="bg-slate-800/60 border border-slate-700/60 rounded-xl p-2.5 flex flex-col gap-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 text-xs font-medium text-slate-300">
+                      <Calendar size={14} className="text-amber-400 shrink-0" />
+                      <span>Date Range</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {isMetricsLoading && (
+                        <Loader2 size={13} className="animate-spin text-amber-400" />
+                      )}
+                      <select
+                        value={metricsDateRange}
+                        onChange={(e) => setMetricsDateRange(e.target.value as any)}
+                        className="bg-slate-900 border border-slate-700 text-slate-100 text-xs rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500/20 cursor-pointer font-medium"
+                      >
+                        <option value="alltime">All Time</option>
+                        <option value="today">Today</option>
+                        <option value="yesterday">Yesterday</option>
+                        <option value="week">Week (Last 7 Days)</option>
+                        <option value="month">Month (Last 30 Days)</option>
+                        <option value="custom">Custom Range...</option>
+                      </select>
+                    </div>
                   </div>
-                  <div className="text-4xl font-extrabold text-amber-300 font-mono tracking-tight">
-                    {selectedStatsProject.creationsCount || 0}
+
+                  {/* Custom Date Pickers when custom is selected */}
+                  {metricsDateRange === "custom" && (
+                    <div className="grid grid-cols-2 gap-2 pt-1 border-t border-slate-700/50">
+                      <div>
+                        <label className="text-[10px] text-slate-400 block mb-1 font-medium">From Date</label>
+                        <input
+                          type="date"
+                          value={metricsCustomStartDate}
+                          onChange={(e) => setMetricsCustomStartDate(e.target.value)}
+                          className="w-full bg-slate-900 border border-slate-700 text-slate-200 rounded-lg px-2 py-1 text-xs focus:outline-none focus:border-amber-500 font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[10px] text-slate-400 block mb-1 font-medium">To Date</label>
+                        <input
+                          type="date"
+                          value={metricsCustomEndDate}
+                          onChange={(e) => setMetricsCustomEndDate(e.target.value)}
+                          className="w-full bg-slate-900 border border-slate-700 text-slate-200 rounded-lg px-2 py-1 text-xs focus:outline-none focus:border-amber-500 font-mono"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Total creations showcase banner */}
+                <div className="bg-gradient-to-br from-amber-500/15 via-amber-500/5 to-transparent border border-amber-500/30 rounded-xl p-4 text-center relative overflow-hidden">
+                  <div className="text-[11px] font-semibold text-amber-400 uppercase tracking-wider mb-1">
+                    {metricsDateRange === 'alltime' && "Total Creations Recorded"}
+                    {metricsDateRange === 'today' && "Creations Recorded Today"}
+                    {metricsDateRange === 'yesterday' && "Creations Recorded Yesterday"}
+                    {metricsDateRange === 'week' && "Creations In The Last 7 Days"}
+                    {metricsDateRange === 'month' && "Creations In The Last 30 Days"}
+                    {metricsDateRange === 'custom' && "Creations In Custom Date Range"}
+                  </div>
+                  <div className="text-4xl font-extrabold text-amber-300 font-mono tracking-tight flex items-center justify-center gap-2">
+                    {isMetricsLoading ? (
+                      <Loader2 size={28} className="animate-spin text-amber-400 my-1" />
+                    ) : (
+                      metricsData !== null ? metricsData.creationsCount : (selectedStatsProject.creationsCount || 0)
+                    )}
                   </div>
                   <p className="text-[11px] text-slate-400 mt-1.5">
-                    Accumulated copies (button or right-click), shares, and downloads
+                    {metricsDateRange === 'alltime' && "Accumulated copies (button or right-click), shares, and downloads"}
+                    {metricsDateRange === 'today' && "Recorded since 00:00 today"}
+                    {metricsDateRange === 'yesterday' && "Recorded during yesterday"}
+                    {metricsDateRange === 'week' && "Recorded across the past 7 days"}
+                    {metricsDateRange === 'month' && "Recorded across the past 30 days"}
+                    {metricsDateRange === 'custom' && `Recorded between ${metricsCustomStartDate || 'start'} and ${metricsCustomEndDate || 'today'}`}
                   </p>
                 </div>
 
@@ -3561,7 +4184,7 @@ export default function App() {
                       <Copy size={14} />
                     </div>
                     <div className="text-xl font-bold text-white font-mono">
-                      {selectedStatsProject.copiesCount || 0}
+                      {metricsData !== null ? metricsData.copiesCount : (selectedStatsProject.copiesCount || 0)}
                     </div>
                     <div className="text-[11px] font-medium text-slate-300 mt-0.5">Copies</div>
                     <div className="text-[9px] text-slate-500">Button & R-click</div>
@@ -3573,7 +4196,7 @@ export default function App() {
                       <Download size={14} />
                     </div>
                     <div className="text-xl font-bold text-white font-mono">
-                      {selectedStatsProject.downloadsCount || 0}
+                      {metricsData !== null ? metricsData.downloadsCount : (selectedStatsProject.downloadsCount || 0)}
                     </div>
                     <div className="text-[11px] font-medium text-slate-300 mt-0.5">Downloads</div>
                     <div className="text-[9px] text-slate-500">PNG exports</div>
@@ -3585,7 +4208,7 @@ export default function App() {
                       <Share2 size={14} />
                     </div>
                     <div className="text-xl font-bold text-white font-mono">
-                      {selectedStatsProject.sharesCount || 0}
+                      {metricsData !== null ? metricsData.sharesCount : (selectedStatsProject.sharesCount || 0)}
                     </div>
                     <div className="text-[11px] font-medium text-slate-300 mt-0.5">Shares</div>
                     <div className="text-[9px] text-slate-500">Direct / WhatsApp</div>
@@ -3763,17 +4386,47 @@ export default function App() {
                         key={proj.id}
                         onClick={() => loadProject(proj)}
                         className={cn(
-                          "relative aspect-square rounded-lg overflow-hidden cursor-pointer border-2 transition-all group",
-                          currentProjectId === proj.id ? "border-blue-500" : "border-transparent hover:border-slate-700"
+                          "relative aspect-square rounded-lg cursor-pointer border-2 transition-all group",
+                          currentProjectId === proj.id ? "border-blue-500 shadow-md" : "border-transparent hover:border-slate-700",
+                          openKebabProjectId === proj.id ? "z-30" : "z-0"
                         )}
                       >
-                        <img 
-                          src={proj.imageUrl} 
-                          alt={proj.name} 
-                          loading="lazy" 
-                          className="w-full h-full object-cover" 
-                          referrerPolicy="no-referrer" 
-                        />
+                        {/* Image Preview & Name Overlay (Clipped) */}
+                        <div className="w-full h-full rounded-md overflow-hidden relative">
+                          <img 
+                            src={proj.imageUrl} 
+                            alt={proj.name} 
+                            loading="lazy" 
+                            className="w-full h-full object-cover" 
+                            referrerPolicy="no-referrer" 
+                          />
+
+                          {/* Lock status indicator */}
+                          {proj.isLocked && (
+                            <div 
+                              className="absolute top-1 right-7 p-1 rounded bg-red-600/85 text-white backdrop-blur-sm border border-red-500/40 shadow-sm z-10"
+                              title="Project is locked"
+                            >
+                              <Lock size={10} />
+                            </div>
+                          )}
+
+                          {/* Name Overlay */}
+                          <div 
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setProjectToRename({ id: proj.id, name: proj.name });
+                              setRenameInputVal(proj.name);
+                            }}
+                            className="absolute bottom-0 left-0 right-0 p-1 bg-black/75 backdrop-blur-md flex items-center justify-center gap-1 cursor-pointer hover:bg-black/90 transition-colors group/name"
+                            title={`Click to rename: ${proj.name}`}
+                          >
+                            <span className="text-[10px] text-white font-medium truncate text-center select-none max-w-[85%]">
+                              {proj.name}
+                            </span>
+                            <Edit2 size={9} className="text-slate-400 group-hover/name:text-blue-400 opacity-0 group-hover/name:opacity-100 transition-opacity shrink-0" />
+                          </div>
+                        </div>
 
                         {/* Creation Count Badge (Top-Left) */}
                         <div
@@ -3788,93 +4441,146 @@ export default function App() {
                           <span>{proj.creationsCount || 0}</span>
                         </div>
                         
-                        {/* Actions Overlay */}
-                        <div className="absolute top-1 right-1 flex flex-row gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        {/* Kebab Menu (Top-Right) */}
+                        <div className="absolute top-1 right-1 z-20">
                           <button
+                            type="button"
                             onClick={(e) => {
                               e.stopPropagation();
-                              toggleProjectLock(proj.id);
+                              setOpenKebabProjectId(openKebabProjectId === proj.id ? null : proj.id);
                             }}
                             className={cn(
-                              "p-1.5 rounded backdrop-blur-sm shadow-lg border transition-all",
-                              proj.isLocked 
-                                ? "bg-red-600/80 border-red-500 text-white" 
-                                : "bg-slate-800/80 border-slate-700 text-slate-300 hover:bg-slate-700 hover:text-white"
+                              "p-1 rounded bg-black/75 hover:bg-black text-slate-200 hover:text-white border border-slate-700/60 shadow-md backdrop-blur-sm transition-all flex items-center justify-center",
+                              openKebabProjectId === proj.id 
+                                ? "opacity-100 ring-1 ring-blue-500 bg-slate-900 text-white" 
+                                : "opacity-80 group-hover:opacity-100"
                             )}
-                            title={proj.isLocked ? "Unlock Project" : "Lock Project"}
+                            title="Project Actions"
                           >
-                            {proj.isLocked ? <Lock size={14} /> : <Unlock size={14} />}
-                          </button>
-                          
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              exportLayers(proj.id, proj.layers);
-                            }}
-                            className="p-1.5 bg-slate-800/80 hover:bg-slate-700 border border-slate-700 rounded text-slate-300 hover:text-blue-400 backdrop-blur-sm shadow-lg transition-all"
-                            title="Export Layers"
-                          >
-                            <FileDown size={14} />
+                            <MoreVertical size={13} />
                           </button>
 
-                          <label 
-                            onClick={(e) => e.stopPropagation()}
-                            className={cn(
-                              "p-1.5 rounded border backdrop-blur-sm shadow-lg transition-all flex items-center justify-center cursor-pointer",
-                              proj.isLocked 
-                                ? "bg-slate-900/50 border-slate-800 text-slate-600 cursor-not-allowed" 
-                                : "bg-slate-800/80 border-slate-700 text-slate-300 hover:bg-slate-700 hover:text-green-400"
-                            )}
-                            title="Import Layers"
-                          >
-                            <input 
-                              type="file" 
-                              className="hidden" 
-                              accept=".json" 
-                              onChange={(e) => importLayers(e, proj.id)} 
-                              disabled={proj.isLocked}
-                            />
-                            <FileUp size={14} />
-                          </label>
+                          {/* Kebab Dropdown Menu */}
+                          {openKebabProjectId === proj.id && (
+                            <>
+                              <div 
+                                className="fixed inset-0 z-40 cursor-default" 
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setOpenKebabProjectId(null);
+                                }} 
+                              />
+                              <div 
+                                onClick={(e) => e.stopPropagation()}
+                                className="absolute top-7 right-0 z-50 w-44 bg-slate-900/95 backdrop-blur-md border border-slate-700/90 rounded-xl shadow-2xl p-1 animate-in fade-in zoom-in-95 duration-100 flex flex-col gap-0.5 text-xs text-slate-200"
+                              >
+                                {/* Lock / Unlock */}
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setOpenKebabProjectId(null);
+                                    toggleProjectLock(proj.id);
+                                  }}
+                                  className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-slate-800 text-left transition-colors"
+                                >
+                                  {proj.isLocked ? (
+                                    <>
+                                      <Unlock size={13} className="text-amber-400 shrink-0" />
+                                      <span>Unlock Project</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Lock size={13} className="text-slate-400 shrink-0" />
+                                      <span>Lock Project</span>
+                                    </>
+                                  )}
+                                </button>
 
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setProjectToRename({ id: proj.id, name: proj.name });
-                              setRenameInputVal(proj.name);
-                            }}
-                            className="p-1.5 bg-slate-800/80 hover:bg-blue-600 border border-slate-700 rounded text-slate-300 hover:text-white backdrop-blur-sm shadow-lg transition-all"
-                            title="Rename Project"
-                          >
-                            <Edit2 size={14} />
-                          </button>
+                                {/* Rename */}
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setOpenKebabProjectId(null);
+                                    setProjectToRename({ id: proj.id, name: proj.name });
+                                    setRenameInputVal(proj.name);
+                                  }}
+                                  className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-slate-800 text-left transition-colors"
+                                >
+                                  <Edit2 size={13} className="text-blue-400 shrink-0" />
+                                  <span>Rename</span>
+                                </button>
 
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              deleteProject(proj.id);
-                            }}
-                            className="p-1.5 bg-red-600/80 hover:bg-red-600 rounded text-white backdrop-blur-sm shadow-lg transition-all"
-                            title="Delete Project"
-                          >
-                            <Trash2 size={14} />
-                          </button>
-                        </div>
+                                {/* Export Layers */}
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setOpenKebabProjectId(null);
+                                    exportLayers(proj.id, proj.layers);
+                                  }}
+                                  className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-slate-800 text-left transition-colors"
+                                >
+                                  <FileDown size={13} className="text-cyan-400 shrink-0" />
+                                  <span>Export Layers</span>
+                                </button>
 
-                        {/* Name Overlay */}
-                        <div 
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setProjectToRename({ id: proj.id, name: proj.name });
-                            setRenameInputVal(proj.name);
-                          }}
-                          className="absolute bottom-0 left-0 right-0 p-1 bg-black/75 backdrop-blur-md flex items-center justify-center gap-1 cursor-pointer hover:bg-black/90 transition-colors group/name"
-                          title={`Click to rename: ${proj.name}`}
-                        >
-                          <span className="text-[10px] text-white font-medium truncate text-center select-none max-w-[85%]">
-                            {proj.name}
-                          </span>
-                          <Edit2 size={9} className="text-slate-400 group-hover/name:text-blue-400 opacity-0 group-hover/name:opacity-100 transition-opacity shrink-0" />
+                                {/* Import Layers */}
+                                <label
+                                  className={cn(
+                                    "flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left transition-colors cursor-pointer",
+                                    proj.isLocked 
+                                      ? "opacity-50 cursor-not-allowed text-slate-500" 
+                                      : "hover:bg-slate-800 text-slate-200"
+                                  )}
+                                >
+                                  <input 
+                                    type="file" 
+                                    className="hidden" 
+                                    accept=".json" 
+                                    onChange={(e) => {
+                                      setOpenKebabProjectId(null);
+                                      importLayers(e, proj.id);
+                                    }} 
+                                    disabled={proj.isLocked}
+                                  />
+                                  <FileUp size={13} className="text-green-400 shrink-0" />
+                                  <span>Import Layers</span>
+                                </label>
+
+                                {/* Creation Stats */}
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setOpenKebabProjectId(null);
+                                    setSelectedStatsProject(proj);
+                                  }}
+                                  className="flex items-center justify-between px-2.5 py-1.5 rounded-lg hover:bg-amber-500/10 text-amber-300 text-left transition-colors"
+                                >
+                                  <div className="flex items-center gap-2">
+                                    <Sparkles size={13} className="text-amber-400 shrink-0" />
+                                    <span>Creation Stats</span>
+                                  </div>
+                                  <span className="text-[10px] font-bold font-mono px-1 rounded bg-amber-500/20">
+                                    {proj.creationsCount || 0}
+                                  </span>
+                                </button>
+
+                                <div className="my-0.5 border-t border-slate-800" />
+
+                                {/* Delete */}
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setOpenKebabProjectId(null);
+                                    deleteProject(proj.id);
+                                  }}
+                                  className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-red-500/20 text-red-400 hover:text-red-300 text-left transition-colors"
+                                >
+                                  <Trash2 size={13} className="shrink-0" />
+                                  <span>Delete Project</span>
+                                </button>
+                              </div>
+                            </>
+                          )}
                         </div>
                       </div>
                     ))
