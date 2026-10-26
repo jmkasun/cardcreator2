@@ -3,6 +3,7 @@ import app from "../../api/index";
 
 export const handler = serverless(app, {
   binary: [
+    'font/ttf',
     'font/otf',
     'font/woff',
     'font/woff2',

@@ -41,9 +41,33 @@ const pool = new Pool({
     rejectUnauthorized: false
   },
   max: 6,
-  idleTimeoutMillis: 30000,
+  idleTimeoutMillis: 10000,
   connectionTimeoutMillis: 20000,
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 10000,
 });
+
+function isTransientDbDisconnect(err: any): boolean {
+  const code = String(err?.code || '').toUpperCase();
+  const msg = String(err?.message || '').toLowerCase();
+  return (
+    code === '57P01' ||
+    code === '57P02' ||
+    code === '57P03' ||
+    code === '08006' ||
+    code === '08003' ||
+    code === 'ECONNRESET' ||
+    code === 'EPIPE' ||
+    code === 'ETIMEDOUT' ||
+    msg.includes('terminating connection') ||
+    msg.includes('administrator command') ||
+    msg.includes('connection terminated') ||
+    msg.includes('client has encountered a connection error') ||
+    msg.includes('socket hang up') ||
+    msg.includes('connection reset') ||
+    msg.includes('econnreset')
+  );
+}
 
 // In-memory LRU-like cache for binary project images to eliminate repeated DB reads
 const projectImageCache = new Map<string, { buffer: Buffer; contentType: string }>();
@@ -57,9 +81,70 @@ function setCachedProjectImage(id: string, buffer: Buffer, contentType: string) 
   projectImageCache.set(id, { buffer, contentType });
 }
 
-pool.on('error', (err) => {
-  console.error('Unexpected error on idle database client', err);
+pool.on('error', (err: any) => {
+  // Managed Postgres providers routinely close idle connections (57P01).
+  // pg.Pool automatically evicts the closed idle client and reconnects on the next query.
+  if (isTransientDbDisconnect(err)) {
+    return;
+  }
+  console.warn('[DB Pool] Idle client warning:', err?.message || String(err));
 });
+
+// Helper for resilient DB queries with automatic retry on transient connection/slot errors
+async function safeQuery(text: string, params: any[] = [], retriesValue = 3): Promise<pg.QueryResult<any>> {
+  for (let i = 0; i <= retriesValue; i++) {
+    try {
+      return await pool.query(text, params);
+    } catch (err: any) {
+      const errMsg = err.message?.toLowerCase() || '';
+      const isConnError =
+        isTransientDbDisconnect(err) ||
+        errMsg.includes('connection slots') ||
+        errMsg.includes('too many clients') ||
+        errMsg.includes('max_connections') ||
+        errMsg.includes('client is offline') ||
+        errMsg.includes('timeout') ||
+        errMsg.includes('terminated') ||
+        errMsg.includes('econnreset');
+
+      if (isConnError && i < retriesValue) {
+        const delay = 400 * (i + 1) + Math.random() * 400;
+        console.warn(`[DB] Transient error (${errMsg.substring(0, 60)}), retrying in ${Math.round(delay)}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error("Maximum retries reached for safeQuery");
+}
+
+// In-memory cache for custom font binaries and font list in warm serverless instances
+const fontCache = new Map<string, { buffer: Buffer; contentType: string }>();
+let cachedDbFontNames: string[] | null = null;
+let lastFontNamesFetch = 0;
+const FONT_NAMES_CACHE_TTL = 60000;
+
+function getFontContentType(filename: string, buffer?: Buffer): string {
+  const ext = path.extname(filename).toLowerCase();
+  if (ext === ".woff2") return "font/woff2";
+  if (ext === ".woff") return "font/woff";
+  if (ext === ".otf") return "font/otf";
+  if (ext === ".ttf") return "font/ttf";
+  if (buffer && buffer.length >= 4) {
+    const magic = buffer.subarray(0, 4).toString("ascii");
+    if (magic === "wOF2") return "font/woff2";
+    if (magic === "wOFF") return "font/woff";
+    if (magic === "OTTO") return "font/otf";
+  }
+  return "font/ttf";
+}
+
+function setNoCacheHeaders(res: express.Response) {
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+  res.setHeader("CDN-Cache-Control", "no-store");
+  res.setHeader("Vercel-CDN-Cache-Control", "no-store");
+}
 
 let isDbInitialized = false;
 let dbInitError: string | null = null;
@@ -80,12 +165,10 @@ async function initDb() {
   if (isDbInitialized) return;
   
   if (HAS_POSTGRES) {
-    let client;
     try {
       console.log("Initializing Postgres database...");
-      client = await pool.connect();
       
-      await client.query(`
+      await safeQuery(`
         CREATE TABLE IF NOT EXISTS users (
           username TEXT PRIMARY KEY,
           password TEXT NOT NULL,
@@ -97,20 +180,20 @@ async function initDb() {
         );
       `);
       
-      await client.query(`
+      await safeQuery(`
         ALTER TABLE users ADD COLUMN IF NOT EXISTS selected_fonts TEXT[] DEFAULT '{}';
       `);
-      await client.query(`
+      await safeQuery(`
         ALTER TABLE users ADD COLUMN IF NOT EXISTS default_font TEXT;
       `);
-      await client.query(`
+      await safeQuery(`
         ALTER TABLE users ADD COLUMN IF NOT EXISTS default_font_size INTEGER;
       `);
-      await client.query(`
+      await safeQuery(`
         ALTER TABLE users ADD COLUMN IF NOT EXISTS default_font_color TEXT;
       `);
 
-      await client.query(`
+      await safeQuery(`
         CREATE TABLE IF NOT EXISTS font_app_images (
           id TEXT PRIMARY KEY,
           username TEXT NOT NULL,
@@ -122,25 +205,25 @@ async function initDb() {
         );
       `);
 
-      await client.query(`
+      await safeQuery(`
         ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS is_locked BOOLEAN DEFAULT FALSE;
       `);
       
-      await client.query(`
+      await safeQuery(`
         ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
       `);
       
-      await client.query(`
+      await safeQuery(`
         ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS copies_count INTEGER DEFAULT 0;
       `);
-      await client.query(`
+      await safeQuery(`
         ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS downloads_count INTEGER DEFAULT 0;
       `);
-      await client.query(`
+      await safeQuery(`
         ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS shares_count INTEGER DEFAULT 0;
       `);
       
-      await client.query(`
+      await safeQuery(`
         CREATE TABLE IF NOT EXISTS custom_fonts (
           name TEXT PRIMARY KEY,
           data BYTEA NOT NULL,
@@ -149,14 +232,14 @@ async function initDb() {
       `);
 
       // Performance Indexes: ensures instant lookups for project list and user authentication
-      await client.query(`
+      await safeQuery(`
         CREATE INDEX IF NOT EXISTS idx_font_app_images_user_created ON font_app_images (username, created_at DESC);
       `);
-      await client.query(`
+      await safeQuery(`
         CREATE INDEX IF NOT EXISTS idx_users_lower_username ON users (LOWER(username));
       `);
 
-      await client.query(`
+      await safeQuery(`
         CREATE TABLE IF NOT EXISTS font_app_image_creations (
           id SERIAL PRIMARY KEY,
           image_id TEXT NOT NULL,
@@ -165,19 +248,19 @@ async function initDb() {
           created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
       `);
-      await client.query(`
+      await safeQuery(`
         ALTER TABLE font_app_image_creations ADD COLUMN IF NOT EXISTS username TEXT;
       `);
-      await client.query(`
+      await safeQuery(`
         CREATE INDEX IF NOT EXISTS idx_creations_image_time ON font_app_image_creations (image_id, created_at DESC);
       `);
-      await client.query(`
+      await safeQuery(`
         CREATE INDEX IF NOT EXISTS idx_creations_user_time ON font_app_image_creations (username, created_at DESC);
       `);
 
-      const adminCheck = await client.query("SELECT role FROM users WHERE username = 'admin'");
+      const adminCheck = await safeQuery("SELECT role FROM users WHERE username = 'admin'");
       if (adminCheck.rowCount === 0) {
-        await client.query("INSERT INTO users (username, password, role) VALUES ('admin', 'admin@1234', 'admin')");
+        await safeQuery("INSERT INTO users (username, password, role) VALUES ('admin', 'admin@1234', 'admin')");
       }
       isDbInitialized = true;
       dbInitError = null;
@@ -185,8 +268,6 @@ async function initDb() {
     } catch (err) {
       dbInitError = err instanceof Error ? err.message : String(err);
       console.error("Postgres initialization error:", err);
-    } finally {
-      if (client) client.release();
     }
   }
 }
@@ -220,7 +301,7 @@ app.get("/api/health", async (req, res) => {
   let dbError = null;
   if (process.env.DATABASE_URL) {
     try {
-      await pool.query("SELECT 1");
+      await safeQuery("SELECT 1");
       dbStatus = "connected";
     } catch (err) {
       dbStatus = "error";
@@ -241,45 +322,81 @@ app.get("/api/health", async (req, res) => {
   });
 });
 
-// Explicit font serving route for Vercel/Netlify
-app.get("/fonts/:name", async (req, res) => {
-  const { name } = req.params;
-  const ext = path.extname(name).toLowerCase();
-  
-  if (ext === ".otf") res.setHeader("Content-Type", "font/otf");
-  else if (ext === ".woff") res.setHeader("Content-Type", "font/woff");
-  else if (ext === ".woff2") res.setHeader("Content-Type", "font/woff2");
-  
-  res.setHeader("Cache-Control", "public, max-age=31536000");
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Content-Encoding", "identity");
-  
-  const projectPath = path.join(PROJECT_FONTS_DIR, name);
-  const writablePath = path.join(WRITABLE_FONTS_DIR, name);
-  const fallbackPath = path.join(process.cwd(), "api", "webfonts", name);
-  
-  if (fs.existsSync(projectPath)) {
-    return res.send(fs.readFileSync(projectPath));
-  }
-  if (fs.existsSync(writablePath)) {
-    return res.send(fs.readFileSync(writablePath));
-  }
-  if (fs.existsSync(fallbackPath)) {
-    return res.send(fs.readFileSync(fallbackPath));
-  }
+// Explicit font serving route for Vercel/Netlify (supports both /fonts/:name and /api/fonts/file/:name)
+app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
+  try {
+    const name = decodeURIComponent(req.params.name);
+    res.setHeader("Access-Control-Allow-Origin", "*");
 
-  if (HAS_POSTGRES) {
-    try {
-      const result = await pool.query("SELECT data FROM custom_fonts WHERE name = $1", [name]);
-      if (result.rowCount && result.rowCount > 0) {
-        return res.send(result.rows[0].data);
-      }
-    } catch (err) {
-      console.error(`Error fetching font ${name} from DB:`, err);
+    const sendFontSuccess = (buffer: Buffer, resolvedName = name) => {
+      const contentType = getFontContentType(resolvedName, buffer);
+      res.setHeader("Content-Type", contentType);
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      res.setHeader("Content-Encoding", "identity");
+      return res.status(200).send(buffer);
+    };
+
+    if (fontCache.has(name)) {
+      const cached = fontCache.get(name)!;
+      res.setHeader("Content-Type", cached.contentType);
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      res.setHeader("Content-Encoding", "identity");
+      return res.status(200).send(cached.buffer);
     }
+
+    const projectPath = path.join(PROJECT_FONTS_DIR, name);
+    const writablePath = path.join(WRITABLE_FONTS_DIR, name);
+    const fallbackPath = path.join(process.cwd(), "api", "webfonts", name);
+
+    for (const candidatePath of [projectPath, writablePath, fallbackPath]) {
+      if (fs.existsSync(candidatePath) && fs.statSync(candidatePath).isFile()) {
+        const buffer = fs.readFileSync(candidatePath);
+        fontCache.set(name, { buffer, contentType: getFontContentType(name, buffer) });
+        return sendFontSuccess(buffer, name);
+      }
+    }
+
+    if (HAS_POSTGRES) {
+      try {
+        const result = await safeQuery("SELECT data, name FROM custom_fonts WHERE name = $1", [name]);
+        if (result.rowCount && result.rowCount > 0) {
+          const fontData: Buffer = result.rows[0].data;
+          const dbName: string = result.rows[0].name || name;
+          fontCache.set(name, { buffer: fontData, contentType: getFontContentType(dbName, fontData) });
+          return sendFontSuccess(fontData, dbName);
+        }
+
+        // Fallback fuzzy match (handles missing extensions, case differences, spaces vs underscores)
+        const fuzzyResult = await safeQuery(
+          `SELECT data, name FROM custom_fonts 
+           WHERE LOWER(name) = LOWER($1)
+              OR LOWER(REGEXP_REPLACE(name, '\\.(woff2?|ttf|otf)$', '', 'i')) = LOWER(REGEXP_REPLACE($1, '\\.(woff2?|ttf|otf)$', '', 'i'))
+              OR REPLACE(LOWER(name), ' ', '_') = REPLACE(LOWER($1), ' ', '_')
+           LIMIT 1`,
+          [name]
+        );
+        if (fuzzyResult.rowCount && fuzzyResult.rowCount > 0) {
+          const fuzzyData: Buffer = fuzzyResult.rows[0].data;
+          const dbName: string = fuzzyResult.rows[0].name || name;
+          fontCache.set(name, { buffer: fuzzyData, contentType: getFontContentType(dbName, fuzzyData) });
+          return sendFontSuccess(fuzzyData, dbName);
+        }
+      } catch (err) {
+        console.error(`Error fetching font ${name} from DB:`, err);
+        // CRITICAL: Never return 404 or cacheable headers on transient DB errors!
+        setNoCacheHeaders(res);
+        return res.status(503).send("Temporary database error while loading font");
+      }
+    }
+
+    // CRITICAL: Never cache 404 responses on Vercel CDN or in browsers!
+    setNoCacheHeaders(res);
+    return res.status(404).send("Font not found");
+  } catch (err) {
+    console.error("Unexpected font route error:", err);
+    setNoCacheHeaders(res);
+    return res.status(500).send("Internal server error");
   }
-  
-  res.status(404).send("Font not found");
 });
 
 app.use("/fonts", express.static(PROJECT_FONTS_DIR));
@@ -292,7 +409,7 @@ app.post("/api/login", async (req, res) => {
     
     if (HAS_POSTGRES) {
       await initDb();
-      const result = await pool.query(
+      const result = await safeQuery(
         "SELECT username, role, selected_fonts as \"selectedFonts\", default_font as \"defaultFont\", default_font_size as \"defaultFontSize\", default_font_color as \"defaultFontColor\" FROM users WHERE username = $1 AND password = $2",
         [username, password]
       );
@@ -344,7 +461,7 @@ app.post("/api/v1/update", async (req, res) => {
     
     if (process.env.DATABASE_URL) {
       await initDb();
-      const adminResult = await pool.query("SELECT * FROM users WHERE username = $1", [op]);
+      const adminResult = await safeQuery("SELECT * FROM users WHERE username = $1", [op]);
       const admin = adminResult.rows[0];
       
       if (!admin || admin.role !== "admin") {
@@ -352,16 +469,16 @@ app.post("/api/v1/update", async (req, res) => {
       }
 
       if (a === 'l') { // list
-        const usersResult = await pool.query("SELECT username, role FROM users");
+        const usersResult = await safeQuery("SELECT username, role FROM users");
         return res.json({ success: true, users: usersResult.rows });
       }
 
       if (a === 'c') { // create
-        const checkResult = await pool.query("SELECT * FROM users WHERE username = $1", [id]);
+        const checkResult = await safeQuery("SELECT * FROM users WHERE username = $1", [id]);
         if (checkResult.rowCount && checkResult.rowCount > 0) {
           return res.status(400).json({ success: false, message: "User already exists" });
         }
-        await pool.query(
+        await safeQuery(
           "INSERT INTO users (username, password, role) VALUES ($1, $2, $3)",
           [id, c, t || "user"]
         );
@@ -387,7 +504,7 @@ app.post("/api/v1/update", async (req, res) => {
         }
 
         values.push(id);
-        await pool.query(
+        await safeQuery(
           `UPDATE users SET ${updateFields.join(", ")} WHERE username = $${paramIndex}`,
           values
         );
@@ -398,7 +515,7 @@ app.post("/api/v1/update", async (req, res) => {
         if (id === "admin") {
           return res.status(400).json({ success: false, message: "Cannot delete default admin" });
         }
-        await pool.query("DELETE FROM users WHERE username = $1", [id]);
+        await safeQuery("DELETE FROM users WHERE username = $1", [id]);
         return res.json({ success: true });
       }
     } else {
@@ -460,7 +577,7 @@ app.post("/api/change-password", async (req, res) => {
     
     if (process.env.DATABASE_URL) {
       await initDb();
-      const result = await pool.query(
+      const result = await safeQuery(
         "UPDATE users SET password = $1 WHERE username = $2 AND password = $3",
         [newPassword, username, oldPassword]
       );
@@ -518,7 +635,7 @@ app.post("/api/user/preferences", async (req, res) => {
       if (updates.length > 0) {
         query += updates.join(", ") + ` WHERE username = $${paramIndex}`;
         params.push(username);
-        await pool.query(query, params);
+        await safeQuery(query, params);
       }
     } else {
       const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
@@ -549,16 +666,26 @@ app.get("/api/fonts", async (req, res) => {
     
     let dbFiles: string[] = [];
     if (HAS_POSTGRES) {
-      try {
-        const result = await pool.query("SELECT name FROM custom_fonts");
-        dbFiles = result.rows.map(r => r.name);
-      } catch (err) {
-        console.error("Error fetching fonts from DB:", err);
+      const now = Date.now();
+      if (cachedDbFontNames && (now - lastFontNamesFetch) < FONT_NAMES_CACHE_TTL) {
+        dbFiles = cachedDbFontNames;
+      } else {
+        try {
+          const result = await safeQuery("SELECT name FROM custom_fonts");
+          dbFiles = result.rows.map(r => r.name);
+          cachedDbFontNames = dbFiles;
+          lastFontNamesFetch = now;
+        } catch (err) {
+          console.error("Error fetching fonts from DB:", err);
+          if (cachedDbFontNames) dbFiles = cachedDbFontNames;
+        }
       }
     }
 
     const allFiles = Array.from(new Set([...projectFiles, ...writableFiles, ...dbFiles]));
-    res.json(allFiles.map(f => ({ name: f, url: `/fonts/${f}` })));
+    setNoCacheHeaders(res);
+    // Use ?v=2 with URL-encoded font name to bypass previously poisoned 404 browser/CDN caches
+    res.json(allFiles.map(f => ({ name: f, url: `/fonts/${encodeURIComponent(f)}?v=2` })));
   } catch (err) {
     console.error("Fetch fonts error:", err);
     res.status(500).json({ success: false, message: "Internal server error" });
@@ -575,11 +702,13 @@ app.post("/api/upload-font", upload.single("font"), async (req, res) => {
 
     if (HAS_POSTGRES) {
       try {
-        await pool.query(
+        await safeQuery(
           "INSERT INTO custom_fonts (name, data) VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET data = $2",
           [fileName, file.buffer]
         );
-        return res.json({ success: true, url: `/fonts/${fileName}`, name: fileName });
+        cachedDbFontNames = null;
+        fontCache.delete(fileName);
+        return res.json({ success: true, url: `/fonts/${encodeURIComponent(fileName)}?v=2`, name: fileName });
       } catch (err) {
         console.error("DB Font upload error:", err);
       }
@@ -587,7 +716,8 @@ app.post("/api/upload-font", upload.single("font"), async (req, res) => {
 
     const filePath = path.join(WRITABLE_FONTS_DIR, fileName);
     fs.writeFileSync(filePath, file.buffer);
-    res.json({ success: true, url: `/fonts/${fileName}`, name: fileName });
+    fontCache.delete(fileName);
+    res.json({ success: true, url: `/fonts/${encodeURIComponent(fileName)}?v=2`, name: fileName });
   } catch (err) {
     console.error("Upload font error:", err);
     res.status(500).json({ success: false, message: "Internal server error" });
@@ -603,9 +733,11 @@ app.delete("/api/fonts/:name", async (req, res) => {
     if (HAS_POSTGRES) {
       try {
         await initDb();
-        const result = await pool.query("DELETE FROM custom_fonts WHERE name = $1 OR name LIKE $2", [name, `${name}.%`]);
+        const result = await safeQuery("DELETE FROM custom_fonts WHERE name = $1 OR name LIKE $2", [name, `${name}.%`]);
         if (result.rowCount && result.rowCount > 0) {
           deleted = true;
+          cachedDbFontNames = null;
+          fontCache.clear();
           console.log(`Deleted font ${name} from database.`);
         }
       } catch (err) {
@@ -615,10 +747,11 @@ app.delete("/api/fonts/:name", async (req, res) => {
 
     // 2. Try Writable Directory
     const writableFiles = fs.existsSync(WRITABLE_FONTS_DIR) ? fs.readdirSync(WRITABLE_FONTS_DIR) : [];
-    const fileToDeleteFromWritable = writableFiles.find(f => f.split('.').slice(0, -1).join('.') === name || f === name);
+    const fileToDeleteFromWritable = writableFiles.find(f => f.replace(/\.(woff2?|ttf|otf)$/i, '') === name || f === name);
     if (fileToDeleteFromWritable) {
       try {
         fs.unlinkSync(path.join(WRITABLE_FONTS_DIR, fileToDeleteFromWritable));
+        fontCache.delete(fileToDeleteFromWritable);
         deleted = true;
       } catch (e) {
         console.warn(`Could not delete writable font ${fileToDeleteFromWritable}:`, e);
@@ -627,10 +760,11 @@ app.delete("/api/fonts/:name", async (req, res) => {
 
     // 3. Try Project Directory (likely read-only on Vercel)
     const projectFiles = fs.existsSync(PROJECT_FONTS_DIR) ? fs.readdirSync(PROJECT_FONTS_DIR) : [];
-    const fileToDeleteFromProject = projectFiles.find(f => f.split('.').slice(0, -1).join('.') === name || f === name);
+    const fileToDeleteFromProject = projectFiles.find(f => f.replace(/\.(woff2?|ttf|otf)$/i, '') === name || f === name);
     if (fileToDeleteFromProject) {
       try {
         fs.unlinkSync(path.join(PROJECT_FONTS_DIR, fileToDeleteFromProject));
+        fontCache.delete(fileToDeleteFromProject);
         deleted = true;
       } catch (e) {
         console.warn(`Could not delete project font ${fileToDeleteFromProject} (read-only?):`, e);
@@ -653,13 +787,24 @@ app.post("/api/fonts/rename", async (req, res) => {
     const { oldName, newName } = req.body;
     let renamed = false;
 
-    // 1. Try Database rename
+    // 1. Try Database rename (preserve original extension if newName lacks one)
     if (HAS_POSTGRES) {
       try {
         await initDb();
-        const result = await pool.query("UPDATE custom_fonts SET name = $1 WHERE name = $2", [newName, oldName]);
-        if (result.rowCount && result.rowCount > 0) {
-          renamed = true;
+        const existing = await safeQuery(
+          "SELECT name FROM custom_fonts WHERE name = $1 OR REGEXP_REPLACE(name, '\\.(woff2?|ttf|otf)$', '', 'i') = $1 LIMIT 1",
+          [oldName]
+        );
+        if (existing.rowCount && existing.rowCount > 0) {
+          const currentDbName: string = existing.rows[0].name;
+          const ext = path.extname(currentDbName);
+          const finalDbName = (ext && !/\.(woff2?|ttf|otf)$/i.test(newName)) ? `${newName}${ext}` : newName;
+          const result = await safeQuery("UPDATE custom_fonts SET name = $1 WHERE name = $2", [finalDbName, currentDbName]);
+          if (result.rowCount && result.rowCount > 0) {
+            renamed = true;
+            cachedDbFontNames = null;
+            fontCache.clear();
+          }
         }
       } catch (err) {
         console.error(`Error renaming font ${oldName} in DB:`, err);
@@ -735,7 +880,7 @@ app.get("/api/images/:id/image", async (req, res) => {
 
     if (HAS_POSTGRES) {
       await initDb();
-      const result = await pool.query("SELECT image_url FROM font_app_images WHERE id = $1", [id]);
+      const result = await safeQuery("SELECT image_url FROM font_app_images WHERE id = $1", [id]);
       if (result.rowCount && result.rowCount > 0) {
         const rawUrl = result.rows[0].image_url;
         if (!rawUrl) return res.status(404).send("Image not found");
@@ -788,7 +933,7 @@ app.get("/api/images/:id", async (req, res) => {
     const { id } = req.params;
     if (HAS_POSTGRES) {
       await initDb();
-      const result = await pool.query(
+      const result = await safeQuery(
         `SELECT id, username, layers, name, is_locked as "isLocked", created_at as "createdAt",
                 COALESCE(copies_count, 0) as "copiesCount",
                 COALESCE(downloads_count, 0) as "downloadsCount",
@@ -840,7 +985,7 @@ app.get("/api/images", async (req, res) => {
       }
       query += " ORDER BY created_at DESC";
       
-      const result = await pool.query(query, params);
+      const result = await safeQuery(query, params);
       const mapped = result.rows.map(row => {
         const copies = Number(row.copiesCount || 0);
         const downloads = Number(row.downloadsCount || 0);
@@ -896,7 +1041,7 @@ app.post("/api/images", async (req, res) => {
       const isNewDataImage = typeof imageUrl === "string" && imageUrl.startsWith("data:");
       
       if (isNewDataImage) {
-        await pool.query(
+        await safeQuery(
           `INSERT INTO font_app_images (id, username, image_url, layers, name, is_locked)
            VALUES ($1, $2, $3, $4, $5, $6)
            ON CONFLICT (id) DO UPDATE SET
@@ -909,7 +1054,7 @@ app.post("/api/images", async (req, res) => {
         );
         projectImageCache.delete(id);
       } else {
-        const updateRes = await pool.query(
+        const updateRes = await safeQuery(
           `UPDATE font_app_images 
            SET layers = $1, name = $2, is_locked = $3 
            WHERE id = $4 AND username = $5`,
@@ -917,7 +1062,7 @@ app.post("/api/images", async (req, res) => {
         );
 
         if (updateRes.rowCount === 0) {
-          await pool.query(
+          await safeQuery(
             `INSERT INTO font_app_images (id, username, image_url, layers, name, is_locked)
              VALUES ($1, $2, $3, $4, $5, $6)
              ON CONFLICT (id) DO UPDATE SET
@@ -952,7 +1097,7 @@ app.delete("/api/images/:id", async (req, res) => {
     
     if (process.env.DATABASE_URL) {
       await initDb();
-      await pool.query("DELETE FROM font_app_images WHERE id = $1", [id]);
+      await safeQuery("DELETE FROM font_app_images WHERE id = $1", [id]);
     } else {
       const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
       data.images = data.images.filter((img: any) => img.id !== id);
@@ -980,13 +1125,13 @@ app.post(["/api/images/:id/creation", "/api/images/:id/track"], async (req, res)
 
     if (HAS_POSTGRES) {
       await initDb();
-      pool.query(
+      safeQuery(
         `INSERT INTO font_app_image_creations (image_id, type, username, created_at) 
          VALUES ($1, $2, COALESCE($3, (SELECT username FROM font_app_images WHERE id = $1)), CURRENT_TIMESTAMP)`,
         [id, type, username || null]
       ).catch(err => console.error("Error logging creation in api/index.ts:", err));
 
-      const result = await pool.query(
+      const result = await safeQuery(
         `UPDATE font_app_images 
          SET ${column} = COALESCE(${column}, 0) + 1 
          WHERE id = $1 
@@ -1095,7 +1240,7 @@ app.get("/api/images/:id/metrics", async (req, res) => {
 
     if (HAS_POSTGRES) {
       await initDb();
-      const imgRes = await pool.query(
+      const imgRes = await safeQuery(
         `SELECT id, name, 
                 COALESCE(copies_count, 0) as "copiesCount", 
                 COALESCE(downloads_count, 0) as "downloadsCount", 
@@ -1125,7 +1270,7 @@ app.get("/api/images/:id/metrics", async (req, res) => {
         });
       }
 
-      const logsRes = await pool.query(
+      const logsRes = await safeQuery(
         `SELECT 
            COUNT(*) FILTER (WHERE type = 'copy') as copies,
            COUNT(*) FILTER (WHERE type = 'download') as downloads,
@@ -1196,7 +1341,7 @@ app.get("/api/admin/creation-metrics", async (req, res) => {
       usersParams.push(username);
     }
     usersQuery += " ORDER BY username ASC";
-    const usersRes = await pool.query(usersQuery, usersParams);
+    const usersRes = await safeQuery(usersQuery, usersParams);
 
     // 2. Fetch Projects and their Metrics
     let projectsRows: any[] = [];
@@ -1221,7 +1366,7 @@ app.get("/api/admin/creation-metrics", async (req, res) => {
         qParams.push(username);
       }
       q += ` ORDER BY "creationsCount" DESC, created_at DESC`;
-      const pRes = await pool.query(q, qParams);
+      const pRes = await safeQuery(q, qParams);
       projectsRows = pRes.rows;
     } else {
       // Date-filtered metrics using creation event logs
@@ -1251,7 +1396,7 @@ app.get("/api/admin/creation-metrics", async (req, res) => {
         GROUP BY img.id, img.username, img.name, img.is_locked, img.created_at
         ORDER BY "creationsCount" DESC, img.created_at DESC
       `;
-      const pRes = await pool.query(q, qParams);
+      const pRes = await safeQuery(q, qParams);
       projectsRows = pRes.rows;
     }
 

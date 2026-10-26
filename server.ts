@@ -44,10 +44,34 @@ const pool = new Pool({
   ssl: {
     rejectUnauthorized: false
   },
-  max: 6, 
-  idleTimeoutMillis: 30000, 
-  connectionTimeoutMillis: 20000, 
+  max: 6,
+  idleTimeoutMillis: 10000,
+  connectionTimeoutMillis: 20000,
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 10000,
 });
+
+function isTransientDbDisconnect(err: any): boolean {
+  const code = String(err?.code || '').toUpperCase();
+  const msg = String(err?.message || '').toLowerCase();
+  return (
+    code === '57P01' ||
+    code === '57P02' ||
+    code === '57P03' ||
+    code === '08006' ||
+    code === '08003' ||
+    code === 'ECONNRESET' ||
+    code === 'EPIPE' ||
+    code === 'ETIMEDOUT' ||
+    msg.includes('terminating connection') ||
+    msg.includes('administrator command') ||
+    msg.includes('connection terminated') ||
+    msg.includes('client has encountered a connection error') ||
+    msg.includes('socket hang up') ||
+    msg.includes('connection reset') ||
+    msg.includes('econnreset')
+  );
+}
 
 // In-memory LRU-like cache for binary project images to eliminate repeated DB reads
 const projectImageCache = new Map<string, { buffer: Buffer; contentType: string }>();
@@ -68,12 +92,14 @@ async function safeQuery(text: string, params: any[] = [], retriesValue = 3): Pr
       return await pool.query(text, params);
     } catch (err: any) {
       const errMsg = err.message?.toLowerCase() || '';
-      const isConnError = errMsg.includes('connection slots') || 
-                         errMsg.includes('too many clients') ||
-                         errMsg.includes('max_connections') ||
-                         errMsg.includes('client is offline') ||
-                         errMsg.includes('timeout') ||
-                         errMsg.includes('terminated');
+      const isConnError =
+        isTransientDbDisconnect(err) ||
+        errMsg.includes('connection slots') ||
+        errMsg.includes('too many clients') ||
+        errMsg.includes('max_connections') ||
+        errMsg.includes('client is offline') ||
+        errMsg.includes('timeout') ||
+        errMsg.includes('terminated');
       
       if (isConnError && i < retriesValue) {
         const delay = 500 * (i + 1) + Math.random() * 500; // Increased delay with jitter
@@ -97,8 +123,13 @@ const shutdown = async () => {
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
 
-pool.on('error', (err) => {
-  console.error('Unexpected error on idle database client', err);
+pool.on('error', (err: any) => {
+  // Managed Postgres providers routinely close idle connections (57P01).
+  // pg.Pool automatically evicts the closed idle client and reconnects on the next query.
+  if (isTransientDbDisconnect(err)) {
+    return;
+  }
+  console.warn('[DB Pool] Idle client warning:', err?.message || String(err));
 });
 
 if (!process.env.DATABASE_URL) {
@@ -248,85 +279,108 @@ async function startServer() {
   });
 
 // Font cache to reduce DB load
-const fontCache = new Map<string, Buffer>();
+const fontCache = new Map<string, { buffer: Buffer; contentType: string }>();
+
+function getFontContentType(filename: string, buffer?: Buffer): string {
+  const ext = path.extname(filename).toLowerCase();
+  if (ext === ".woff2") return "font/woff2";
+  if (ext === ".woff") return "font/woff";
+  if (ext === ".otf") return "font/otf";
+  if (ext === ".ttf") return "font/ttf";
+  if (buffer && buffer.length >= 4) {
+    const magic = buffer.subarray(0, 4).toString("ascii");
+    if (magic === "wOF2") return "font/woff2";
+    if (magic === "wOFF") return "font/woff";
+    if (magic === "OTTO") return "font/otf";
+  }
+  return "font/ttf";
+}
+
+function setNoCacheHeaders(res: express.Response) {
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+  res.setHeader("CDN-Cache-Control", "no-store");
+  res.setHeader("Vercel-CDN-Cache-Control", "no-store");
+}
 
 // Explicit font serving route
-app.get("/fonts/:name", async (req, res) => {
+app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
   try {
     const name = decodeURIComponent(req.params.name);
-    
+    res.setHeader("Access-Control-Allow-Origin", "*");
+
+    const sendFontSuccess = (buffer: Buffer, resolvedName = name) => {
+      const contentType = getFontContentType(resolvedName, buffer);
+      res.setHeader("Content-Type", contentType);
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      res.setHeader("Content-Encoding", "identity");
+      return res.status(200).send(buffer);
+    };
+
     // Check cache first
     if (fontCache.has(name)) {
-      console.log(`[Font Service] Serving from memory cache: ${name}`);
-      const cachedBuffer = fontCache.get(name)!;
-      return res.send(cachedBuffer);
-    }
-
-    console.log(`[Font Service] Request for font: ${name}`);
-      const ext = path.extname(name).toLowerCase();
-      
-      // Set correct MIME type
-      if (ext === ".otf") res.setHeader("Content-Type", "font/otf");
-      else if (ext === ".woff") res.setHeader("Content-Type", "font/woff");
-      else if (ext === ".woff2") res.setHeader("Content-Type", "font/woff2");
-      else res.setHeader("Content-Type", "application/octet-stream");
-      
-      res.setHeader("Cache-Control", "public, max-age=31536000");
-      res.setHeader("Access-Control-Allow-Origin", "*");
+      const cached = fontCache.get(name)!;
+      res.setHeader("Content-Type", cached.contentType);
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
       res.setHeader("Content-Encoding", "identity");
-      
-      const projectPath = path.join(FONTS_DIR, name);
-      const writablePath = path.join(WRITABLE_FONTS_DIR, name);
-      
-      if (fs.existsSync(projectPath)) {
-        console.log(`[Font Service] Serving from project path: ${projectPath}`);
-        const buffer = fs.readFileSync(projectPath);
-        return res.send(buffer);
-      }
-      if (fs.existsSync(writablePath)) {
-        console.log(`[Font Service] Serving from writable path: ${writablePath}`);
-        const buffer = fs.readFileSync(writablePath);
-        return res.send(buffer);
-      }
-
-      // Try database if not found in files
-      if (HAS_POSTGRES) {
-        console.log(`[Font Service] Searching DB for font: ${name}`);
-        try {
-          const result = await safeQuery("SELECT data FROM custom_fonts WHERE name = $1", [name]);
-          if (result.rowCount && result.rowCount > 0) {
-            const fontData = result.rows[0].data;
-            console.log(`[Font Service] Serving from database: ${name} (${fontData.length} bytes)`);
-            fontCache.set(name, fontData);
-            return res.send(fontData);
-          } else {
-            console.warn(`[Font Service] Font not found in DB with exact name: ${name}`);
-            // Try broader search: case-insensitive and replacing underscores with spaces or vice versa
-            const fuzzyResult = await safeQuery(
-              "SELECT data, name FROM custom_fonts WHERE name ILIKE $1 OR REPLACE(name, ' ', '_') ILIKE $1 OR name ILIKE REPLACE($1, '_', ' ') OR name ILIKE REPLACE($1, '_', '%')", 
-              [name]
-            );
-            if (fuzzyResult.rowCount && fuzzyResult.rowCount > 0) {
-              const fuzzyFontData = fuzzyResult.rows[0].data;
-              console.log(`[Font Service] Serving from database (fuzzy match): ${fuzzyResult.rows[0].name}`);
-              fontCache.set(name, fuzzyFontData);
-              return res.send(fuzzyFontData);
-            }
-          }
-        } catch (err) {
-          console.error(`[Font Service] Error fetching font ${name} from DB:`, err);
-        }
-      }
-      
-      if (name !== "apex_apura_044.woff" && name !== "apex_apura_044") {
-        console.error(`[Font Service] Font not found: ${name}. Checked: ${projectPath}, ${writablePath}, DB`);
-      }
-      res.status(404).send("Font not found");
-    } catch (err) {
-      console.error(`[Font Service] Error serving font:`, err);
-      res.status(500).send("Internal server error");
+      return res.status(200).send(cached.buffer);
     }
-  });
+
+    const projectPath = path.join(FONTS_DIR, name);
+    const writablePath = path.join(WRITABLE_FONTS_DIR, name);
+
+    if (fs.existsSync(projectPath) && fs.statSync(projectPath).isFile()) {
+      const buffer = fs.readFileSync(projectPath);
+      fontCache.set(name, { buffer, contentType: getFontContentType(name, buffer) });
+      return sendFontSuccess(buffer, name);
+    }
+    if (fs.existsSync(writablePath) && fs.statSync(writablePath).isFile()) {
+      const buffer = fs.readFileSync(writablePath);
+      fontCache.set(name, { buffer, contentType: getFontContentType(name, buffer) });
+      return sendFontSuccess(buffer, name);
+    }
+
+    // Try database if not found in files
+    if (HAS_POSTGRES) {
+      try {
+        const result = await safeQuery("SELECT data, name FROM custom_fonts WHERE name = $1", [name]);
+        if (result.rowCount && result.rowCount > 0) {
+          const fontData: Buffer = result.rows[0].data;
+          const dbName: string = result.rows[0].name || name;
+          fontCache.set(name, { buffer: fontData, contentType: getFontContentType(dbName, fontData) });
+          return sendFontSuccess(fontData, dbName);
+        } else {
+          // Try broader search: case-insensitive, without extension, or replacing underscores/spaces
+          const fuzzyResult = await safeQuery(
+            `SELECT data, name FROM custom_fonts 
+             WHERE LOWER(name) = LOWER($1)
+                OR LOWER(REGEXP_REPLACE(name, '\\.(woff2?|ttf|otf)$', '', 'i')) = LOWER(REGEXP_REPLACE($1, '\\.(woff2?|ttf|otf)$', '', 'i'))
+                OR REPLACE(LOWER(name), ' ', '_') = REPLACE(LOWER($1), ' ', '_')
+             LIMIT 1`,
+            [name]
+          );
+          if (fuzzyResult.rowCount && fuzzyResult.rowCount > 0) {
+            const fuzzyFontData: Buffer = fuzzyResult.rows[0].data;
+            const dbName: string = fuzzyResult.rows[0].name || name;
+            fontCache.set(name, { buffer: fuzzyFontData, contentType: getFontContentType(dbName, fuzzyFontData) });
+            return sendFontSuccess(fuzzyFontData, dbName);
+          }
+        }
+      } catch (err) {
+        console.error(`[Font Service] Error fetching font ${name} from DB:`, err);
+        setNoCacheHeaders(res);
+        return res.status(503).send("Temporary database error while loading font");
+      }
+    }
+
+    console.warn(`[Font Service] Font not found: ${name}. Checked: ${projectPath}, ${writablePath}, DB`);
+    setNoCacheHeaders(res);
+    return res.status(404).send("Font not found");
+  } catch (err) {
+    console.error(`[Font Service] Error serving font:`, err);
+    setNoCacheHeaders(res);
+    return res.status(500).send("Internal server error");
+  }
+});
 
   app.use("/fonts", express.static(FONTS_DIR));
   app.use("/fonts", express.static(WRITABLE_FONTS_DIR));
@@ -589,12 +643,13 @@ app.get("/fonts/:name", async (req, res) => {
         }
       }
 
-      const projectFonts = projectFiles.map(f => ({ name: f, url: `/fonts/${f}` }));
-      const writableFonts = writableFiles.map(f => ({ name: f, url: `/fonts/${f}` }));
-      const dbFonts = dbFiles.map(f => ({ name: f, url: `/fonts/${f}` }));
+      const projectFonts = projectFiles.map(f => ({ name: f, url: `/fonts/${encodeURIComponent(f)}?v=2` }));
+      const writableFonts = writableFiles.map(f => ({ name: f, url: `/fonts/${encodeURIComponent(f)}?v=2` }));
+      const dbFonts = dbFiles.map(f => ({ name: f, url: `/fonts/${encodeURIComponent(f)}?v=2` }));
 
       const allFonts = [...projectFonts, ...writableFonts, ...dbFonts];
       const uniqueFonts = Array.from(new Map(allFonts.map(f => [f.name, f])).values());
+      setNoCacheHeaders(res);
       res.json(uniqueFonts);
     } catch (err) {
       console.error("Fetch fonts error details:", err instanceof Error ? err.message : String(err));
@@ -617,14 +672,16 @@ app.get("/fonts/:name", async (req, res) => {
             [fileName, file.buffer]
           );
           cachedDbFontNames = null;
-          return res.json({ success: true, url: `/fonts/${fileName}`, name: fileName });
+          fontCache.delete(fileName);
+          return res.json({ success: true, url: `/fonts/${encodeURIComponent(fileName)}?v=2`, name: fileName });
         } catch (err) {
           console.error("DB Font upload error:", err);
         }
       }
 
       fs.writeFileSync(path.join(WRITABLE_FONTS_DIR, fileName), file.buffer);
-      res.json({ success: true, url: `/fonts/${fileName}`, name: fileName });
+      fontCache.delete(fileName);
+      res.json({ success: true, url: `/fonts/${encodeURIComponent(fileName)}?v=2`, name: fileName });
     } catch (err) {
       console.error("Font upload error:", err);
       res.status(500).json({ success: false, message: "Internal server error" });
@@ -675,7 +732,7 @@ app.get("/fonts/:name", async (req, res) => {
 
       if (deleted) {
         cachedDbFontNames = null;
-        fontCache.delete(name);
+        fontCache.clear();
         res.json({ success: true });
       } else {
         res.status(404).json({ success: false, message: "Font not found" });
@@ -695,14 +752,24 @@ app.get("/fonts/:name", async (req, res) => {
       }
       let renamed = false;
 
-      // 1. Rename in database if exists
+      // 1. Rename in database if exists (preserve original extension if newName lacks one)
       if (process.env.DATABASE_URL) {
         try {
-          // Try both with and without extension if not provided
-          const result = await safeQuery("UPDATE custom_fonts SET name = $1 WHERE name = $2", [newName, oldName]);
-          if (result.rowCount && result.rowCount > 0) {
-            console.log(`Renamed font in DB from ${oldName} to ${newName}`);
-            renamed = true;
+          const existing = await safeQuery(
+            "SELECT name FROM custom_fonts WHERE name = $1 OR REGEXP_REPLACE(name, '\\.(woff2?|ttf|otf)$', '', 'i') = $1 LIMIT 1",
+            [oldName]
+          );
+          if (existing.rowCount && existing.rowCount > 0) {
+            const currentDbName: string = existing.rows[0].name;
+            const ext = path.extname(currentDbName);
+            const finalDbName = (ext && !/\.(woff2?|ttf|otf)$/i.test(newName)) ? `${newName}${ext}` : newName;
+            const result = await safeQuery("UPDATE custom_fonts SET name = $1 WHERE name = $2", [finalDbName, currentDbName]);
+            if (result.rowCount && result.rowCount > 0) {
+              console.log(`Renamed font in DB from ${currentDbName} to ${finalDbName}`);
+              renamed = true;
+              cachedDbFontNames = null;
+              fontCache.clear();
+            }
           }
         } catch (dbErr) {
           console.error("Error renaming font in DB:", dbErr);

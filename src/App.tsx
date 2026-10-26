@@ -332,10 +332,11 @@ export default function App() {
     };
   }, [isResizing]);
 
+  const [fontsLoadedTick, setFontsLoadedTick] = useState(0);
+
   const fetchFonts = async () => {
     try {
-      console.log("Fetching fonts from API...");
-      const res = await fetch("/api/fonts");
+      const res = await fetch("/api/fonts", { cache: "no-store" });
       if (!res.ok) {
         console.error(`Failed to fetch fonts: ${res.status} ${res.statusText}`);
         return;
@@ -348,44 +349,69 @@ export default function App() {
         return;
       }
       
-      console.log(`API returned ${data.length} fonts:`, data);
-      
-      // Map API data to Font objects with cleaned names for the UI
+      // Map API data to Font objects, safely stripping only known font extensions
       const apiFonts = data.map((font: any) => {
-        const fontFamily = font.name.split('.').slice(0, -1).join('.');
-        return { name: fontFamily, url: font.url };
+        const fontFamily = String(font.name || "").replace(/\.(woff2?|ttf|otf)$/i, "") || String(font.name || "");
+        return { name: fontFamily, rawName: font.name, url: font.url };
       });
       
       // Set fonts immediately so they show up in the list
       setFonts(apiFonts);
-      
-      // Load fonts in the background
-      const loadPromises = apiFonts.map(async (font: any) => {
+
+      const loadSingleFont = async (font: { name: string; rawName?: string; url: string }) => {
         const fontFamily = font.name;
-        
-        if (Array.from(document.fonts.values()).some(face => face.family === fontFamily)) {
-          return;
-        }
+        if (!fontFamily) return;
+
+        const alreadyLoaded = Array.from(document.fonts.values()).some(
+          face => face.family.replace(/^["']|["']$/g, "") === fontFamily && face.status === "loaded"
+        );
+        if (alreadyLoaded) return;
+
+        const baseUrl = font.url.startsWith("/") ? font.url : `/fonts/${encodeURIComponent(font.url)}`;
+        // Ensure ?v=2 is present to bypass any poisoned 404 browser/CDN caches
+        const primaryUrl = baseUrl.includes("?") ? baseUrl : `${baseUrl}?v=2`;
+
+        const fetchFontBuffer = async (targetUrl: string, forceReload = false): Promise<ArrayBuffer> => {
+          const response = await fetch(targetUrl, forceReload ? { cache: "reload" } : undefined);
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status} (${response.statusText})`);
+          }
+          const buffer = await response.arrayBuffer();
+          if (buffer.byteLength < 64) {
+            throw new Error(`Invalid font payload (${buffer.byteLength} bytes)`);
+          }
+          return buffer;
+        };
 
         try {
-          const fontUrl = font.url.startsWith('/') ? font.url : `/fonts/${font.url}`;
-          
-          const response = await fetch(fontUrl);
-          if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-          const buffer = await response.arrayBuffer();
-          
-          const fontFace = new FontFace(fontFamily, buffer);
+          let buffer: ArrayBuffer;
+          try {
+            buffer = await fetchFontBuffer(primaryUrl, false);
+          } catch {
+            // Retry once with fresh cache-busting query string on transient cold-start or stale cache errors
+            const retryUrl = `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}bust=${Date.now()}`;
+            buffer = await fetchFontBuffer(retryUrl, true);
+          }
+
+          // Quote family name if it contains dots, spaces, or non-ident characters (e.g. "apex_a.pura_044_")
+          const needsQuotes = /[^a-zA-Z0-9_-]|^[0-9]/.test(fontFamily);
+          const descriptorFamily = needsQuotes ? `"${fontFamily.replace(/"/g, '\\"')}"` : fontFamily;
+
+          const fontFace = new FontFace(descriptorFamily, buffer);
           const loadedFace = await fontFace.load();
           document.fonts.add(loadedFace);
         } catch (e) {
-          if (fontFamily !== "apex_apura_044") {
-            console.error(`Failed to load font: "${fontFamily}" from ${font.url}`, e);
-          }
+          console.error(`Failed to load font: "${fontFamily}" from ${font.url}`, e);
         }
-      });
-      
-      await Promise.all(loadPromises);
-      drawCanvas(); // Force a redraw after all fonts are loaded
+      };
+
+      // Load in controlled batches of 6 to prevent serverless DB pool exhaustion on cold start
+      const BATCH_SIZE = 6;
+      for (let i = 0; i < apiFonts.length; i += BATCH_SIZE) {
+        const batch = apiFonts.slice(i, i + BATCH_SIZE);
+        await Promise.all(batch.map(loadSingleFont));
+        setFontsLoadedTick(t => t + 1);
+      }
     } catch (err) {
       console.error("Failed to fetch fonts", err);
     }
@@ -1977,9 +2003,7 @@ export default function App() {
             try {
               await document.fonts.load(fontStr);
             } catch (e) {
-              if (!fontFamily.includes("apex_apura_044")) {
-                console.warn(`Failed to load font for canvas: ${fontStr}`, e);
-              }
+              console.warn(`Failed to load font for canvas: ${fontStr}`, e);
             }
           }
 
@@ -2218,7 +2242,7 @@ export default function App() {
 
   useEffect(() => {
     drawCanvas();
-  }, [image, layers, fonts, selectedLayerId, isPreviewMode]);
+  }, [image, layers, fonts, fontsLoadedTick, selectedLayerId, isPreviewMode]);
 
   // Auto-save effect
   useEffect(() => {
@@ -3221,7 +3245,7 @@ export default function App() {
                                   </p>
                                 </div>
                                 <div className="bg-slate-900/50 rounded-lg p-3 border border-slate-800/50">
-                                  <p className="text-xl sm:text-2xl text-white truncate" style={{ fontFamily: f.name }}>
+                                  <p className="text-xl sm:text-2xl text-white truncate" style={{ fontFamily: `"${f.name}", sans-serif` }}>
                                     The quick brown fox
                                   </p>
                                 </div>
@@ -5000,7 +5024,7 @@ export default function App() {
                                       onFocus={() => setSelectedLayerId(layer.id)}
                                       onClick={(e) => e.stopPropagation()}
                                       className="bg-slate-900 border border-slate-700/50 rounded-lg px-2 py-1.5 text-sm flex-1 min-w-0 outline-none text-inherit focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20"
-                                      style={{ fontFamily: layer.fontFamily }}
+                                      style={{ fontFamily: `"${layer.fontFamily}", sans-serif` }}
                                     />
                                     <select
                                       value={layer.selectedSuffix || ""}
@@ -5046,7 +5070,7 @@ export default function App() {
                                   onFocus={() => setSelectedLayerId(layer.id)}
                                   onClick={(e) => e.stopPropagation()}
                                   className="bg-slate-900 border border-slate-700/50 rounded-lg px-2 py-1.5 text-sm w-full outline-none text-inherit focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20"
-                                  style={{ fontFamily: layer.fontFamily }}
+                                  style={{ fontFamily: `"${layer.fontFamily}", sans-serif` }}
                                 />
                               )}
                             </div>
@@ -6553,7 +6577,7 @@ export default function App() {
                                     updateLayer(selectedLayer.id, { sinhalaMonths: newMonths });
                                   }}
                                   className="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-[11px] outline-none focus:border-teal-500"
-                                  style={{ fontFamily: selectedLayer.fontFamily }}
+                                  style={{ fontFamily: `"${selectedLayer.fontFamily}", sans-serif` }}
                                 />
                               </div>
                             ))}
@@ -6613,7 +6637,7 @@ export default function App() {
                               <div className="flex items-center justify-between mb-1">
                                 <span className="font-sans text-xs text-slate-400 block uppercase tracking-tighter">{f.name.split('-').slice(1).join('-') || f.name}</span>
                               </div>
-                              <span style={{ fontFamily: f.name }} className="text-lg">
+                              <span style={{ fontFamily: `"${f.name}", sans-serif` }} className="text-lg">
                                 The quick brown fox
                               </span>
                             </div>
