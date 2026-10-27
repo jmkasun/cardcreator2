@@ -15,15 +15,50 @@ const { Pool } = pg;
 const __filename = (typeof import.meta !== 'undefined' && import.meta.url) ? fileURLToPath(import.meta.url) : '';
 const __dirname = __filename ? path.dirname(__filename) : ((globalThis as any).__dirname || process.cwd());
 
-const FONTS_DIR = [
+const CANDIDATE_FONT_DIRS = Array.from(new Set([
+  path.join(process.cwd(), "Fonts"),
+  path.join(process.cwd(), "fonts"),
   path.join(process.cwd(), "api", "webfonts"),
   path.join(process.cwd(), "public", "fonts"),
-  path.join(process.cwd(), "font")
-].find(dir => fs.existsSync(dir) && fs.readdirSync(dir).length > 0) || path.join(process.cwd(), "public", "fonts");
+  path.join(process.cwd(), "font"),
+]));
+const FONTS_DIR = CANDIDATE_FONT_DIRS.find(dir => fs.existsSync(dir) && fs.readdirSync(dir).length > 0) || path.join(process.cwd(), "public", "fonts");
 const WRITABLE_FONTS_DIR = path.join(process.cwd(), "public", "fonts");
+const DATA_FILE = path.join(process.cwd(), "data.json");
 
-// Ensure directories exist
-[FONTS_DIR, WRITABLE_FONTS_DIR].forEach(dir => {
+function isFontFilename(filename: string): boolean {
+  return /\.(woff2?|ttf|otf)$/i.test(filename);
+}
+
+function stripFontExt(filename: string): string {
+  return filename.replace(/\.(woff2?|ttf|otf)$/i, "");
+}
+
+function normalizeFontKey(filename: string): string {
+  return stripFontExt(filename).replace(/[^a-z0-9]/gi, "").toLowerCase();
+}
+
+function fontExtPriority(filename: string): number {
+  const ext = path.extname(filename).toLowerCase();
+  if (ext === ".woff2") return 0;
+  if (ext === ".woff") return 1;
+  if (ext === ".ttf") return 2;
+  if (ext === ".otf") return 3;
+  return 4;
+}
+
+function getExistingFontDirs(): string[] {
+  return Array.from(new Set([...CANDIDATE_FONT_DIRS, WRITABLE_FONTS_DIR])).filter(dir => {
+    try {
+      return fs.existsSync(dir) && fs.statSync(dir).isDirectory();
+    } catch {
+      return false;
+    }
+  });
+}
+
+// Ensure writable directory exists
+[WRITABLE_FONTS_DIR].forEach(dir => {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
@@ -138,110 +173,166 @@ if (!process.env.DATABASE_URL) {
   console.log("DATABASE_URL is set. Length:", process.env.DATABASE_URL.length);
 }
 
-async function initDb() {
-  if (HAS_POSTGRES) {
-    console.log("Initializing Postgres database...");
+let isDbInitialized = false;
+let dbInitPromise: Promise<void> | null = null;
+
+function ensureFallbackDataFile() {
+  if (!fs.existsSync(DATA_FILE)) {
     try {
-      await safeQuery(`
-        CREATE TABLE IF NOT EXISTS users (
-          username TEXT PRIMARY KEY,
-          password TEXT NOT NULL,
-          role TEXT NOT NULL DEFAULT 'user',
-          selected_fonts TEXT[] DEFAULT '{}',
-          default_font TEXT,
-          default_font_size INTEGER,
-          default_font_color TEXT
-        );
-      `);
-      
-      await safeQuery(`
-        ALTER TABLE users ADD COLUMN IF NOT EXISTS selected_fonts TEXT[] DEFAULT '{}';
-      `);
-      await safeQuery(`
-        ALTER TABLE users ADD COLUMN IF NOT EXISTS default_font TEXT;
-      `);
-      await safeQuery(`
-        ALTER TABLE users ADD COLUMN IF NOT EXISTS default_font_size INTEGER;
-      `);
-      await safeQuery(`
-        ALTER TABLE users ADD COLUMN IF NOT EXISTS default_font_color TEXT;
-      `);
-
-      await safeQuery(`
-        CREATE TABLE IF NOT EXISTS font_app_images (
-          id TEXT PRIMARY KEY,
-          username TEXT NOT NULL,
-          image_url TEXT NOT NULL,
-          layers JSONB NOT NULL,
-          name TEXT NOT NULL,
-          is_locked BOOLEAN DEFAULT FALSE,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-      `);
-
-      await safeQuery(`
-        ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS is_locked BOOLEAN DEFAULT FALSE;
-      `);
-      
-      await safeQuery(`
-        ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
-      `);
-      
-      await safeQuery(`
-        ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS copies_count INTEGER DEFAULT 0;
-      `);
-      await safeQuery(`
-        ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS downloads_count INTEGER DEFAULT 0;
-      `);
-      await safeQuery(`
-        ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS shares_count INTEGER DEFAULT 0;
-      `);
-      
-      await safeQuery(`
-        CREATE TABLE IF NOT EXISTS custom_fonts (
-          name TEXT PRIMARY KEY,
-          data BYTEA NOT NULL,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-      `);
-
-      // Performance Indexes: ensures instant lookups for project list and user authentication
-      await safeQuery(`
-        CREATE INDEX IF NOT EXISTS idx_font_app_images_user_created ON font_app_images (username, created_at DESC);
-      `);
-      await safeQuery(`
-        CREATE INDEX IF NOT EXISTS idx_users_lower_username ON users (LOWER(username));
-      `);
-
-      await safeQuery(`
-        CREATE TABLE IF NOT EXISTS font_app_image_creations (
-          id SERIAL PRIMARY KEY,
-          image_id TEXT NOT NULL,
-          type TEXT NOT NULL,
-          username TEXT,
-          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-        );
-      `);
-      await safeQuery(`
-        ALTER TABLE font_app_image_creations ADD COLUMN IF NOT EXISTS username TEXT;
-      `);
-      await safeQuery(`
-        CREATE INDEX IF NOT EXISTS idx_creations_image_time ON font_app_image_creations (image_id, created_at DESC);
-      `);
-      await safeQuery(`
-        CREATE INDEX IF NOT EXISTS idx_creations_user_time ON font_app_image_creations (username, created_at DESC);
-      `);
-
-      const adminCheck = await safeQuery("SELECT role FROM users WHERE username = 'admin'");
-      if (adminCheck.rowCount === 0) {
-        await safeQuery("INSERT INTO users (username, password, role) VALUES ('admin', 'admin@1234', 'admin')");
-        console.log("Default admin user created.");
-      }
-      console.log("Database initialized successfully.");
-    } catch (err) {
-      console.error("Postgres initialization error:", err);
+      fs.writeFileSync(
+        DATA_FILE,
+        JSON.stringify(
+          {
+            users: [{ username: "admin", password: "admin@1234", role: "admin" }],
+            images: [],
+          },
+          null,
+          2
+        )
+      );
+    } catch (e) {
+      console.warn("Could not write fallback data.json:", e);
     }
   }
+}
+
+if (!HAS_POSTGRES) {
+  ensureFallbackDataFile();
+}
+
+async function initDb() {
+  if (isDbInitialized) return;
+  if (dbInitPromise) return dbInitPromise;
+
+  dbInitPromise = (async () => {
+    if (HAS_POSTGRES) {
+      console.log("Initializing Postgres database...");
+      try {
+        await safeQuery(`
+          CREATE TABLE IF NOT EXISTS users (
+            username TEXT PRIMARY KEY,
+            password TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'user',
+            selected_fonts TEXT[] DEFAULT '{}',
+            default_font TEXT,
+            default_font_size INTEGER,
+            default_font_color TEXT
+          );
+        `);
+        
+        await safeQuery(`
+          ALTER TABLE users ADD COLUMN IF NOT EXISTS selected_fonts TEXT[] DEFAULT '{}';
+        `);
+        await safeQuery(`
+          ALTER TABLE users ADD COLUMN IF NOT EXISTS default_font TEXT;
+        `);
+        await safeQuery(`
+          ALTER TABLE users ADD COLUMN IF NOT EXISTS default_font_size INTEGER;
+        `);
+        await safeQuery(`
+          ALTER TABLE users ADD COLUMN IF NOT EXISTS default_font_color TEXT;
+        `);
+
+        await safeQuery(`
+          CREATE TABLE IF NOT EXISTS font_app_images (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            image_url TEXT NOT NULL,
+            layers JSONB NOT NULL,
+            name TEXT NOT NULL,
+            is_locked BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
+
+        await safeQuery(`
+          ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS is_locked BOOLEAN DEFAULT FALSE;
+        `);
+        
+        await safeQuery(`
+          ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+        `);
+        
+        await safeQuery(`
+          ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS copies_count INTEGER DEFAULT 0;
+        `);
+        await safeQuery(`
+          ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS downloads_count INTEGER DEFAULT 0;
+        `);
+        await safeQuery(`
+          ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS shares_count INTEGER DEFAULT 0;
+        `);
+        
+        await safeQuery(`
+          CREATE TABLE IF NOT EXISTS custom_fonts (
+            name TEXT PRIMARY KEY,
+            data BYTEA NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
+
+        // Performance Indexes: ensures instant lookups for project list and user authentication
+        await safeQuery(`
+          CREATE INDEX IF NOT EXISTS idx_font_app_images_user_created ON font_app_images (username, created_at DESC);
+        `);
+        await safeQuery(`
+          CREATE INDEX IF NOT EXISTS idx_users_lower_username ON users (LOWER(username));
+        `);
+
+        await safeQuery(`
+          CREATE TABLE IF NOT EXISTS font_app_image_creations (
+            id SERIAL PRIMARY KEY,
+            image_id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            username TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
+        await safeQuery(`
+          ALTER TABLE font_app_image_creations ADD COLUMN IF NOT EXISTS username TEXT;
+        `);
+        await safeQuery(`
+          CREATE INDEX IF NOT EXISTS idx_creations_image_time ON font_app_image_creations (image_id, created_at DESC);
+        `);
+        await safeQuery(`
+          CREATE INDEX IF NOT EXISTS idx_creations_user_time ON font_app_image_creations (username, created_at DESC);
+        `);
+
+        await safeQuery(
+          "INSERT INTO users (username, password, role) VALUES ('admin', 'admin@1234', 'admin') ON CONFLICT (username) DO UPDATE SET role = 'admin'"
+        );
+
+        // Sync any uploaded font files placed in /Fonts directory into custom_fonts so cloud/serverless deployments also have them
+        const rootFontsDir = path.join(process.cwd(), "Fonts");
+        if (fs.existsSync(rootFontsDir) && fs.statSync(rootFontsDir).isDirectory()) {
+          const uploadedFontFiles = fs.readdirSync(rootFontsDir).filter(isFontFilename);
+          for (const fontFile of uploadedFontFiles) {
+            try {
+              const filePath = path.join(rootFontsDir, fontFile);
+              if (fs.statSync(filePath).isFile()) {
+                const buf = fs.readFileSync(filePath);
+                await safeQuery(
+                  "INSERT INTO custom_fonts (name, data) VALUES ($1, $2) ON CONFLICT (name) DO NOTHING",
+                  [fontFile, buf]
+                );
+              }
+            } catch (syncErr) {
+              console.warn(`Could not sync font ${fontFile} from /Fonts:`, syncErr);
+            }
+          }
+        }
+
+        isDbInitialized = true;
+        console.log("Database initialized successfully.");
+      } catch (err) {
+        console.error("Postgres initialization error:", err);
+      } finally {
+        dbInitPromise = null;
+      }
+    }
+  })();
+
+  return dbInitPromise;
 }
 
 const storage = multer.memoryStorage();
@@ -325,21 +416,43 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
       return res.status(200).send(cached.buffer);
     }
 
-    const projectPath = path.join(FONTS_DIR, name);
-    const writablePath = path.join(WRITABLE_FONTS_DIR, name);
+    const dirs = getExistingFontDirs();
 
-    if (fs.existsSync(projectPath) && fs.statSync(projectPath).isFile()) {
-      const buffer = fs.readFileSync(projectPath);
-      fontCache.set(name, { buffer, contentType: getFontContentType(name, buffer) });
-      return sendFontSuccess(buffer, name);
-    }
-    if (fs.existsSync(writablePath) && fs.statSync(writablePath).isFile()) {
-      const buffer = fs.readFileSync(writablePath);
-      fontCache.set(name, { buffer, contentType: getFontContentType(name, buffer) });
-      return sendFontSuccess(buffer, name);
+    // 1. Exact file match across all font directories
+    for (const dir of dirs) {
+      const candidatePath = path.join(dir, name);
+      if (fs.existsSync(candidatePath) && fs.statSync(candidatePath).isFile()) {
+        const buffer = fs.readFileSync(candidatePath);
+        fontCache.set(name, { buffer, contentType: getFontContentType(name, buffer) });
+        return sendFontSuccess(buffer, name);
+      }
     }
 
-    // Try database if not found in files
+    // 2. Fuzzy file match across all font directories (handles spaces/hyphens/underscores & prefers .woff2)
+    const targetNorm = normalizeFontKey(name);
+    if (targetNorm) {
+      const matchingLocalFiles: Array<{ file: string; fullPath: string }> = [];
+      for (const dir of dirs) {
+        for (const f of fs.readdirSync(dir)) {
+          if (!isFontFilename(f)) continue;
+          if (normalizeFontKey(f) === targetNorm) {
+            const fp = path.join(dir, f);
+            if (fs.statSync(fp).isFile()) {
+              matchingLocalFiles.push({ file: f, fullPath: fp });
+            }
+          }
+        }
+      }
+      if (matchingLocalFiles.length > 0) {
+        matchingLocalFiles.sort((a, b) => fontExtPriority(a.file) - fontExtPriority(b.file));
+        const best = matchingLocalFiles[0];
+        const buffer = fs.readFileSync(best.fullPath);
+        fontCache.set(name, { buffer, contentType: getFontContentType(best.file, buffer) });
+        return sendFontSuccess(buffer, best.file);
+      }
+    }
+
+    // 3. Try database if not found in files
     if (HAS_POSTGRES) {
       try {
         const result = await safeQuery("SELECT data, name FROM custom_fonts WHERE name = $1", [name]);
@@ -349,14 +462,15 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
           fontCache.set(name, { buffer: fontData, contentType: getFontContentType(dbName, fontData) });
           return sendFontSuccess(fontData, dbName);
         } else {
-          // Try broader search: case-insensitive, without extension, or replacing underscores/spaces
+          // Broader search: case-insensitive, without extension, or ignoring punctuation/spaces/hyphens/underscores
           const fuzzyResult = await safeQuery(
             `SELECT data, name FROM custom_fonts 
              WHERE LOWER(name) = LOWER($1)
                 OR LOWER(REGEXP_REPLACE(name, '\\.(woff2?|ttf|otf)$', '', 'i')) = LOWER(REGEXP_REPLACE($1, '\\.(woff2?|ttf|otf)$', '', 'i'))
-                OR REPLACE(LOWER(name), ' ', '_') = REPLACE(LOWER($1), ' ', '_')
+                OR REGEXP_REPLACE(LOWER(REGEXP_REPLACE(name, '\\.(woff2?|ttf|otf)$', '', 'i')), '[^a-z0-9]', '', 'g') = $2
+             ORDER BY CASE WHEN name ILIKE '%.woff2' THEN 0 WHEN name ILIKE '%.woff' THEN 1 ELSE 2 END
              LIMIT 1`,
-            [name]
+            [name, targetNorm]
           );
           if (fuzzyResult.rowCount && fuzzyResult.rowCount > 0) {
             const fuzzyFontData: Buffer = fuzzyResult.rows[0].data;
@@ -372,7 +486,6 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
       }
     }
 
-    console.warn(`[Font Service] Font not found: ${name}. Checked: ${projectPath}, ${writablePath}, DB`);
     setNoCacheHeaders(res);
     return res.status(404).send("Font not found");
   } catch (err) {
@@ -382,8 +495,9 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
   }
 });
 
-  app.use("/fonts", express.static(FONTS_DIR));
-  app.use("/fonts", express.static(WRITABLE_FONTS_DIR));
+  for (const dir of getExistingFontDirs()) {
+    app.use("/fonts", express.static(dir));
+  }
 
   // Auth
   app.post("/api/register", async (req, res) => {
@@ -435,18 +549,34 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
 
   app.post("/api/login", async (req, res) => {
     try {
-      const { username, password } = req.body;
-      console.log(`Login attempt for user: ${username}`);
+      const { username, password } = req.body || {};
+      const cleanUsername = String(username || "").trim();
+      const rawPassword = String(password ?? "");
+      const trimmedPassword = rawPassword.trim();
+
+      if (!cleanUsername || !rawPassword) {
+        return res.status(400).json({ success: false, message: "Username and password are required" });
+      }
       
       if (HAS_POSTGRES) {
+        await initDb();
         const result = await safeQuery(
-          "SELECT username, role, selected_fonts as \"selectedFonts\", default_font as \"defaultFont\", default_font_size as \"defaultFontSize\", default_font_color as \"defaultFontColor\" FROM users WHERE username = $1 AND password = $2",
-          [username, password]
+          `SELECT username, role,
+                  selected_fonts as "selectedFonts",
+                  default_font as "defaultFont",
+                  default_font_size as "defaultFontSize",
+                  default_font_color as "defaultFontColor"
+           FROM users
+           WHERE LOWER(TRIM(username)) = LOWER($1)
+             AND (password = $2 OR password = $3)
+           ORDER BY (username = $1) DESC
+           LIMIT 1`,
+          [cleanUsername, rawPassword, trimmedPassword]
         );
         
         if (result.rowCount && result.rowCount > 0) {
           const user = result.rows[0];
-          console.log(`Login successful for user: ${username}`);
+          console.log(`Authenticated user: ${user.username}`);
           return res.json({ 
             success: true, 
             username: user.username, 
@@ -457,12 +587,30 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
             defaultFontColor: user.defaultFontColor
           });
         }
+      } else {
+        ensureFallbackDataFile();
+        const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
+        const user = (data.users || []).find(
+          (u: any) =>
+            String(u.username || "").trim().toLowerCase() === cleanUsername.toLowerCase() &&
+            (u.password === rawPassword || u.password === trimmedPassword)
+        );
+        if (user) {
+          return res.json({
+            success: true,
+            username: user.username,
+            role: user.role || (user.username === "admin" ? "admin" : "user"),
+            selectedFonts: user.selectedFonts || [],
+            defaultFont: user.defaultFont || null,
+            defaultFontSize: user.defaultFontSize || null,
+            defaultFontColor: user.defaultFontColor || null,
+          });
+        }
       }
       
-      console.log(`Login failed for user: ${username} - Invalid credentials`);
-      res.status(401).json({ success: false, message: "Invalid credentials" });
+      return res.status(401).json({ success: false, message: "Invalid username or password" });
     } catch (err) {
-      console.error("Login error details:", err instanceof Error ? err.message : String(err));
+      console.error("Login route exception:", err instanceof Error ? err.message : String(err));
       res.status(500).json({ success: false, message: "Internal server error" });
     }
   });
@@ -471,20 +619,19 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
     try {
       const authHeader = req.headers['x-sync-auth'];
       if (!authHeader || typeof authHeader !== 'string') {
-        console.error("Missing x-sync-auth header");
         return res.status(403).json({ success: false, message: "Unauthorized: Missing auth header" });
       }
 
-      const op = Buffer.from(authHeader, 'base64').toString('utf-8');
+      const op = Buffer.from(authHeader, 'base64').toString('utf-8').trim();
       const { a, id, c, t } = req.body;
       
       console.log(`Sync operation: op=${op}, action=${a}, target=${id}`);
 
-      const adminResult = await safeQuery("SELECT * FROM users WHERE username = $1", [op]);
+      await initDb();
+      const adminResult = await safeQuery("SELECT * FROM users WHERE LOWER(TRIM(username)) = LOWER($1)", [op]);
       const admin = adminResult.rows[0];
       
       if (!admin || admin.role !== "admin") {
-        console.error(`Unauthorized access attempt by ${op}`);
         return res.status(403).json({ success: false, message: "Unauthorized: Admin access required" });
       }
 
@@ -622,8 +769,14 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
   // Fonts
   app.get("/api/fonts", async (req, res) => {
     try {
-      const projectFiles = fs.existsSync(FONTS_DIR) ? fs.readdirSync(FONTS_DIR) : [];
-      const writableFiles = fs.existsSync(WRITABLE_FONTS_DIR) ? fs.readdirSync(WRITABLE_FONTS_DIR) : [];
+      const localFiles: string[] = [];
+      for (const dir of getExistingFontDirs()) {
+        for (const f of fs.readdirSync(dir)) {
+          if (isFontFilename(f)) {
+            localFiles.push(f);
+          }
+        }
+      }
       
       let dbFiles: string[] = [];
       if (HAS_POSTGRES) {
@@ -633,7 +786,7 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
         } else {
           try {
             const result = await safeQuery("SELECT name FROM custom_fonts");
-            dbFiles = result.rows.map(r => r.name);
+            dbFiles = result.rows.map(r => r.name).filter(isFontFilename);
             cachedDbFontNames = dbFiles;
             lastFontNamesFetch = now;
           } catch (err) {
@@ -643,12 +796,21 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
         }
       }
 
-      const projectFonts = projectFiles.map(f => ({ name: f, url: `/fonts/${encodeURIComponent(f)}?v=2` }));
-      const writableFonts = writableFiles.map(f => ({ name: f, url: `/fonts/${encodeURIComponent(f)}?v=2` }));
-      const dbFonts = dbFiles.map(f => ({ name: f, url: `/fonts/${encodeURIComponent(f)}?v=2` }));
+      // Deduplicate by family stem (without extension), preferring .woff2 over .woff/.ttf/.otf
+      const allCandidateFiles = [...localFiles, ...dbFiles];
+      const byStem = new Map<string, string>();
+      for (const f of allCandidateFiles) {
+        const stem = stripFontExt(f).toLowerCase();
+        const existing = byStem.get(stem);
+        if (!existing || fontExtPriority(f) < fontExtPriority(existing)) {
+          byStem.set(stem, f);
+        }
+      }
 
-      const allFonts = [...projectFonts, ...writableFonts, ...dbFonts];
-      const uniqueFonts = Array.from(new Map(allFonts.map(f => [f.name, f])).values());
+      const uniqueFonts = Array.from(byStem.values()).map(f => ({
+        name: f,
+        url: `/fonts/${encodeURIComponent(f)}?v=2`,
+      }));
       setNoCacheHeaders(res);
       res.json(uniqueFonts);
     } catch (err) {
@@ -660,19 +822,41 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
   app.post("/api/upload-font", upload.single("font"), async (req, res) => {
     try {
       const file = req.file;
-      if (!file) return res.status(400).json({ success: false, message: "No file uploaded" });
+      if (!file || !file.buffer || file.buffer.length < 16) {
+        return res.status(400).json({ success: false, message: "Invalid or empty font file" });
+      }
 
-      const sanitized = file.originalname.replace(/[^a-z0-9.]/gi, '_').toLowerCase();
-      const fileName = sanitized;
+      const magicAscii = file.buffer.subarray(0, 4).toString("ascii");
+      const magicU32 = file.buffer.readUInt32BE(0);
+      const isValidFontBinary =
+        magicAscii === "wOF2" ||
+        magicAscii === "wOFF" ||
+        magicAscii === "OTTO" ||
+        magicAscii === "true" ||
+        magicAscii === "ttcf" ||
+        magicU32 === 0x00010000;
+
+      if (!isValidFontBinary) {
+        return res.status(400).json({ success: false, message: "Uploaded file is not a valid WOFF2, WOFF, TTF, or OTF font" });
+      }
+
+      const rawBase = path.basename(file.originalname || "font.woff2").trim();
+      const withoutCopySuffix = rawBase.replace(/\s*\(\d+\)(?=\.[^.]+$)/, "");
+      const fileName = withoutCopySuffix
+        .replace(/\s+/g, "_")
+        .replace(/[^a-z0-9._-]/gi, "_")
+        .replace(/_+/g, "_")
+        .toLowerCase();
 
       if (HAS_POSTGRES) {
         try {
+          await initDb();
           await safeQuery(
             "INSERT INTO custom_fonts (name, data) VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET data = $2",
             [fileName, file.buffer]
           );
           cachedDbFontNames = null;
-          fontCache.delete(fileName);
+          fontCache.clear();
           return res.json({ success: true, url: `/fonts/${encodeURIComponent(fileName)}?v=2`, name: fileName });
         } catch (err) {
           console.error("DB Font upload error:", err);
@@ -680,7 +864,7 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
       }
 
       fs.writeFileSync(path.join(WRITABLE_FONTS_DIR, fileName), file.buffer);
-      fontCache.delete(fileName);
+      fontCache.clear();
       res.json({ success: true, url: `/fonts/${encodeURIComponent(fileName)}?v=2`, name: fileName });
     } catch (err) {
       console.error("Font upload error:", err);
@@ -706,7 +890,7 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
       }
 
       // 2. Delete from file system
-      const dirsToSearch = Array.from(new Set([FONTS_DIR, WRITABLE_FONTS_DIR]));
+      const dirsToSearch = getExistingFontDirs();
       
       for (const dir of dirsToSearch) {
         if (!fs.existsSync(dir)) continue;
@@ -777,7 +961,7 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
       }
 
       // 2. Rename in file system
-      const dirsToSearch = Array.from(new Set([FONTS_DIR, WRITABLE_FONTS_DIR]));
+      const dirsToSearch = getExistingFontDirs();
       
       for (const dir of dirsToSearch) {
         if (!fs.existsSync(dir)) continue;

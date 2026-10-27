@@ -17,6 +17,81 @@ interface User {
 interface Font {
   name: string;
   url: string;
+  rawName?: string;
+}
+
+function formatFontDisplayName(name: string): string {
+  return name.replace(/^\d+-/, "") || name;
+}
+
+function normalizeFontLookup(name: string): string {
+  return String(name || "")
+    .replace(/\.(woff2?|ttf|otf)$/i, "")
+    .replace(/^\d+-/, "")
+    .replace(/__\d+_?$/i, "")
+    .replace(/\s*\(\d+\)$/i, "")
+    .replace(/[^a-z0-9]/gi, "")
+    .toLowerCase();
+}
+
+const GENERIC_FONT_FAMILIES = new Set(["sans-serif", "serif", "monospace", "cursive", "fantasy", "system-ui"]);
+
+function isGenericCssFont(family?: string): boolean {
+  return !family || GENERIC_FONT_FAMILIES.has(family.trim().toLowerCase());
+}
+
+function escapeCssFontFamily(family: string): string {
+  return family.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function buildCanvasFontSpec(
+  fontSize: number,
+  fontFamily?: string,
+  isBold?: boolean,
+  isItalic?: boolean,
+  includeFallback = true
+): string {
+  const style = isItalic ? "italic " : "";
+  const weight = isBold ? "bold " : "";
+  const fam = (fontFamily || "sans-serif").trim();
+  if (isGenericCssFont(fam)) {
+    return `${style}${weight}${fontSize}px ${fam || "sans-serif"}`;
+  }
+  const quoted = `"${escapeCssFontFamily(fam)}"`;
+  return includeFallback ? `${style}${weight}${fontSize}px ${quoted}, sans-serif` : `${style}${weight}${fontSize}px ${quoted}`;
+}
+
+function detectFontMimeAndFormat(buffer: ArrayBuffer): { mime: string; format: string } {
+  if (buffer.byteLength >= 4) {
+    const bytes = new Uint8Array(buffer, 0, 4);
+    const sig = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
+    if (sig === "wOF2") return { mime: "font/woff2", format: "woff2" };
+    if (sig === "wOFF") return { mime: "font/woff", format: "woff" };
+    if (sig === "OTTO") return { mime: "font/otf", format: "opentype" };
+  }
+  return { mime: "font/ttf", format: "truetype" };
+}
+
+const injectedCssFontFamilies = new Set<string>();
+
+function injectStyleSheetFontFace(familyName: string, blobUrl: string, format: string): void {
+  if (typeof document === "undefined" || !familyName) return;
+  const key = `${familyName}::${blobUrl}`;
+  if (injectedCssFontFamilies.has(key)) return;
+  injectedCssFontFamilies.add(key);
+
+  let styleEl = document.getElementById("custom-webfonts-sheet") as HTMLStyleElement | null;
+  if (!styleEl) {
+    styleEl = document.createElement("style");
+    styleEl.id = "custom-webfonts-sheet";
+    document.head.appendChild(styleEl);
+  }
+  const escaped = escapeCssFontFamily(familyName);
+  styleEl.appendChild(
+    document.createTextNode(
+      `@font-face { font-family: "${escaped}"; src: url("${blobUrl}") format("${format}"); font-weight: 100 900; font-style: normal; font-display: block; }\n`
+    )
+  );
 }
 
 interface TextLayer {
@@ -271,14 +346,28 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    fetchFonts();
+    if (typeof document !== "undefined" && document.fonts) {
+      const handleLoadingDone = () => setFontsLoadedTick(t => t + 1);
+      document.fonts.addEventListener("loadingdone", handleLoadingDone);
+      return () => document.fonts.removeEventListener("loadingdone", handleLoadingDone);
+    }
+  }, []);
+
+  useEffect(() => {
     if (user) {
       localStorage.setItem("app_user", JSON.stringify(user));
-      fetchFonts();
-      fetchProjects();
     } else {
       localStorage.removeItem("app_user");
     }
   }, [user]);
+
+  useEffect(() => {
+    if (user?.username) {
+      fetchFonts();
+      fetchProjects();
+    }
+  }, [user?.username]);
 
   const imageCacheRef = useRef<HTMLImageElement | null>(null);
 
@@ -349,23 +438,79 @@ export default function App() {
         return;
       }
       
-      // Map API data to Font objects, safely stripping only known font extensions
-      const apiFonts = data.map((font: any) => {
-        const fontFamily = String(font.name || "").replace(/\.(woff2?|ttf|otf)$/i, "") || String(font.name || "");
-        return { name: fontFamily, rawName: font.name, url: font.url };
-      });
+      // Map API data to Font objects, safely stripping only known font extensions and preferring .woff2
+      const extRank = (raw: string) => {
+        const lower = raw.toLowerCase();
+        if (lower.endsWith(".woff2")) return 0;
+        if (lower.endsWith(".woff")) return 1;
+        if (lower.endsWith(".ttf")) return 2;
+        if (lower.endsWith(".otf")) return 3;
+        return 4;
+      };
+      const dedupedByFamily = new Map<string, Font>();
+      for (const font of data) {
+        const rawName = String(font.name || "");
+        const fontFamily = rawName.replace(/\.(woff2?|ttf|otf)$/i, "") || rawName;
+        if (!fontFamily) continue;
+        const key = fontFamily.toLowerCase();
+        const prev = dedupedByFamily.get(key);
+        if (!prev || extRank(rawName) < extRank(prev.rawName || prev.url)) {
+          dedupedByFamily.set(key, { name: fontFamily, rawName, url: font.url });
+        }
+      }
+      const apiFonts = Array.from(dedupedByFamily.values());
       
       // Set fonts immediately so they show up in the list
       setFonts(apiFonts);
 
-      const loadSingleFont = async (font: { name: string; rawName?: string; url: string }) => {
+      const isFamilyLoadedInDoc = (familyName: string): boolean => {
+        return Array.from(document.fonts.values()).some(
+          face => face.family === familyName && face.status === "loaded"
+        );
+      };
+
+      const registerFamilyBuffer = async (
+        familyName: string,
+        buffer: ArrayBuffer,
+        getBlobInfo: () => { blobUrl: string; format: string }
+      ) => {
+        if (!familyName || isFamilyLoadedInDoc(familyName)) return;
+
+        // Pass the raw unquoted familyName to FontFace so Chromium/Blink does not store literal quote characters in face.family
+        try {
+          const fontFace = new FontFace(familyName, buffer.slice(0));
+          const loadedFace = await fontFace.load();
+          document.fonts.add(loadedFace);
+          // Also inject @font-face CSS rule if browser altered or quoted loadedFace.family unexpectedly
+          if (loadedFace.family !== familyName && loadedFace.family.replace(/^["']|["']$/g, "") !== familyName) {
+            const { blobUrl, format } = getBlobInfo();
+            injectStyleSheetFontFace(familyName, blobUrl, format);
+            await document.fonts.load(`16px "${escapeCssFontFamily(familyName)}"`);
+          }
+          return;
+        } catch {
+          // Fallback for older WebKit/Gecko engines that reject unquoted spaces/dots in FontFace constructor
+          const { blobUrl, format } = getBlobInfo();
+          injectStyleSheetFontFace(familyName, blobUrl, format);
+          await document.fonts.load(`16px "${escapeCssFontFamily(familyName)}"`);
+        }
+      };
+
+      const loadSingleFont = async (font: Font) => {
         const fontFamily = font.name;
         if (!fontFamily) return;
 
-        const alreadyLoaded = Array.from(document.fonts.values()).some(
-          face => face.family.replace(/^["']|["']$/g, "") === fontFamily && face.status === "loaded"
+        const cleanDisplay = formatFontDisplayName(fontFamily);
+        const sanitizedAlias = cleanDisplay.replace(/[^a-z0-9.]/gi, "_").toLowerCase();
+        const hyphenAlias = cleanDisplay.replace(/[_\s]+/g, "-").toLowerCase();
+        const compactAlias = sanitizedAlias.replace(/[^a-z0-9]/gi, "_").replace(/_+/g, "_").replace(/^_|_$/g, "");
+        const dotlessUnderscore = cleanDisplay.replace(/\./g, "").replace(/[^a-z0-9]/gi, "_").replace(/_+/g, "_").replace(/^_|_$/g, "").toLowerCase();
+        const dotlessHyphen = dotlessUnderscore.replace(/_/g, "-");
+        const candidateFamilies = Array.from(
+          new Set([fontFamily, cleanDisplay, sanitizedAlias, hyphenAlias, compactAlias, dotlessUnderscore, dotlessHyphen].filter(Boolean))
         );
-        if (alreadyLoaded) return;
+
+        if (candidateFamilies.every(isFamilyLoadedInDoc)) return;
 
         const baseUrl = font.url.startsWith("/") ? font.url : `/fonts/${encodeURIComponent(font.url)}`;
         // Ensure ?v=2 is present to bypass any poisoned 404 browser/CDN caches
@@ -393,13 +538,25 @@ export default function App() {
             buffer = await fetchFontBuffer(retryUrl, true);
           }
 
-          // Quote family name if it contains dots, spaces, or non-ident characters (e.g. "apex_a.pura_044_")
-          const needsQuotes = /[^a-zA-Z0-9_-]|^[0-9]/.test(fontFamily);
-          const descriptorFamily = needsQuotes ? `"${fontFamily.replace(/"/g, '\\"')}"` : fontFamily;
+          let cachedBlobInfo: { blobUrl: string; format: string } | null = null;
+          const getBlobInfo = () => {
+            if (!cachedBlobInfo) {
+              const { mime, format } = detectFontMimeAndFormat(buffer);
+              cachedBlobInfo = {
+                blobUrl: URL.createObjectURL(new Blob([buffer], { type: mime })),
+                format,
+              };
+            }
+            return cachedBlobInfo;
+          };
 
-          const fontFace = new FontFace(descriptorFamily, buffer);
-          const loadedFace = await fontFace.load();
-          document.fonts.add(loadedFace);
+          for (const fam of candidateFamilies) {
+            try {
+              await registerFamilyBuffer(fam, buffer, getBlobInfo);
+            } catch {
+              // Ignore secondary alias registration error if primary succeeded
+            }
+          }
         } catch (e) {
           console.error(`Failed to load font: "${fontFamily}" from ${font.url}`, e);
         }
@@ -533,16 +690,21 @@ export default function App() {
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
+    const cleanUsername = username.trim();
+    if (!cleanUsername || !password) {
+      setError("Please enter both username and password");
+      return;
+    }
     setLoading(true);
     setError("");
     try {
       const res = await fetch("/api/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ username: cleanUsername, password }),
       });
-      const data = await res.json();
-      if (data.success) {
+      const data = await res.json().catch(() => ({ success: false, message: "Unable to sign in right now. Please try again." }));
+      if (res.ok && data.success) {
         setUser({ 
           username: data.username, 
           role: data.role, 
@@ -552,10 +714,10 @@ export default function App() {
           defaultFontColor: data.defaultFontColor
         });
       } else {
-        setError(data.message);
+        setError(data.message || "Invalid username or password");
       }
-    } catch (err) {
-      setError("Login failed. Please try again.");
+    } catch {
+      setError("Unable to reach server. Please try again.");
     } finally {
       setLoading(false);
     }
@@ -1100,33 +1262,55 @@ export default function App() {
   } as any);
 
   const handleFontUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const fileList: File[] = e.target.files ? Array.from<File>(e.target.files) : [];
+    if (fileList.length === 0) return;
 
-    const extension = file.name.split('.').pop()?.toLowerCase();
-    if (extension !== 'woff' && extension !== 'woff2') {
-      setNotification({ message: "Only .woff and .woff2 font formats are supported.", type: 'error' });
+    const allowedExts = new Set(["woff", "woff2", "ttf", "otf"]);
+    const validFiles = fileList.filter(f => {
+      const ext = f.name.split(".").pop()?.toLowerCase() || "";
+      return allowedExts.has(ext);
+    });
+
+    if (validFiles.length === 0) {
+      setNotification({ message: "Supported font formats: .woff2, .woff, .ttf, .otf", type: "error" });
+      e.target.value = "";
       return;
     }
 
     setIsFontLoading(true);
-    const formData = new FormData();
-    formData.append("font", file);
+    let uploadedCount = 0;
+    let lastError = "";
 
     try {
-      const res = await fetch("/api/upload-font", {
-        method: "POST",
-        body: formData,
-      });
-      if (!res.ok) throw new Error(`Font upload failed: ${res.status}`);
-      const data = await res.json();
-      if (data.success) {
+      for (const file of validFiles) {
+        const formData = new FormData();
+        formData.append("font", file);
+        const res = await fetch("/api/upload-font", {
+          method: "POST",
+          body: formData,
+        });
+        const data = await res.json().catch(() => ({ success: false, message: `HTTP ${res.status}` }));
+        if (res.ok && data.success) {
+          uploadedCount++;
+        } else {
+          lastError = data.message || `Upload failed (${res.status})`;
+        }
+      }
+      if (uploadedCount > 0) {
         await fetchFonts();
+        setNotification({
+          message: uploadedCount === 1 ? "Font uploaded and activated!" : `${uploadedCount} fonts uploaded and activated!`,
+          type: "success",
+        });
+      } else {
+        setNotification({ message: lastError || "Font upload failed.", type: "error" });
       }
     } catch (err) {
       console.error("Font upload failed:", err);
+      setNotification({ message: "Failed to upload font. Please try again.", type: "error" });
     } finally {
       setIsFontLoading(false);
+      e.target.value = "";
     }
   };
 
@@ -1994,24 +2178,23 @@ export default function App() {
         for (const layer of layers) {
           if (layer.visible === false) continue;
           ctx.save();
-          const fontStyle = layer.isItalic ? "italic " : "";
-          const fontWeight = layer.isBold ? "bold " : "";
           const fontFamily = layer.fontFamily || "sans-serif";
-          const fontStr = `${fontStyle}${fontWeight}${layer.fontSize}px "${fontFamily}", sans-serif`;
+          const fontStr = buildCanvasFontSpec(layer.fontSize, fontFamily, layer.isBold, layer.isItalic, true);
+          const checkFontStr = buildCanvasFontSpec(layer.fontSize, fontFamily, layer.isBold, layer.isItalic, false);
           
-          if (fontFamily !== "sans-serif" && !document.fonts.check(fontStr)) {
+          if (!isGenericCssFont(fontFamily) && !document.fonts.check(checkFontStr)) {
             try {
-              await document.fonts.load(fontStr);
+              await document.fonts.load(checkFontStr);
             } catch (e) {
-              console.warn(`Failed to load font for canvas: ${fontStr}`, e);
+              console.warn(`Failed to load font for canvas: ${checkFontStr}`, e);
             }
           }
 
-          if (layer.hasSuffixList && layer.selectedSuffix && layer.suffixFontFamily && layer.suffixFontFamily !== "sans-serif" && layer.suffixFontFamily !== fontFamily) {
-            const sufFontStr = `${fontStyle}${fontWeight}${layer.suffixFontSize || layer.fontSize}px "${layer.suffixFontFamily}", sans-serif`;
-            if (!document.fonts.check(sufFontStr)) {
+          if (layer.hasSuffixList && layer.selectedSuffix && layer.suffixFontFamily && !isGenericCssFont(layer.suffixFontFamily) && layer.suffixFontFamily !== fontFamily) {
+            const sufCheckStr = buildCanvasFontSpec(layer.suffixFontSize || layer.fontSize, layer.suffixFontFamily, layer.isBold, layer.isItalic, false);
+            if (!document.fonts.check(sufCheckStr)) {
               try {
-                await document.fonts.load(sufFontStr);
+                await document.fonts.load(sufCheckStr);
               } catch (_) {}
             }
           }
@@ -2074,7 +2257,7 @@ export default function App() {
 
           if (isSinhalaDate) {
             const monthFontSize = ((layer.sinhalaMonthFontSize || layer.fontSize) * (canvas.width / 1000));
-            const monthFontStr = `${layer.isItalic ? 'italic ' : ''}${layer.isBold ? 'bold ' : ''}${monthFontSize}px "${layer.fontFamily}"`;
+            const monthFontStr = buildCanvasFontSpec(monthFontSize, layer.fontFamily, layer.isBold, layer.isItalic, true);
             
             // Calculate total width
             const w1 = ctx.measureText(yearStr + " ").width;
@@ -2142,7 +2325,7 @@ export default function App() {
 
               const suffixFontSize = layer.suffixFontSize || layer.fontSize;
               const suffixFontFamily = layer.suffixFontFamily || layer.fontFamily;
-              const suffixFontStr = `${fontStyle}${fontWeight}${suffixFontSize}px "${suffixFontFamily}", sans-serif`;
+              const suffixFontStr = buildCanvasFontSpec(suffixFontSize, suffixFontFamily, layer.isBold, layer.isItalic, true);
 
               ctx.font = suffixFontStr;
               ctx.textAlign = 'left';
@@ -2174,7 +2357,7 @@ export default function App() {
               const prevFont = ctx.font;
               const suffixFontSize = layer.suffixFontSize || layer.fontSize;
               const suffixFontFamily = layer.suffixFontFamily || layer.fontFamily;
-              ctx.font = `${fontStyle}${fontWeight}${suffixFontSize}px "${suffixFontFamily}", sans-serif`;
+              ctx.font = buildCanvasFontSpec(suffixFontSize, suffixFontFamily, layer.isBold, layer.isItalic, true);
               const sufMetrics = ctx.measureText(layer.selectedSuffix);
               const gap = (layer.suffixGap !== undefined ? layer.suffixGap : 4);
               totalWidth += gap + sufMetrics.width;
@@ -2295,7 +2478,7 @@ export default function App() {
           displayText = convertNumberToSinhala(parentNumber.text, mode) || layer.text || "";
         }
       }
-      ctx.font = `${layer.fontSize}px "${layer.fontFamily}"`;
+      ctx.font = buildCanvasFontSpec(layer.fontSize, layer.fontFamily, layer.isBold, layer.isItalic, true);
       const metrics = ctx.measureText(displayText);
       const x = (layer.x / 100) * canvas.width;
       const y = (layer.y / 100) * canvas.height;
@@ -2310,7 +2493,7 @@ export default function App() {
       let endX = startX + width;
       if (layer.hasSuffixList && layer.selectedSuffix) {
         const prevFont = ctx.font;
-        ctx.font = `${layer.suffixFontSize || layer.fontSize}px "${layer.suffixFontFamily || layer.fontFamily}"`;
+        ctx.font = buildCanvasFontSpec(layer.suffixFontSize || layer.fontSize, layer.suffixFontFamily || layer.fontFamily, layer.isBold, layer.isItalic, true);
         const sufMetrics = ctx.measureText(layer.selectedSuffix);
         const gap = layer.suffixGap !== undefined ? layer.suffixGap : 4;
         endX += gap + sufMetrics.width;
@@ -3139,7 +3322,7 @@ export default function App() {
                         <option value="">Select Font</option>
                         <option value="sans-serif">System Sans</option>
                         {fonts.map(f => (
-                          <option key={f.name} value={f.name}>{f.name.split('-').slice(1).join('-') || f.name}</option>
+                          <option key={f.name} value={f.name}>{formatFontDisplayName(f.name)}</option>
                         ))}
                       </select>
                     </div>
@@ -3189,11 +3372,11 @@ export default function App() {
                   </h4>
                   <div className="flex items-center gap-4">
                     <label className="flex-1 cursor-pointer bg-slate-900 border border-slate-700 border-dashed rounded-xl p-6 hover:border-blue-500 hover:bg-blue-500/5 transition-all text-center group">
-                      <input type="file" accept=".woff,.woff2" className="hidden" onChange={handleFontUpload} />
+                      <input type="file" accept=".woff,.woff2,.ttf,.otf" multiple className="hidden" onChange={handleFontUpload} />
                       <div className="flex flex-col items-center gap-2">
                         <Plus size={24} className="text-slate-500 group-hover:text-blue-400 transition-colors" />
                         <span className="text-sm text-slate-400 group-hover:text-slate-300">Click to browse font files</span>
-                        <span className="text-[10px] text-slate-600 uppercase tracking-widest">WOFF, WOFF2 ONLY</span>
+                        <span className="text-[10px] text-slate-600 uppercase tracking-widest">WOFF2, WOFF, TTF, OTF</span>
                       </div>
                     </label>
                     {isFontLoading && (
@@ -3239,7 +3422,7 @@ export default function App() {
                               </button>
                               <div className="flex-1 min-w-0">
                                 <div className="flex items-center justify-between mb-1">
-                                  <p className="text-sm font-bold text-white truncate">{f.name.split('-').slice(1).join('-') || f.name}</p>
+                                  <p className="text-sm font-bold text-white truncate">{formatFontDisplayName(f.name)}</p>
                                   <p className="text-[10px] text-slate-500 uppercase tracking-widest">
                                     {isSelected ? `Selected (Position: ${selectedIndex + 1})` : 'Not Selected'}
                                   </p>
@@ -5710,7 +5893,7 @@ export default function App() {
                                   <option value="sans-serif" className="bg-slate-900 text-white font-sans">System Sans</option>
                                   {fonts.map((f, idx) => (
                                     <option key={idx} value={f.name} className="bg-slate-900 text-white" style={{ fontFamily: `"${f.name}", sans-serif` }}>
-                                      {f.name.split('-').slice(1).join('-') || f.name}
+                                      {formatFontDisplayName(f.name)}
                                     </option>
                                   ))}
                                 </select>
@@ -5736,7 +5919,7 @@ export default function App() {
                                     <option value="sans-serif" className="bg-slate-900 text-white font-sans">System Sans</option>
                                     {fonts.map((f, idx) => (
                                       <option key={idx} value={f.name} className="bg-slate-900 text-white" style={{ fontFamily: `"${f.name}", sans-serif` }}>
-                                        {f.name.split('-').slice(1).join('-') || f.name}
+                                        {formatFontDisplayName(f.name)}
                                       </option>
                                     ))}
                                   </select>
@@ -5885,7 +6068,7 @@ export default function App() {
                                 <option value="sans-serif" className="bg-slate-900 text-white font-sans">System Sans (Unicode)</option>
                                 {fonts.map((f, idx) => (
                                   <option key={idx} value={f.name} className="bg-slate-900 text-white" style={{ fontFamily: `"${f.name}", sans-serif` }}>
-                                    {f.name.split('-').slice(1).join('-') || f.name}
+                                    {formatFontDisplayName(f.name)}
                                   </option>
                                 ))}
                               </select>
@@ -6622,7 +6805,14 @@ export default function App() {
                         </div>
                         {(() => {
                           const userSelected = (user?.selectedFonts && user.selectedFonts.length > 0)
-                            ? user.selectedFonts.map(name => fonts.find(f => f.name === name)).filter(Boolean) as Font[]
+                            ? Array.from(
+                                new Map(
+                                  (user.selectedFonts
+                                    .map(name => fonts.find(f => f.name === name) || fonts.find(f => normalizeFontLookup(f.name) === normalizeFontLookup(name)))
+                                    .filter(Boolean) as Font[])
+                                    .map(f => [f.name, f])
+                                ).values()
+                              )
                             : fonts;
                           const finalFonts = userSelected.length > 0 ? userSelected : fonts;
                           return finalFonts.map((f, index) => (
@@ -6635,7 +6825,7 @@ export default function App() {
                               }}
                             >
                               <div className="flex items-center justify-between mb-1">
-                                <span className="font-sans text-xs text-slate-400 block uppercase tracking-tighter">{f.name.split('-').slice(1).join('-') || f.name}</span>
+                                <span className="font-sans text-xs text-slate-400 block uppercase tracking-tighter">{formatFontDisplayName(f.name)}</span>
                               </div>
                               <span style={{ fontFamily: `"${f.name}", sans-serif` }} className="text-lg">
                                 The quick brown fox
