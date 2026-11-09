@@ -128,6 +128,40 @@ export function BulkImageCreatorModal({
   // Active Tab: 'editor' (Generator) or 'history' (Creation History)
   const [activeTab, setActiveTab] = useState<'editor' | 'history'>('editor');
 
+  // Track mobile visual viewport (keyboard height changes) so the modal never overflows under the keyboard
+  const [mobileViewportHeight, setMobileViewportHeight] = useState<number | null>(() => {
+    if (typeof window !== "undefined" && window.visualViewport && window.innerWidth < 1024) {
+      return window.visualViewport.height;
+    }
+    return null;
+  });
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const updateHeight = () => {
+      if (window.visualViewport && window.innerWidth < 1024) {
+        setMobileViewportHeight(window.visualViewport.height);
+      } else {
+        setMobileViewportHeight(null);
+      }
+    };
+
+    updateHeight();
+
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", updateHeight);
+    }
+    window.addEventListener("resize", updateHeight);
+
+    return () => {
+      if (window.visualViewport) {
+        window.visualViewport.removeEventListener("resize", updateHeight);
+      }
+      window.removeEventListener("resize", updateHeight);
+    };
+  }, []);
+
   // Columns are the project's visible layers
   const activeLayers = useMemo(() => {
     return (project.layers || []).filter(l => l.visible !== false);
@@ -1079,8 +1113,20 @@ export function BulkImageCreatorModal({
   };
 
   return (
-    <div className="fixed inset-0 z-[150] flex items-center justify-center bg-black/85 backdrop-blur-md p-2 sm:p-4 overflow-hidden animate-in fade-in duration-200">
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl flex flex-col w-full max-w-[96vw] h-[92vh] max-h-[96vh] overflow-hidden">
+    <div 
+      className="fixed inset-0 z-[150] flex items-start sm:items-center justify-center bg-black/85 backdrop-blur-md p-0 sm:p-4 overflow-hidden animate-in fade-in duration-200"
+      style={{
+        height: mobileViewportHeight ? `${mobileViewportHeight}px` : undefined,
+        maxHeight: mobileViewportHeight ? `${mobileViewportHeight}px` : undefined,
+      }}
+    >
+      <div 
+        style={{
+          height: mobileViewportHeight ? `${mobileViewportHeight}px` : undefined,
+          maxHeight: mobileViewportHeight ? `${mobileViewportHeight}px` : undefined,
+        }}
+        className="bg-slate-900 border-0 sm:border border-slate-800 rounded-none sm:rounded-2xl shadow-2xl flex flex-col w-full sm:max-w-[96vw] h-full sm:h-[92vh] max-h-full sm:max-h-[96vh] overflow-hidden"
+      >
         
         {/* Modal Header */}
         <div className="flex items-center justify-between px-4 sm:px-6 py-3 border-b border-slate-800/90 bg-slate-900/90 shrink-0">
@@ -1160,8 +1206,8 @@ export function BulkImageCreatorModal({
         {activeTab === 'editor' && (
           <>
             {/* Toolbar Bar */}
-            <div className="flex flex-wrap items-center justify-between gap-2 px-4 sm:px-6 py-2.5 bg-slate-950/60 border-b border-slate-800/80 shrink-0 text-xs">
-              <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center justify-between gap-1.5 sm:gap-2 px-2.5 sm:px-6 py-1.5 sm:py-2.5 bg-slate-950/60 border-b border-slate-800/80 shrink-0 text-xs overflow-x-auto">
+              <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
                 {/* Add Row Buttons */}
                 <div className="flex items-center rounded-lg bg-slate-800 p-0.5 border border-slate-700">
                   <button
@@ -1411,13 +1457,15 @@ export function BulkImageCreatorModal({
                                         type="date"
                                         value={val}
                                         onChange={(e) => handleCellChange(idx, layer.id, e.target.value)}
-                                        className="w-full bg-slate-950/70 border border-slate-800 focus:border-blue-500/70 rounded px-2 py-1 text-slate-200 outline-none text-xs font-mono"
+                                        onFocus={() => setSelectedRowIndex(idx)}
+                                        className="w-full bg-slate-950/70 border border-slate-800 focus:border-blue-500 rounded px-2 py-1 text-slate-200 outline-none text-xs font-mono"
                                       />
                                     ) : layer.type === 'list' && layer.options && layer.options.length > 0 ? (
                                       <select
                                         value={val}
                                         onChange={(e) => handleCellChange(idx, layer.id, e.target.value)}
-                                        className="w-full bg-slate-950/70 border border-slate-800 focus:border-blue-500/70 rounded px-2 py-1 text-slate-200 outline-none text-xs"
+                                        onFocus={() => setSelectedRowIndex(idx)}
+                                        className="w-full bg-slate-950/70 border border-slate-800 focus:border-blue-500 rounded px-2 py-1 text-slate-200 outline-none text-xs"
                                       >
                                         <option value="">(Select Option)</option>
                                         {layer.options.map((opt, optIdx) => (
@@ -1431,6 +1479,7 @@ export function BulkImageCreatorModal({
                                         type="text"
                                         value={val}
                                         onChange={(e) => handleCellChange(idx, layer.id, e.target.value)}
+                                        onFocus={() => setSelectedRowIndex(idx)}
                                         placeholder={
                                           isAutoNumberLabel
                                             ? "(Auto from Number)"
@@ -1439,7 +1488,7 @@ export function BulkImageCreatorModal({
                                             : `Enter ${layer.name}...`
                                         }
                                         className={cn(
-                                          "w-full bg-transparent hover:bg-slate-800/80 focus:bg-slate-950 border border-transparent focus:border-blue-500/70 rounded px-2 py-1 text-slate-200 outline-none text-xs transition-colors",
+                                          "w-full bg-slate-950/40 hover:bg-slate-800/80 focus:bg-slate-950 border border-slate-800/80 focus:border-blue-500 rounded px-2 py-1.5 text-slate-200 outline-none text-xs transition-colors focus:ring-1 focus:ring-blue-500/30",
                                           isAutoNumberLabel && !val && "italic text-sky-400/80"
                                         )}
                                       />
@@ -1575,7 +1624,7 @@ export function BulkImageCreatorModal({
                     </tbody>
 
                     {/* Table Footer: Column Totals for Price tag columns */}
-                    <tfoot className="sticky bottom-0 z-20 bg-slate-950/95 backdrop-blur-md border-t-2 border-slate-700/80 shadow-[0_-4px_14px_rgba(0,0,0,0.6)]">
+                    <tfoot className="sm:sticky sm:bottom-0 z-10 bg-slate-950/95 backdrop-blur-md border-t-2 border-slate-700/80">
                       <tr>
                         {/* Index Total Symbol & Count */}
                         <td className="px-2 py-2.5 text-center font-mono font-bold text-amber-400 text-xs border-r border-slate-800 bg-slate-950/90" title={`Total: ${rows.length} entries`}>

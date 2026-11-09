@@ -481,9 +481,11 @@ export default function App() {
     if (typeof window === "undefined") return;
 
     let scrollTimeout: any = null;
+    let scrollTimeout2: any = null;
     let resizeRaf: any = null;
+    let inputRaf: any = null;
 
-    // Strictly vertical scroll helper: NEVER shifts horizontally, zero wobble
+    // Strictly vertical scroll helper: NEVER shifts horizontally, zero wobble, sticky-header aware
     const scrollInputStrictlyVertical = (target: HTMLElement, smooth = true) => {
       if (!target || !target.isConnected) return;
 
@@ -492,12 +494,13 @@ export default function App() {
         window.scrollTo({ left: 0, top: window.scrollY });
       }
 
-      // Find the scrollable ancestor container (overflowY auto/scroll)
+      // Find the scrollable ancestor container (overflow auto/scroll)
       let scrollContainer: HTMLElement | null = null;
       let curr: HTMLElement | null = target.parentElement;
       while (curr && curr !== document.body && curr !== document.documentElement) {
         const style = window.getComputedStyle(curr);
-        if ((style.overflowY === "auto" || style.overflowY === "scroll") && curr.scrollHeight > curr.clientHeight) {
+        const hasScroll = style.overflowY === "auto" || style.overflowY === "scroll" || style.overflow === "auto" || style.overflow === "scroll";
+        if (hasScroll) {
           scrollContainer = curr;
           break;
         }
@@ -511,12 +514,22 @@ export default function App() {
         const containerRect = scrollContainer.getBoundingClientRect();
         const targetRect = target.getBoundingClientRect();
 
-        // Position target comfortably in the upper ~28% of the visible scroll container
-        const offsetFromContainerTop = targetRect.top - containerRect.top;
-        const idealOffset = Math.max(50, Math.min(180, containerRect.height * 0.28));
-        const diff = offsetFromContainerTop - idealOffset;
+        // Check if there is a sticky thead in the container so we never hide under column headers
+        const thead = scrollContainer.querySelector('thead');
+        const theadHeight = thead ? thead.getBoundingClientRect().height : 0;
+        const safeTop = Math.max(theadHeight + 10, 50);
 
-        if (Math.abs(diff) > 15) {
+        // Visible bottom of the scroll container, capped by the software keyboard (visualViewport)
+        const vpBottom = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+        const visibleContainerBottom = Math.min(containerRect.bottom, vpBottom);
+        const visibleContainerHeight = Math.max(60, visibleContainerBottom - containerRect.top);
+
+        // Position target comfortably below the sticky header and well above the virtual keyboard
+        const targetOffsetFromTop = targetRect.top - containerRect.top;
+        const desiredOffset = Math.max(safeTop, Math.min(safeTop + 30, visibleContainerHeight * 0.35));
+        const diff = targetOffsetFromTop - desiredOffset;
+
+        if (Math.abs(diff) > 8) {
           scrollContainer.scrollTo({
             top: Math.max(0, scrollContainer.scrollTop + diff),
             left: 0,
@@ -526,9 +539,10 @@ export default function App() {
       } else {
         // Fallback: scroll document/window ONLY vertically
         const targetRect = target.getBoundingClientRect();
-        const idealTop = Math.max(70, window.innerHeight * 0.25);
+        const vpBottom = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+        const idealTop = Math.max(70, vpBottom * 0.28);
         const diff = targetRect.top - idealTop;
-        if (Math.abs(diff) > 15) {
+        if (Math.abs(diff) > 10) {
           window.scrollTo({
             top: Math.max(0, window.scrollY + diff),
             left: 0,
@@ -634,11 +648,32 @@ export default function App() {
         }
       }
 
-      // Single smooth vertical scroll aligned with keyboard emergence
+      // Smooth vertical alignment aligned with keyboard emergence (quick check + keyboard settle check)
       clearTimeout(scrollTimeout);
+      clearTimeout(scrollTimeout2);
       scrollTimeout = setTimeout(() => {
         scrollInputStrictlyVertical(target, true);
-      }, 100);
+      }, 80);
+      scrollTimeout2 = setTimeout(() => {
+        scrollInputStrictlyVertical(target, true);
+      }, 320);
+    };
+
+    // When typing, ensure active input stays visible above keyboard without wobble
+    const handleInput = () => {
+      if (window.innerWidth >= 1024) return;
+      if (inputRaf) cancelAnimationFrame(inputRaf);
+      inputRaf = requestAnimationFrame(() => {
+        const active = document.activeElement as HTMLElement | null;
+        if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) {
+          const rect = active.getBoundingClientRect();
+          const vpHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+          // If the typing input is currently pushed under the keyboard or scrolled off top:
+          if (rect.bottom > vpHeight - 20 || rect.top < 45) {
+            scrollInputStrictlyVertical(active, false);
+          }
+        }
+      });
     };
 
     const handleViewportChange = () => {
@@ -649,7 +684,7 @@ export default function App() {
         if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) {
           const rect = active.getBoundingClientRect();
           const vpHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
-          if (rect.bottom > vpHeight - 30 || rect.top < 60) {
+          if (rect.bottom > vpHeight - 25 || rect.top < 50) {
             scrollInputStrictlyVertical(active, true);
           }
         }
@@ -664,6 +699,7 @@ export default function App() {
     };
 
     document.addEventListener("focusin", handleFocusIn, { passive: true });
+    document.addEventListener("input", handleInput, { passive: true });
     window.addEventListener("scroll", handleScroll, { passive: true });
     window.addEventListener("keydown", handleKeyDown, true);
 
@@ -673,8 +709,11 @@ export default function App() {
 
     return () => {
       clearTimeout(scrollTimeout);
+      clearTimeout(scrollTimeout2);
       if (resizeRaf) cancelAnimationFrame(resizeRaf);
+      if (inputRaf) cancelAnimationFrame(inputRaf);
       document.removeEventListener("focusin", handleFocusIn);
+      document.removeEventListener("input", handleInput);
       window.removeEventListener("scroll", handleScroll);
       window.removeEventListener("keydown", handleKeyDown, true);
       if (window.visualViewport) {
