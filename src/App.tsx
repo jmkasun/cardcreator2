@@ -370,6 +370,7 @@ export default function App() {
   const [newFontName, setNewFontName] = useState("");
   const [userManagementPassword, setUserManagementPassword] = useState("");
   const [showSidebar, setShowSidebar] = useState(false);
+  const [mobileViewportHeight, setMobileViewportHeight] = useState<number | null>(null);
   const [isPreviewMode, setIsPreviewMode] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const saved = localStorage.getItem("sidebar_width");
@@ -447,6 +448,146 @@ export default function App() {
       fetchProjects();
     }
   }, [user?.username]);
+
+  // Track mobile visual viewport (keyboard height changes)
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const updateViewportHeight = () => {
+      if (window.innerWidth < 768 && window.visualViewport) {
+        setMobileViewportHeight(window.visualViewport.height);
+      } else {
+        setMobileViewportHeight(null);
+      }
+    };
+
+    updateViewportHeight();
+
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", updateViewportHeight);
+      window.visualViewport.addEventListener("scroll", updateViewportHeight);
+    }
+    window.addEventListener("resize", updateViewportHeight);
+
+    return () => {
+      if (window.visualViewport) {
+        window.visualViewport.removeEventListener("resize", updateViewportHeight);
+        window.visualViewport.removeEventListener("scroll", updateViewportHeight);
+      }
+      window.removeEventListener("resize", updateViewportHeight);
+    };
+  }, []);
+
+  // Mobile virtual keyboard auto-scroll: automatically scroll focused input into clear view when typing
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    let t1: any;
+    let t2: any;
+    let t3: any;
+
+    const scrollActiveIntoView = (target: HTMLElement) => {
+      if (!target || !target.isConnected) return;
+
+      try {
+        target.scrollIntoView({
+          behavior: "smooth",
+          block: "center",
+          inline: "nearest"
+        });
+      } catch {
+        target.scrollIntoView();
+      }
+
+      // Also ensure parent overflow-y-auto / scrollable container scrolls properly
+      let parent: HTMLElement | null = target.parentElement;
+      while (parent && parent !== document.body && parent !== document.documentElement) {
+        const style = window.getComputedStyle(parent);
+        if (style.overflowY === "auto" || style.overflowY === "scroll") {
+          const parentRect = parent.getBoundingClientRect();
+          const targetRect = target.getBoundingClientRect();
+          
+          // Place target in upper ~35% of visible container area
+          const offsetFromParentTop = targetRect.top - parentRect.top;
+          const idealOffset = parentRect.height * 0.35;
+          const diff = offsetFromParentTop - idealOffset;
+          
+          if (Math.abs(diff) > 20) {
+            parent.scrollTo({
+              top: Math.max(0, parent.scrollTop + diff),
+              behavior: "smooth"
+            });
+          }
+          break;
+        }
+        parent = parent.parentElement;
+      }
+    };
+
+    const handleFocusIn = (e: FocusEvent) => {
+      if (window.innerWidth >= 1024) return;
+      const target = e.target as HTMLElement;
+      if (!target) return;
+
+      const tag = target.tagName;
+      if (tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT") return;
+
+      if (tag === "INPUT") {
+        const type = (target as HTMLInputElement).type;
+        if (["checkbox", "radio", "file", "hidden", "button", "submit", "image"].includes(type)) {
+          return;
+        }
+      }
+
+      // Immediate scroll
+      scrollActiveIntoView(target);
+
+      // Mobile software keyboards take 200-400ms to animate up on iOS & Android.
+      // Retrying at 150ms, 350ms, and 600ms guarantees the textbox is scrolled above the keyboard!
+      clearTimeout(t1);
+      clearTimeout(t2);
+      clearTimeout(t3);
+
+      t1 = setTimeout(() => scrollActiveIntoView(target), 150);
+      t2 = setTimeout(() => scrollActiveIntoView(target), 350);
+      t3 = setTimeout(() => scrollActiveIntoView(target), 600);
+    };
+
+    // When typing (input event), keep input visible
+    const handleInput = (e: Event) => {
+      if (window.innerWidth >= 1024) return;
+      const target = e.target as HTMLElement;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) {
+        scrollActiveIntoView(target);
+      }
+    };
+
+    const handleViewportChange = () => {
+      if (window.innerWidth >= 1024) return;
+      const active = document.activeElement as HTMLElement | null;
+      if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT")) {
+        scrollActiveIntoView(active);
+      }
+    };
+
+    document.addEventListener("focusin", handleFocusIn, { passive: true });
+    document.addEventListener("input", handleInput, { passive: true });
+
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", handleViewportChange);
+    }
+
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+      clearTimeout(t3);
+      document.removeEventListener("focusin", handleFocusIn);
+      document.removeEventListener("input", handleInput);
+      if (window.visualViewport) {
+        window.visualViewport.removeEventListener("resize", handleViewportChange);
+      }
+    };
+  }, []);
 
   const imageCacheRef = useRef<HTMLImageElement | null>(null);
 
@@ -4635,9 +4776,13 @@ export default function App() {
         {/* Sidebar Left - Layers & Controls */}
         <aside 
           ref={sidebarRef}
-          style={{ width: window.innerWidth >= 768 ? sidebarWidth : undefined }}
+          style={{ 
+            width: window.innerWidth >= 768 ? sidebarWidth : undefined,
+            height: mobileViewportHeight && window.innerWidth < 768 ? `${mobileViewportHeight}px` : undefined,
+            maxHeight: mobileViewportHeight && window.innerWidth < 768 ? `${mobileViewportHeight}px` : undefined
+          }}
           className={cn(
-            "fixed inset-y-0 left-0 z-[60] bg-slate-900 border-r border-slate-800 flex flex-col transition-transform duration-300 md:relative md:translate-x-0 group/sidebar",
+            "fixed inset-y-0 left-0 z-[60] bg-slate-900 border-r border-slate-800 flex flex-col transition-transform duration-300 md:relative md:translate-x-0 group/sidebar max-h-[100dvh]",
             !sidebarWidth && "w-80",
             showSidebar ? "translate-x-0" : "-translate-x-full",
             isPreviewMode && "md:-translate-x-full md:absolute"
@@ -4710,7 +4855,7 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto custom-scrollbar">
+          <div className="flex-1 overflow-y-auto custom-scrollbar pb-72 md:pb-8">
             {/* Projects Section */}
             <div className="border-b border-slate-800">
               <div className="p-4 pb-2 flex items-center justify-between gap-1">

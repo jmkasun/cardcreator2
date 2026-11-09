@@ -1,1 +1,9 @@
 @import "tailwindcss";
+
+/* Ensure input elements have comfortable scroll-margin on mobile so they stay above the virtual keyboard */
+@media (max-width: 768px) {
+  input, textarea, select {
+    scroll-margin-bottom: 140px;
+    scroll-margin-top: 80px;
+  }
+}
