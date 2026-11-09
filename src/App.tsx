@@ -3125,7 +3125,7 @@ export default function App() {
           await navigator.share({
             files: [file],
             title: 'Shared Image',
-            text: 'Check out this image I created!',
+            text: '',
           });
           if (currentProjectId) {
             recordCreationEvent(currentProjectId, 'share');
