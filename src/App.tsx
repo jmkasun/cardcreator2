@@ -4,7 +4,7 @@ import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as
 import { cn } from "@/src/lib/utils";
 import { motion, AnimatePresence } from "motion/react";
 import { convertNumberToSinhala, numberToSinhalaWords, formatNumberForCanvas, isUnicodeFont } from "./utils/sinhalaConverter";
-import { BulkImageCreatorModal } from "./components/BulkImageCreatorModal";
+import { BulkImageCreatorModal, isPriceLayer } from "./components/BulkImageCreatorModal";
 
 interface User {
   username: string;
@@ -5351,7 +5351,7 @@ export default function App() {
                                     <span className="text-[9px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-1.5 py-0.5 rounded font-sans uppercase font-bold tracking-tight">
                                       Price Label {layer.numberFontMode === 'unicode' ? '(Unicode)' : '(FM)'}
                                     </span>
-                                  ) : layer.type === 'number' ? (
+                                  ) : (layer.type === 'number' || isPriceLayer(layer)) ? (
                                     <span className="text-[9px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.5 rounded font-sans uppercase font-bold tracking-tight flex items-center gap-1">
                                       <Coins size={10} className="shrink-0" /> Price {layer.hasNumberLabel && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" title="Label active" />}
                                     </span>
@@ -5469,7 +5469,7 @@ export default function App() {
                                     </div>
                                   </div>
                                 );
-                              })() : layer.type === 'number' ? (() => {
+                              })() : (layer.type === 'number' || isPriceLayer(layer)) ? (() => {
                                 const mode = layer.numberFontMode || 'fm';
                                 const convertedPreview = convertNumberToSinhala(layer.text, mode);
                                 const unicodePreview = numberToSinhalaWords(layer.text);
@@ -5481,17 +5481,19 @@ export default function App() {
                                       <div className="relative flex-1 min-w-0">
                                         <input
                                           type="text"
+                                          inputMode="decimal"
+                                          pattern="[0-9]*"
+                                          enterKeyHint="done"
+                                          autoComplete="off"
+                                          autoCorrect="off"
+                                          autoCapitalize="off"
+                                          spellCheck={false}
                                           value={layer.text}
                                           placeholder="Type price (e.g. 1000)..."
                                           onChange={(e) => handleNumberInputChange(layer.id, e.target.value)}
                                           onFocus={() => setSelectedLayerId(layer.id)}
                                           onClick={(e) => e.stopPropagation()}
-                                          className="bg-slate-900 border border-slate-700/50 rounded-lg pl-6 pr-2.5 py-1.5 text-sm w-full outline-none text-inherit focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500/20"
-                                          style={{ 
-                                            fontFamily: `"${layer.fontFamily}", sans-serif`,
-                                            fontWeight: layer.isBold ? 'bold' : 'normal',
-                                            fontStyle: layer.isItalic ? 'italic' : 'normal'
-                                          }}
+                                          className="bg-slate-900 border border-slate-700/50 rounded-lg pl-6 pr-2.5 py-1.5 text-sm w-full outline-none text-emerald-300 focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500/20 font-mono tracking-wider font-semibold"
                                         />
                                         <Coins size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-500 select-none pointer-events-none" />
                                       </div>
@@ -5640,6 +5642,8 @@ export default function App() {
                                   <div className="flex gap-1.5 items-center w-full">
                                     <input
                                       type="text"
+                                      inputMode={isPriceLayer(layer) ? "decimal" : undefined}
+                                      pattern={isPriceLayer(layer) ? "[0-9]*" : undefined}
                                       value={layer.text}
                                       onChange={(e) => updateLayer(layer.id, { text: e.target.value })}
                                       onFocus={() => setSelectedLayerId(layer.id)}
@@ -5686,6 +5690,8 @@ export default function App() {
                               ) : (
                                 <input
                                   type="text"
+                                  inputMode={isPriceLayer(layer) ? "decimal" : undefined}
+                                  pattern={isPriceLayer(layer) ? "[0-9]*" : undefined}
                                   value={layer.text}
                                   onChange={(e) => updateLayer(layer.id, { text: e.target.value })}
                                   onFocus={() => setSelectedLayerId(layer.id)}
@@ -5967,15 +5973,17 @@ export default function App() {
                             <div className="flex gap-2">
                               <input
                                 type="text"
+                                inputMode="decimal"
+                                pattern="[0-9]*"
+                                enterKeyHint="done"
+                                autoComplete="off"
+                                autoCorrect="off"
+                                autoCapitalize="off"
+                                spellCheck={false}
                                 value={selectedLayer.text}
                                 onChange={(e) => handleNumberInputChange(selectedLayer.id, e.target.value)}
                                 placeholder="Enter price (e.g. 1000, 25000)..."
-                                className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-emerald-500 font-mono"
-                                style={{ 
-                                  fontFamily: `"${selectedLayer.fontFamily}", sans-serif`,
-                                  fontWeight: selectedLayer.isBold ? 'bold' : 'normal',
-                                  fontStyle: selectedLayer.isItalic ? 'italic' : 'normal'
-                                }}
+                                className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-emerald-500 font-mono tracking-wider font-semibold text-emerald-300"
                               />
                               <select
                                 value={(selectedLayer.options || ["500", "1000", "1500", "2000", "2500", "5000", "10000"]).includes(selectedLayer.text) ? selectedLayer.text : ""}
@@ -6553,6 +6561,8 @@ export default function App() {
                             <span className="text-[10px] text-slate-500 font-mono w-5 text-center shrink-0">#{idx + 1}</span>
                             <input
                               type="text"
+                              inputMode="decimal"
+                              pattern="[0-9]*"
                               value={priceOpt}
                               onChange={(e) => updatePriceOption(selectedLayer.id, idx, e.target.value)}
                               placeholder="Price..."
