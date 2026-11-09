@@ -7478,9 +7478,9 @@ export default function App() {
           image={image || (projects.find(p => p.id === currentProjectId)?.imageUrl ?? '')}
           fonts={fonts}
           user={user}
-          onRecordCreationEvents={async (count: number) => {
+          onRecordCreationEvents={async (count: number, type?: 'copy' | 'download' | 'share') => {
             if (currentProjectId) {
-              await recordCreationEvent(currentProjectId, 'download', count);
+              await recordCreationEvent(currentProjectId, type || 'download', count);
             }
           }}
           onNotification={setNotification}

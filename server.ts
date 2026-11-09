@@ -302,6 +302,26 @@ async function initDb() {
           CREATE INDEX IF NOT EXISTS idx_creations_user_time ON font_app_image_creations (username, created_at DESC);
         `);
 
+        await safeQuery(`
+          CREATE TABLE IF NOT EXISTS font_app_bulk_history (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            project_name TEXT NOT NULL,
+            username TEXT NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            created_date DATE DEFAULT CURRENT_DATE,
+            total_cards INTEGER NOT NULL DEFAULT 0,
+            rows_data JSONB NOT NULL,
+            layers_data JSONB NOT NULL
+          );
+        `);
+        await safeQuery(`
+          CREATE INDEX IF NOT EXISTS idx_bulk_hist_proj_date ON font_app_bulk_history (project_id, created_date DESC, created_at DESC);
+        `);
+        await safeQuery(`
+          CREATE INDEX IF NOT EXISTS idx_bulk_hist_user_date ON font_app_bulk_history (username, created_date DESC);
+        `);
+
         await safeQuery(
           "INSERT INTO users (username, password, role) VALUES ('admin', 'admin@1234', 'admin') ON CONFLICT (username) DO UPDATE SET role = 'admin'"
         );
@@ -1281,6 +1301,188 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
       res.json({ success: true, message: "Tracked" });
     } catch (err) {
       console.error("Error tracking image creation:", err);
+      res.status(500).json({ success: false, message: "Internal server error" });
+    }
+  });
+
+  // Bulk Image Creation History Endpoints
+  app.post("/api/bulk-history", async (req, res) => {
+    try {
+      const { id, projectId, projectName, username, createdAt, createdDate, totalCards, rowsData, layersData } = req.body;
+      if (!projectId || !rowsData) {
+        return res.status(400).json({ success: false, message: "Missing required fields" });
+      }
+      const recordId = id || `bh_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      const effectiveDate = createdDate || new Date().toISOString().split("T")[0];
+      const timestamp = createdAt ? new Date(createdAt) : new Date();
+
+      if (HAS_POSTGRES) {
+        await safeQuery(
+          `INSERT INTO font_app_bulk_history (id, project_id, project_name, username, created_at, created_date, total_cards, rows_data, layers_data)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           ON CONFLICT (id) DO UPDATE SET
+           rows_data = EXCLUDED.rows_data,
+           layers_data = EXCLUDED.layers_data,
+           total_cards = EXCLUDED.total_cards`,
+          [
+            recordId,
+            projectId,
+            projectName || "Bulk Project",
+            username || "user",
+            timestamp,
+            effectiveDate,
+            totalCards || (Array.isArray(rowsData) ? rowsData.length : 0),
+            JSON.stringify(rowsData || []),
+            JSON.stringify(layersData || [])
+          ]
+        );
+      } else {
+        ensureFallbackDataFile();
+        const raw = fs.readFileSync(DATA_FILE, "utf-8");
+        const data = JSON.parse(raw);
+        if (!data.bulkHistory) data.bulkHistory = [];
+        const existingIdx = data.bulkHistory.findIndex((h: any) => h.id === recordId);
+        const newEntry = {
+          id: recordId,
+          projectId,
+          projectName: projectName || "Bulk Project",
+          username: username || "user",
+          createdAt: timestamp.toISOString(),
+          createdDate: effectiveDate,
+          totalCards: totalCards || (Array.isArray(rowsData) ? rowsData.length : 0),
+          rowsData,
+          layersData
+        };
+        if (existingIdx >= 0) {
+          data.bulkHistory[existingIdx] = newEntry;
+        } else {
+          data.bulkHistory.unshift(newEntry);
+        }
+        fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+      }
+      res.json({ success: true, id: recordId });
+    } catch (err) {
+      console.error("Error saving bulk history:", err);
+      res.status(500).json({ success: false, message: "Internal server error" });
+    }
+  });
+
+  app.get("/api/bulk-history", async (req, res) => {
+    try {
+      const { projectId, username, date } = req.query;
+      if (HAS_POSTGRES) {
+        let query = `
+          SELECT id, project_id as "projectId", project_name as "projectName",
+                 username, created_at as "createdAt", 
+                 TO_CHAR(created_date, 'YYYY-MM-DD') as "createdDate",
+                 total_cards as "totalCards", rows_data as "rowsData", layers_data as "layersData"
+          FROM font_app_bulk_history
+          WHERE 1=1
+        `;
+        const params: any[] = [];
+        if (projectId) {
+          params.push(projectId);
+          query += ` AND project_id = $${params.length}`;
+        }
+        if (username) {
+          params.push(username);
+          query += ` AND username = $${params.length}`;
+        }
+        if (date && date !== 'all' && date !== 'undefined' && date !== 'null') {
+          params.push(String(date).trim());
+          query += ` AND (TO_CHAR(created_date, 'YYYY-MM-DD') = $${params.length}::TEXT OR TO_CHAR(created_at, 'YYYY-MM-DD') = $${params.length}::TEXT)`;
+        }
+        query += ` ORDER BY created_at DESC LIMIT 100`;
+
+        const result = await safeQuery(query, params);
+        return res.json(result.rows);
+      } else {
+        ensureFallbackDataFile();
+        const raw = fs.readFileSync(DATA_FILE, "utf-8");
+        const data = JSON.parse(raw);
+        let list = data.bulkHistory || [];
+        if (projectId) list = list.filter((h: any) => h.projectId === projectId);
+        if (username) list = list.filter((h: any) => h.username === username);
+        if (date && date !== 'all') {
+          const dStr = String(date).trim();
+          list = list.filter((h: any) => h.createdDate === dStr || (h.createdAt && h.createdAt.startsWith(dStr)));
+        }
+        return res.json(list);
+      }
+    } catch (err) {
+      console.error("Error fetching bulk history:", err);
+      res.status(500).json({ success: false, message: "Internal server error" });
+    }
+  });
+
+  app.get("/api/bulk-history/dates", async (req, res) => {
+    try {
+      const { projectId, username } = req.query;
+      if (HAS_POSTGRES) {
+        let query = `
+          SELECT TO_CHAR(created_date, 'YYYY-MM-DD') as "date", 
+                 COUNT(id) as "batchCount", 
+                 SUM(total_cards) as "totalCards"
+          FROM font_app_bulk_history
+          WHERE 1=1
+        `;
+        const params: any[] = [];
+        if (projectId) {
+          params.push(projectId);
+          query += ` AND project_id = $${params.length}`;
+        }
+        if (username) {
+          params.push(username);
+          query += ` AND username = $${params.length}`;
+        }
+        query += ` GROUP BY TO_CHAR(created_date, 'YYYY-MM-DD') ORDER BY "date" DESC LIMIT 60`;
+        const result = await safeQuery(query, params);
+        return res.json(result.rows.map((r: any) => ({
+          date: r.date,
+          batchCount: Number(r.batchCount || 0),
+          totalCards: Number(r.totalCards || 0)
+        })));
+      } else {
+        ensureFallbackDataFile();
+        const raw = fs.readFileSync(DATA_FILE, "utf-8");
+        const data = JSON.parse(raw);
+        let list = data.bulkHistory || [];
+        if (projectId) list = list.filter((h: any) => h.projectId === projectId);
+        if (username) list = list.filter((h: any) => h.username === username);
+        const dateMap: Record<string, { date: string; batchCount: number; totalCards: number }> = {};
+        list.forEach((item: any) => {
+          const d = item.createdDate || item.createdAt?.split("T")[0];
+          if (d) {
+            if (!dateMap[d]) dateMap[d] = { date: d, batchCount: 0, totalCards: 0 };
+            dateMap[d].batchCount++;
+            dateMap[d].totalCards += item.totalCards || (item.rowsData?.length || 0);
+          }
+        });
+        return res.json(Object.values(dateMap).sort((a, b) => b.date.localeCompare(a.date)));
+      }
+    } catch (err) {
+      console.error("Error fetching bulk history dates:", err);
+      res.status(500).json({ success: false, message: "Internal server error" });
+    }
+  });
+
+  app.delete("/api/bulk-history/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      if (HAS_POSTGRES) {
+        await safeQuery("DELETE FROM font_app_bulk_history WHERE id = $1", [id]);
+      } else {
+        ensureFallbackDataFile();
+        const raw = fs.readFileSync(DATA_FILE, "utf-8");
+        const data = JSON.parse(raw);
+        if (data.bulkHistory) {
+          data.bulkHistory = data.bulkHistory.filter((h: any) => h.id !== id);
+          fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+        }
+      }
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Error deleting bulk history item:", err);
       res.status(500).json({ success: false, message: "Internal server error" });
     }
   });
