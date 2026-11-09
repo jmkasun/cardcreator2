@@ -385,10 +385,46 @@ export function BulkImageCreatorModal({
     }
   }, [isOpen, activeTab, selectedHistoryDate, project.id]);
 
-  if (!isOpen) return null;
+  // Ref for table scroll container and pending row to focus
+  const tableScrollContainerRef = useRef<HTMLDivElement>(null);
+  const pendingFocusRowIndexRef = useRef<number | null>(null);
 
-  // Add new rows
+  // Automatically focus first column when a new row is added
+  useEffect(() => {
+    if (pendingFocusRowIndexRef.current === null) return;
+    const targetIdx = pendingFocusRowIndexRef.current;
+    pendingFocusRowIndexRef.current = null;
+
+    const timer = setTimeout(() => {
+      const container = tableScrollContainerRef.current;
+      if (!container) return;
+
+      const rowEl = container.querySelector(`tr[data-row-index="${targetIdx}"]`) as HTMLElement | null;
+      if (rowEl) {
+        const inputToFocus = (rowEl.querySelector('[data-first-col="true"]') ||
+                              rowEl.querySelector('input:not([type="hidden"]):not([disabled]), select:not([disabled])')) as HTMLElement | null;
+        if (inputToFocus) {
+          inputToFocus.focus();
+          if (inputToFocus instanceof HTMLInputElement && (inputToFocus.type === 'text' || inputToFocus.type === 'number')) {
+            try { inputToFocus.select(); } catch {}
+          }
+          // Ensure newly focused row is comfortably scrolled into view
+          try {
+            rowEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+          } catch {}
+        }
+      }
+    }, 50);
+
+    return () => clearTimeout(timer);
+  }, [rows.length]);
+
+  // Add new rows and automatically focus the first column of the newly added row
   const handleAddRows = (count: number) => {
+    const targetIndex = rows.length;
+    pendingFocusRowIndexRef.current = targetIndex;
+    setSelectedRowIndex(targetIndex);
+
     setRows(prev => {
       const next = [...prev];
       for (let i = 0; i < count; i++) {
@@ -416,6 +452,8 @@ export function BulkImageCreatorModal({
 
   // Duplicate a row
   const handleDuplicateRow = (idx: number) => {
+    pendingFocusRowIndexRef.current = idx + 1;
+    setSelectedRowIndex(idx + 1);
     setRows(prev => {
       const target = prev[idx];
       if (!target) return prev;
@@ -428,7 +466,6 @@ export function BulkImageCreatorModal({
       next.splice(idx + 1, 0, copy);
       return next;
     });
-    setSelectedRowIndex(idx + 1);
   };
 
   // Delete a row
@@ -1208,33 +1245,6 @@ export function BulkImageCreatorModal({
             {/* Toolbar Bar */}
             <div className="flex items-center justify-between gap-1.5 sm:gap-2 px-2.5 sm:px-6 py-1.5 sm:py-2.5 bg-slate-950/60 border-b border-slate-800/80 shrink-0 text-xs overflow-x-auto">
               <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-                {/* Add Row Buttons */}
-                <div className="flex items-center rounded-lg bg-slate-800 p-0.5 border border-slate-700">
-                  <button
-                    onClick={() => handleAddRows(1)}
-                    className="flex items-center gap-1 px-2.5 py-1 text-slate-200 hover:text-white hover:bg-slate-700/60 rounded transition-colors"
-                    title="Add 1 new entry row"
-                  >
-                    <Plus size={13} className="text-blue-400" />
-                    <span>Add Row</span>
-                  </button>
-                  <span className="text-slate-600">|</span>
-                  <button
-                    onClick={() => handleAddRows(5)}
-                    className="px-2 py-1 text-slate-400 hover:text-white hover:bg-slate-700/60 rounded transition-colors"
-                    title="Add 5 new entry rows"
-                  >
-                    +5
-                  </button>
-                  <button
-                    onClick={() => handleAddRows(10)}
-                    className="px-2 py-1 text-slate-400 hover:text-white hover:bg-slate-700/60 rounded transition-colors"
-                    title="Add 10 new entry rows"
-                  >
-                    +10
-                  </button>
-                </div>
-
                 {/* Paste from Excel Button */}
                 <button
                   onClick={() => setShowPasteModal(true)}
@@ -1285,23 +1295,6 @@ export function BulkImageCreatorModal({
                     <span>Reset</span>
                   </button>
                 )}
-
-                {/* Price Tag Column Total Badges in Toolbar */}
-                {priceColumnsList.length > 0 && (
-                  <div className="flex items-center gap-1.5 pl-2 border-l border-slate-800">
-                    {priceColumnsList.map(([layerId, stat]) => (
-                      <div
-                        key={layerId}
-                        className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-300 font-mono text-xs shadow-sm"
-                        title={`${stat.label} Total (${stat.count} rows with value, Avg: ${formatPriceNumber(Math.round(stat.avg))})`}
-                      >
-                        <Coins size={13} className="text-amber-400 shrink-0" />
-                        <span className="text-slate-300 font-sans text-[11px] font-medium">{stat.label} Total:</span>
-                        <strong className="text-amber-200">{formatPriceNumber(stat.total)}</strong>
-                      </div>
-                    ))}
-                  </div>
-                )}
               </div>
 
               {/* Action Buttons: Create Button (no bulk download) + Optional ZIP download */}
@@ -1349,7 +1342,7 @@ export function BulkImageCreatorModal({
               
               {/* Spreadsheet Grid */}
               <div className="flex-1 flex flex-col min-w-0 bg-slate-900 overflow-hidden">
-                <div className="flex-1 overflow-auto border-r border-slate-800/80">
+                <div ref={tableScrollContainerRef} className="flex-1 overflow-auto border-r border-slate-800/80">
                   <table className="w-full border-collapse text-left text-xs">
                     {/* Table Header */}
                     <thead className="sticky top-0 z-20 bg-slate-950/95 backdrop-blur-sm border-b border-slate-800 text-slate-400 select-none shadow-sm">
@@ -1425,6 +1418,7 @@ export function BulkImageCreatorModal({
                         return (
                           <tr
                             key={row.id}
+                            data-row-index={idx}
                             onClick={() => setSelectedRowIndex(idx)}
                             className={cn(
                               "transition-colors group cursor-pointer",
@@ -1444,10 +1438,12 @@ export function BulkImageCreatorModal({
                             </td>
 
                             {/* Layer Columns */}
-                            {activeLayers.map((layer) => {
+                            {activeLayers.map((layer, colIdx) => {
                               const val = row.values[layer.id] ?? "";
                               const isAutoNumberLabel = layer.isNumberLabel && layer.linkedNumberId;
                               const isAutoListLabel = layer.isListLabel && layer.linkedListId;
+                              const isFirstCol = colIdx === 0;
+                              const isLastCell = colIdx === activeLayers.length - 1 && idx === rows.length - 1;
 
                               return (
                                 <td key={layer.id} className="px-2 py-1.5 border-r border-slate-800/60">
@@ -1458,6 +1454,14 @@ export function BulkImageCreatorModal({
                                         value={val}
                                         onChange={(e) => handleCellChange(idx, layer.id, e.target.value)}
                                         onFocus={() => setSelectedRowIndex(idx)}
+                                        data-first-col={isFirstCol ? "true" : undefined}
+                                        onKeyDown={(e) => {
+                                          if (e.key === 'Enter' && isLastCell) {
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                            handleAddRows(1);
+                                          }
+                                        }}
                                         className="w-full bg-slate-950/70 border border-slate-800 focus:border-blue-500 rounded px-2 py-1 text-slate-200 outline-none text-xs font-mono"
                                       />
                                     ) : layer.type === 'list' && layer.options && layer.options.length > 0 ? (
@@ -1465,6 +1469,14 @@ export function BulkImageCreatorModal({
                                         value={val}
                                         onChange={(e) => handleCellChange(idx, layer.id, e.target.value)}
                                         onFocus={() => setSelectedRowIndex(idx)}
+                                        data-first-col={isFirstCol ? "true" : undefined}
+                                        onKeyDown={(e) => {
+                                          if (e.key === 'Enter' && isLastCell) {
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                            handleAddRows(1);
+                                          }
+                                        }}
                                         className="w-full bg-slate-950/70 border border-slate-800 focus:border-blue-500 rounded px-2 py-1 text-slate-200 outline-none text-xs"
                                       >
                                         <option value="">(Select Option)</option>
@@ -1480,6 +1492,14 @@ export function BulkImageCreatorModal({
                                         value={val}
                                         onChange={(e) => handleCellChange(idx, layer.id, e.target.value)}
                                         onFocus={() => setSelectedRowIndex(idx)}
+                                        data-first-col={isFirstCol ? "true" : undefined}
+                                        onKeyDown={(e) => {
+                                          if (e.key === 'Enter' && isLastCell) {
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                            handleAddRows(1);
+                                          }
+                                        }}
                                         placeholder={
                                           isAutoNumberLabel
                                             ? "(Auto from Number)"
