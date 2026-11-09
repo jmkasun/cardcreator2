@@ -465,62 +465,157 @@ export default function App() {
 
     if (window.visualViewport) {
       window.visualViewport.addEventListener("resize", updateViewportHeight);
-      window.visualViewport.addEventListener("scroll", updateViewportHeight);
     }
     window.addEventListener("resize", updateViewportHeight);
 
     return () => {
       if (window.visualViewport) {
         window.visualViewport.removeEventListener("resize", updateViewportHeight);
-        window.visualViewport.removeEventListener("scroll", updateViewportHeight);
       }
       window.removeEventListener("resize", updateViewportHeight);
     };
   }, []);
 
-  // Mobile virtual keyboard auto-scroll: automatically scroll focused input into clear view when typing
+  // Mobile focus alignment & Enter/Return key navigation to next editable input
   useEffect(() => {
     if (typeof window === "undefined") return;
 
-    let t1: any;
-    let t2: any;
-    let t3: any;
+    let scrollTimeout: any = null;
+    let resizeRaf: any = null;
 
-    const scrollActiveIntoView = (target: HTMLElement) => {
+    // Strictly vertical scroll helper: NEVER shifts horizontally, zero wobble
+    const scrollInputStrictlyVertical = (target: HTMLElement, smooth = true) => {
       if (!target || !target.isConnected) return;
 
-      try {
-        target.scrollIntoView({
-          behavior: "smooth",
-          block: "center",
-          inline: "nearest"
-        });
-      } catch {
-        target.scrollIntoView();
+      // Lock window horizontal scroll immediately
+      if (window.scrollX !== 0) {
+        window.scrollTo({ left: 0, top: window.scrollY });
       }
 
-      // Also ensure parent overflow-y-auto / scrollable container scrolls properly
-      let parent: HTMLElement | null = target.parentElement;
-      while (parent && parent !== document.body && parent !== document.documentElement) {
-        const style = window.getComputedStyle(parent);
-        if (style.overflowY === "auto" || style.overflowY === "scroll") {
-          const parentRect = parent.getBoundingClientRect();
-          const targetRect = target.getBoundingClientRect();
-          
-          // Place target in upper ~35% of visible container area
-          const offsetFromParentTop = targetRect.top - parentRect.top;
-          const idealOffset = parentRect.height * 0.35;
-          const diff = offsetFromParentTop - idealOffset;
-          
-          if (Math.abs(diff) > 20) {
-            parent.scrollTo({
-              top: Math.max(0, parent.scrollTop + diff),
-              behavior: "smooth"
-            });
-          }
+      // Find the scrollable ancestor container (overflowY auto/scroll)
+      let scrollContainer: HTMLElement | null = null;
+      let curr: HTMLElement | null = target.parentElement;
+      while (curr && curr !== document.body && curr !== document.documentElement) {
+        const style = window.getComputedStyle(curr);
+        if ((style.overflowY === "auto" || style.overflowY === "scroll") && curr.scrollHeight > curr.clientHeight) {
+          scrollContainer = curr;
           break;
         }
-        parent = parent.parentElement;
+        curr = curr.parentElement;
+      }
+
+      if (scrollContainer) {
+        // Guarantee container never scrolls horizontally
+        scrollContainer.scrollLeft = 0;
+
+        const containerRect = scrollContainer.getBoundingClientRect();
+        const targetRect = target.getBoundingClientRect();
+
+        // Position target comfortably in the upper ~28% of the visible scroll container
+        const offsetFromContainerTop = targetRect.top - containerRect.top;
+        const idealOffset = Math.max(50, Math.min(180, containerRect.height * 0.28));
+        const diff = offsetFromContainerTop - idealOffset;
+
+        if (Math.abs(diff) > 15) {
+          scrollContainer.scrollTo({
+            top: Math.max(0, scrollContainer.scrollTop + diff),
+            left: 0,
+            behavior: smooth ? "smooth" : "auto"
+          });
+        }
+      } else {
+        // Fallback: scroll document/window ONLY vertically
+        const targetRect = target.getBoundingClientRect();
+        const idealTop = Math.max(70, window.innerHeight * 0.25);
+        const diff = targetRect.top - idealTop;
+        if (Math.abs(diff) > 15) {
+          window.scrollTo({
+            top: Math.max(0, window.scrollY + diff),
+            left: 0,
+            behavior: smooth ? "smooth" : "auto"
+          });
+        }
+      }
+
+      if (window.scrollX !== 0) {
+        window.scrollTo({ left: 0, top: window.scrollY });
+      }
+    };
+
+    // Query visible, editable input elements in DOM order
+    const getEditableInputs = (container: Element | Document): HTMLElement[] => {
+      const selector = [
+        'input:not([type="hidden"]):not([type="file"]):not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]):not([type="reset"]):not([type="color"]):not([disabled]):not([readonly]):not([tabindex="-1"])',
+        'textarea:not([disabled]):not([readonly]):not([tabindex="-1"])'
+      ].join(', ');
+
+      const list = Array.from(container.querySelectorAll<HTMLElement>(selector));
+      return list.filter(el => {
+        if (el.offsetParent === null && window.getComputedStyle(el).position !== 'fixed') {
+          return false;
+        }
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && window.getComputedStyle(el).visibility !== 'hidden';
+      });
+    };
+
+    // Enter / Return key navigation: focus next editable input
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Enter' || e.isComposing) return;
+
+      const active = document.activeElement as HTMLElement | null;
+      if (!active) return;
+
+      const tag = active.tagName.toUpperCase();
+      if (tag === 'INPUT') {
+        const inputType = ((active as HTMLInputElement).type || 'text').toLowerCase();
+        if (['checkbox', 'radio', 'button', 'submit', 'reset', 'file', 'color', 'image', 'hidden'].includes(inputType)) {
+          return;
+        }
+
+        // If inside a form
+        const form = active.closest('form');
+        if (form) {
+          const formInputs = getEditableInputs(form);
+          const formIdx = formInputs.indexOf(active);
+          // If not the last input in the form, move to next input instead of early submitting
+          if (formIdx !== -1 && formIdx < formInputs.length - 1) {
+            e.preventDefault();
+            const next = formInputs[formIdx + 1];
+            next.focus();
+            if (next instanceof HTMLInputElement && (next.type === 'text' || next.type === 'password' || next.type === 'number')) {
+              try { next.select(); } catch {}
+            }
+            scrollInputStrictlyVertical(next, true);
+            return;
+          }
+          // If it is the last input in the form, allow natural form submit
+          return;
+        }
+
+        // Outside a form (e.g. card layer inputs list or modal dialog)
+        const scope = active.closest('[role="dialog"], aside, .modal-container') || document.body;
+        let inputs = getEditableInputs(scope);
+        let currIndex = inputs.indexOf(active);
+
+        if (currIndex === -1) {
+          inputs = getEditableInputs(document.body);
+          currIndex = inputs.indexOf(active);
+        }
+
+        if (currIndex !== -1 && currIndex < inputs.length - 1) {
+          e.preventDefault();
+          const next = inputs[currIndex + 1];
+          next.focus();
+          if (next instanceof HTMLInputElement && (next.type === 'text' || next.type === 'number')) {
+            try { next.select(); } catch {}
+          }
+          scrollInputStrictlyVertical(next, true);
+        } else if (currIndex === inputs.length - 1) {
+          // Last input in sequence: blur so mobile keyboard closes smoothly
+          e.preventDefault();
+          active.blur();
+        }
       }
     };
 
@@ -533,56 +628,55 @@ export default function App() {
       if (tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT") return;
 
       if (tag === "INPUT") {
-        const type = (target as HTMLInputElement).type;
+        const type = ((target as HTMLInputElement).type || "").toLowerCase();
         if (["checkbox", "radio", "file", "hidden", "button", "submit", "image"].includes(type)) {
           return;
         }
       }
 
-      // Immediate scroll
-      scrollActiveIntoView(target);
-
-      // Mobile software keyboards take 200-400ms to animate up on iOS & Android.
-      // Retrying at 150ms, 350ms, and 600ms guarantees the textbox is scrolled above the keyboard!
-      clearTimeout(t1);
-      clearTimeout(t2);
-      clearTimeout(t3);
-
-      t1 = setTimeout(() => scrollActiveIntoView(target), 150);
-      t2 = setTimeout(() => scrollActiveIntoView(target), 350);
-      t3 = setTimeout(() => scrollActiveIntoView(target), 600);
-    };
-
-    // When typing (input event), keep input visible
-    const handleInput = (e: Event) => {
-      if (window.innerWidth >= 1024) return;
-      const target = e.target as HTMLElement;
-      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) {
-        scrollActiveIntoView(target);
-      }
+      // Single smooth vertical scroll aligned with keyboard emergence
+      clearTimeout(scrollTimeout);
+      scrollTimeout = setTimeout(() => {
+        scrollInputStrictlyVertical(target, true);
+      }, 100);
     };
 
     const handleViewportChange = () => {
       if (window.innerWidth >= 1024) return;
-      const active = document.activeElement as HTMLElement | null;
-      if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT")) {
-        scrollActiveIntoView(active);
+      if (resizeRaf) cancelAnimationFrame(resizeRaf);
+      resizeRaf = requestAnimationFrame(() => {
+        const active = document.activeElement as HTMLElement | null;
+        if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) {
+          const rect = active.getBoundingClientRect();
+          const vpHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+          if (rect.bottom > vpHeight - 30 || rect.top < 60) {
+            scrollInputStrictlyVertical(active, true);
+          }
+        }
+      });
+    };
+
+    // Always reset any horizontal scroll if detected
+    const handleScroll = () => {
+      if (window.scrollX !== 0) {
+        window.scrollTo({ left: 0, top: window.scrollY });
       }
     };
 
     document.addEventListener("focusin", handleFocusIn, { passive: true });
-    document.addEventListener("input", handleInput, { passive: true });
+    window.addEventListener("scroll", handleScroll, { passive: true });
+    window.addEventListener("keydown", handleKeyDown, true);
 
     if (window.visualViewport) {
       window.visualViewport.addEventListener("resize", handleViewportChange);
     }
 
     return () => {
-      clearTimeout(t1);
-      clearTimeout(t2);
-      clearTimeout(t3);
+      clearTimeout(scrollTimeout);
+      if (resizeRaf) cancelAnimationFrame(resizeRaf);
       document.removeEventListener("focusin", handleFocusIn);
-      document.removeEventListener("input", handleInput);
+      window.removeEventListener("scroll", handleScroll);
+      window.removeEventListener("keydown", handleKeyDown, true);
       if (window.visualViewport) {
         window.visualViewport.removeEventListener("resize", handleViewportChange);
       }
@@ -3307,7 +3401,7 @@ export default function App() {
               <button
                 onClick={shareWhatsApp}
                 title="Share on WhatsApp"
-                className="p-1.5 sm:p-2 bg-green-600/20 hover:bg-green-600/30 text-green-400 rounded-lg transition-all border border-green-600/30 shrink-0"
+                className="hidden p-1.5 sm:p-2 bg-green-600/20 hover:bg-green-600/30 text-green-400 rounded-lg transition-all border border-green-600/30 shrink-0"
               >
                 <MessageCircle className="w-4 h-4 sm:w-[18px] sm:h-[18px]" />
               </button>
@@ -4782,8 +4876,7 @@ export default function App() {
             maxHeight: mobileViewportHeight && window.innerWidth < 768 ? `${mobileViewportHeight}px` : undefined
           }}
           className={cn(
-            "fixed inset-y-0 left-0 z-[60] bg-slate-900 border-r border-slate-800 flex flex-col transition-transform duration-300 md:relative md:translate-x-0 group/sidebar max-h-[100dvh]",
-            !sidebarWidth && "w-80",
+            "fixed inset-y-0 left-0 z-[60] bg-slate-900 border-r border-slate-800 flex flex-col transition-transform duration-300 md:relative md:translate-x-0 group/sidebar max-h-[100dvh] overflow-x-hidden w-[90vw] max-w-sm sm:max-w-md md:w-auto",
             showSidebar ? "translate-x-0" : "-translate-x-full",
             isPreviewMode && "md:-translate-x-full md:absolute"
           )}
@@ -4855,7 +4948,7 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto custom-scrollbar pb-72 md:pb-8">
+          <div className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar pb-72 md:pb-8">
             {/* Projects Section */}
             <div className="border-b border-slate-800">
               <div className="p-4 pb-2 flex items-center justify-between gap-1">

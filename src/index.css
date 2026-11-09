@@ -1,9 +1,40 @@
 @import "tailwindcss";
 
-/* Ensure input elements have comfortable scroll-margin on mobile so they stay above the virtual keyboard */
+html, body {
+  overflow-x: hidden !important;
+  max-width: 100vw !important;
+  width: 100% !important;
+  overscroll-behavior-x: none !important;
+  -webkit-text-size-adjust: 100%;
+}
+
+#root {
+  overflow-x: hidden !important;
+  max-width: 100vw !important;
+  width: 100% !important;
+  min-height: 100%;
+}
+
+/* Ensure input elements have comfortable scroll-margin and at least 16px font-size on mobile
+   so iOS/Android doesn't auto-zoom or wobble horizontally */
 @media (max-width: 768px) {
+  input[type="text"],
+  input[type="number"],
+  input[type="password"],
+  input[type="email"],
+  input[type="search"],
+  input[type="tel"],
+  input[type="url"],
+  input[type="date"],
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+
   input, textarea, select {
-    scroll-margin-bottom: 140px;
     scroll-margin-top: 80px;
+    scroll-margin-bottom: 160px;
+    scroll-margin-left: 0px !important;
+    scroll-margin-right: 0px !important;
   }
 }
