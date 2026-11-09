@@ -15,7 +15,8 @@ import { cn } from "../lib/utils";
 /**
  * Checks if a layer represents a numeric Price tag column
  */
-export function isPriceLayer(layer: TextLayer): boolean {
+export function isPriceLayer(layer?: Partial<TextLayer> | null): boolean {
+  if (!layer) return false;
   if (layer.type === 'number') return true;
   // Ignore linked words labels or list labels
   if (layer.isNumberLabel || layer.isListLabel) return false;
@@ -1444,6 +1445,7 @@ export function BulkImageCreatorModal({
                               const isAutoListLabel = layer.isListLabel && layer.linkedListId;
                               const isFirstCol = colIdx === 0;
                               const isLastCell = colIdx === activeLayers.length - 1 && idx === rows.length - 1;
+                              const isPrice = isPriceLayer(layer);
 
                               return (
                                 <td key={layer.id} className="px-2 py-1.5 border-r border-slate-800/60">
@@ -1489,6 +1491,9 @@ export function BulkImageCreatorModal({
                                     ) : (
                                       <input
                                         type="text"
+                                        inputMode={isPrice || layer.type === 'number' ? "decimal" : undefined}
+                                        pattern={isPrice || layer.type === 'number' ? "[0-9]*" : undefined}
+                                        enterKeyHint={isLastCell ? "done" : "next"}
                                         value={val}
                                         onChange={(e) => handleCellChange(idx, layer.id, e.target.value)}
                                         onFocus={() => setSelectedRowIndex(idx)}
@@ -1505,11 +1510,14 @@ export function BulkImageCreatorModal({
                                             ? "(Auto from Number)"
                                             : isAutoListLabel
                                             ? "(Auto from List)"
+                                            : isPrice
+                                            ? "Enter price..."
                                             : `Enter ${layer.name}...`
                                         }
                                         className={cn(
                                           "w-full bg-slate-950/40 hover:bg-slate-800/80 focus:bg-slate-950 border border-slate-800/80 focus:border-blue-500 rounded px-2 py-1.5 text-slate-200 outline-none text-xs transition-colors focus:ring-1 focus:ring-blue-500/30",
-                                          isAutoNumberLabel && !val && "italic text-sky-400/80"
+                                          isAutoNumberLabel && !val && "italic text-sky-400/80",
+                                          (isPrice || layer.type === 'number') && "font-mono"
                                         )}
                                       />
                                     )}
