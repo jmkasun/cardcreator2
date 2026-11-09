@@ -1,9 +1,10 @@
 import React, { useState, useRef, useEffect } from "react";
 import { useDropzone } from "react-dropzone";
-import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, ChevronUp, RefreshCw, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check, Lock, Unlock, FileUp, FileDown, Copy, Undo2, List, Eye, EyeOff, Tag, Move, Hash, ListOrdered, Coins, Loader2, Sparkles, BarChart3, MoreVertical } from "lucide-react";
+import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, ChevronUp, RefreshCw, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check, Lock, Unlock, FileUp, FileDown, Copy, Undo2, List, Eye, EyeOff, Tag, Move, Hash, ListOrdered, Coins, Loader2, Sparkles, BarChart3, MoreVertical, Layers } from "lucide-react";
 import { cn } from "@/src/lib/utils";
 import { motion, AnimatePresence } from "motion/react";
 import { convertNumberToSinhala, numberToSinhalaWords, formatNumberForCanvas, isUnicodeFont } from "./utils/sinhalaConverter";
+import { BulkImageCreatorModal } from "./components/BulkImageCreatorModal";
 
 interface User {
   username: string;
@@ -44,12 +45,84 @@ function escapeCssFontFamily(family: string): string {
   return family.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
+function generateFontAliases(familyName: string): string[] {
+  if (!familyName) return [];
+  const set = new Set<string>();
+  const raw = familyName.trim();
+  set.add(raw);
+
+  const clean = formatFontDisplayName(raw);
+  set.add(clean);
+
+  // Hyphens, underscores, spaces interchange
+  set.add(clean.replace(/-/g, "_"));
+  set.add(clean.replace(/_/g, "-"));
+  set.add(clean.replace(/\s+/g, "_"));
+  set.add(clean.replace(/\s+/g, "-"));
+
+  // Dotless
+  set.add(clean.replace(/\./g, ""));
+  set.add(clean.replace(/\./g, "_"));
+  set.add(clean.replace(/\./g, "-"));
+  set.add(clean.replace(/[._\s-]+/g, "_"));
+  set.add(clean.replace(/[._\s-]+/g, "-"));
+
+  // Clean alphanumeric
+  const alnum = clean.replace(/[^a-zA-Z0-9]/g, "");
+  if (alnum) set.add(alnum);
+
+  // UN- fonts special aliases:
+  // e.g. "UN-Davasa" -> "Davasa", "UN_Davasa", "undavasa", "un-davasa", "un_davasa"
+  if (/^UN[-_\s]/i.test(clean)) {
+    const withoutPrefix = clean.replace(/^UN[-_\s]+/i, "");
+    set.add(withoutPrefix);
+    set.add(`UN-${withoutPrefix}`);
+    set.add(`UN_${withoutPrefix}`);
+    set.add(`UN${withoutPrefix}`);
+    set.add(`un-${withoutPrefix.toLowerCase()}`);
+    set.add(`un_${withoutPrefix.toLowerCase()}`);
+    set.add(withoutPrefix.toLowerCase());
+  }
+
+  // FM fonts special aliases:
+  // e.g. "FM Basuru" -> "Basuru", "FM-Basuru", "FM_Basuru", "FMBasuru", "fm_basuru"
+  if (/^FM[-_\s]/i.test(clean)) {
+    const withoutPrefix = clean.replace(/^FM[-_\s]+/i, "");
+    set.add(withoutPrefix);
+    set.add(`FM ${withoutPrefix}`);
+    set.add(`FM-${withoutPrefix}`);
+    set.add(`FM_${withoutPrefix}`);
+    set.add(`fm_${withoutPrefix.toLowerCase()}`);
+    set.add(withoutPrefix.toLowerCase());
+  }
+
+  // Apex fonts special aliases:
+  // e.g. "apex-a.pura-021" -> "apex_a.pura_021", "apex-apura-021", "apex_apura_021", "apex021", "apex_021", "apex-021"
+  // "apex-apura-044" -> "apex_apura_044", "apex044", "apex_044", "apex-044"
+  if (/^apex/i.test(clean)) {
+    const numMatch = clean.match(/\d+/);
+    if (numMatch) {
+      const num = numMatch[0];
+      set.add(`apex${num}`);
+      set.add(`apex_${num}`);
+      set.add(`apex-${num}`);
+      set.add(`apex_apura_${num}`);
+      set.add(`apex-apura-${num}`);
+      set.add(`apex_a.pura_${num}`);
+      set.add(`apex-a.pura-${num}`);
+    }
+  }
+
+  return Array.from(set).filter(Boolean);
+}
+
 function buildCanvasFontSpec(
   fontSize: number,
   fontFamily?: string,
   isBold?: boolean,
   isItalic?: boolean,
-  includeFallback = true
+  includeFallback = true,
+  fallbackAlias?: string
 ): string {
   const style = isItalic ? "italic " : "";
   const weight = isBold ? "bold " : "";
@@ -58,7 +131,10 @@ function buildCanvasFontSpec(
     return `${style}${weight}${fontSize}px ${fam || "sans-serif"}`;
   }
   const quoted = `"${escapeCssFontFamily(fam)}"`;
-  return includeFallback ? `${style}${weight}${fontSize}px ${quoted}, sans-serif` : `${style}${weight}${fontSize}px ${quoted}`;
+  const extraAlias = (fallbackAlias && fallbackAlias !== fam && !isGenericCssFont(fallbackAlias))
+    ? `, "${escapeCssFontFamily(fallbackAlias)}"`
+    : "";
+  return includeFallback ? `${style}${weight}${fontSize}px ${quoted}${extraAlias}, sans-serif` : `${style}${weight}${fontSize}px ${quoted}`;
 }
 
 function detectFontMimeAndFormat(buffer: ArrayBuffer): { mime: string; format: string } {
@@ -74,9 +150,9 @@ function detectFontMimeAndFormat(buffer: ArrayBuffer): { mime: string; format: s
 
 const injectedCssFontFamilies = new Set<string>();
 
-function injectStyleSheetFontFace(familyName: string, blobUrl: string, format: string): void {
-  if (typeof document === "undefined" || !familyName) return;
-  const key = `${familyName}::${blobUrl}`;
+function injectStyleSheetFontFace(familyName: string, fontSourceUrl: string, format = "woff2"): void {
+  if (typeof document === "undefined" || !familyName || !fontSourceUrl) return;
+  const key = `${familyName}::${fontSourceUrl}`;
   if (injectedCssFontFamilies.has(key)) return;
   injectedCssFontFamilies.add(key);
 
@@ -89,7 +165,7 @@ function injectStyleSheetFontFace(familyName: string, blobUrl: string, format: s
   const escaped = escapeCssFontFamily(familyName);
   styleEl.appendChild(
     document.createTextNode(
-      `@font-face { font-family: "${escaped}"; src: url("${blobUrl}") format("${format}"); font-weight: 100 900; font-style: normal; font-display: block; }\n`
+      `@font-face { font-family: "${escaped}"; src: url("${fontSourceUrl}") format("${format}"); font-weight: normal; font-style: normal; font-display: swap; }\n`
     )
   );
 }
@@ -201,6 +277,7 @@ export default function App() {
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
   const [selectedStatsProject, setSelectedStatsProject] = useState<ImageProject | null>(null);
   const [openKebabProjectId, setOpenKebabProjectId] = useState<string | null>(null);
+  const [showBulkModal, setShowBulkModal] = useState(false);
   const [metricsDateRange, setMetricsDateRange] = useState<'alltime' | 'today' | 'yesterday' | 'week' | 'month' | 'custom'>('alltime');
   const [metricsCustomStartDate, setMetricsCustomStartDate] = useState<string>(() => {
     const d = new Date();
@@ -218,6 +295,8 @@ export default function App() {
   const lastSavedLayersRef = useRef<string>("");
   const [fonts, setFonts] = useState<Font[]>([]);
   const [isFontLoading, setIsFontLoading] = useState(false);
+  const [fontDropdownSearch, setFontDropdownSearch] = useState("");
+  const [fontDropdownTab, setFontDropdownTab] = useState<'all' | 'selected'>('all');
   const [zoom, setZoom] = useState(1);
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
   const [isSaving, setIsSaving] = useState(false);
@@ -463,10 +542,26 @@ export default function App() {
       // Set fonts immediately so they show up in the list
       setFonts(apiFonts);
 
+      // Immediately inject CSS @font-face rules for all fonts and their candidate aliases using direct HTTP font URLs
+      for (const font of apiFonts) {
+        const rawUrl = font.url.startsWith("/") ? font.url : `/fonts/${encodeURIComponent(font.url)}`;
+        const primaryUrl = rawUrl.includes("?") ? rawUrl : `${rawUrl}?v=2`;
+        const ext = font.url.toLowerCase();
+        const fmt = ext.includes(".woff2") ? "woff2" : ext.includes(".woff") ? "woff" : ext.includes(".otf") ? "opentype" : "truetype";
+        const aliases = generateFontAliases(font.name);
+        for (const alias of aliases) {
+          injectStyleSheetFontFace(alias, primaryUrl, fmt);
+        }
+      }
+
       const isFamilyLoadedInDoc = (familyName: string): boolean => {
-        return Array.from(document.fonts.values()).some(
-          face => face.family === familyName && face.status === "loaded"
-        );
+        const targetClean = familyName.replace(/^["']|["']$/g, "").trim().toLowerCase();
+        const targetNorm = normalizeFontLookup(familyName);
+        return Array.from(document.fonts.values()).some(face => {
+          if (face.status !== "loaded") return false;
+          const faceClean = face.family.replace(/^["']|["']$/g, "").trim().toLowerCase();
+          return faceClean === targetClean || normalizeFontLookup(faceClean) === targetNorm;
+        });
       };
 
       const registerFamilyBuffer = async (
@@ -476,23 +571,19 @@ export default function App() {
       ) => {
         if (!familyName || isFamilyLoadedInDoc(familyName)) return;
 
-        // Pass the raw unquoted familyName to FontFace so Chromium/Blink does not store literal quote characters in face.family
         try {
           const fontFace = new FontFace(familyName, buffer.slice(0));
           const loadedFace = await fontFace.load();
           document.fonts.add(loadedFace);
-          // Also inject @font-face CSS rule if browser altered or quoted loadedFace.family unexpectedly
-          if (loadedFace.family !== familyName && loadedFace.family.replace(/^["']|["']$/g, "") !== familyName) {
-            const { blobUrl, format } = getBlobInfo();
-            injectStyleSheetFontFace(familyName, blobUrl, format);
-            await document.fonts.load(`16px "${escapeCssFontFamily(familyName)}"`);
-          }
-          return;
-        } catch {
-          // Fallback for older WebKit/Gecko engines that reject unquoted spaces/dots in FontFace constructor
           const { blobUrl, format } = getBlobInfo();
           injectStyleSheetFontFace(familyName, blobUrl, format);
-          await document.fonts.load(`16px "${escapeCssFontFamily(familyName)}"`);
+          return;
+        } catch {
+          const { blobUrl, format } = getBlobInfo();
+          injectStyleSheetFontFace(familyName, blobUrl, format);
+          try {
+            await document.fonts.load(`16px "${escapeCssFontFamily(familyName)}"`);
+          } catch (_) {}
         }
       };
 
@@ -500,15 +591,7 @@ export default function App() {
         const fontFamily = font.name;
         if (!fontFamily) return;
 
-        const cleanDisplay = formatFontDisplayName(fontFamily);
-        const sanitizedAlias = cleanDisplay.replace(/[^a-z0-9.]/gi, "_").toLowerCase();
-        const hyphenAlias = cleanDisplay.replace(/[_\s]+/g, "-").toLowerCase();
-        const compactAlias = sanitizedAlias.replace(/[^a-z0-9]/gi, "_").replace(/_+/g, "_").replace(/^_|_$/g, "");
-        const dotlessUnderscore = cleanDisplay.replace(/\./g, "").replace(/[^a-z0-9]/gi, "_").replace(/_+/g, "_").replace(/^_|_$/g, "").toLowerCase();
-        const dotlessHyphen = dotlessUnderscore.replace(/_/g, "-");
-        const candidateFamilies = Array.from(
-          new Set([fontFamily, cleanDisplay, sanitizedAlias, hyphenAlias, compactAlias, dotlessUnderscore, dotlessHyphen].filter(Boolean))
-        );
+        const candidateFamilies = generateFontAliases(fontFamily);
 
         if (candidateFamilies.every(isFamilyLoadedInDoc)) return;
 
@@ -603,15 +686,15 @@ export default function App() {
     }
   };
 
-  const recordCreationEvent = async (projectId: string | null, type: 'copy' | 'download' | 'share') => {
+  const recordCreationEvent = async (projectId: string | null, type: 'copy' | 'download' | 'share', count = 1) => {
     if (!projectId) return;
 
     // 1. Optimistic update
     setProjects(prev => prev.map(p => {
       if (p.id !== projectId) return p;
-      const copies = (p.copiesCount || 0) + (type === 'copy' ? 1 : 0);
-      const downloads = (p.downloadsCount || 0) + (type === 'download' ? 1 : 0);
-      const shares = (p.sharesCount || 0) + (type === 'share' ? 1 : 0);
+      const copies = (p.copiesCount || 0) + (type === 'copy' ? count : 0);
+      const downloads = (p.downloadsCount || 0) + (type === 'download' ? count : 0);
+      const shares = (p.sharesCount || 0) + (type === 'share' ? count : 0);
       return {
         ...p,
         copiesCount: copies,
@@ -626,7 +709,7 @@ export default function App() {
       const res = await fetch(`/api/images/${projectId}/creation`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type, username: user?.username })
+        body: JSON.stringify({ type, username: user?.username, count })
       });
       if (res.ok) {
         const data = await res.json();
@@ -2179,23 +2262,42 @@ export default function App() {
           if (layer.visible === false) continue;
           ctx.save();
           const fontFamily = layer.fontFamily || "sans-serif";
-          const fontStr = buildCanvasFontSpec(layer.fontSize, fontFamily, layer.isBold, layer.isItalic, true);
+          const matchedFont = fonts.find(f => f.name === fontFamily || normalizeFontLookup(f.name) === normalizeFontLookup(fontFamily));
+          const fallbackAlias = matchedFont && matchedFont.name !== fontFamily ? matchedFont.name : undefined;
+          const fontStr = buildCanvasFontSpec(layer.fontSize, fontFamily, layer.isBold, layer.isItalic, true, fallbackAlias);
           const checkFontStr = buildCanvasFontSpec(layer.fontSize, fontFamily, layer.isBold, layer.isItalic, false);
           
-          if (!isGenericCssFont(fontFamily) && !document.fonts.check(checkFontStr)) {
+          if (!isGenericCssFont(fontFamily)) {
             try {
-              await document.fonts.load(checkFontStr);
+              if (!document.fonts.check(checkFontStr)) {
+                await document.fonts.load(checkFontStr);
+              }
+              if (fallbackAlias) {
+                const aliasCheckStr = buildCanvasFontSpec(layer.fontSize, fallbackAlias, layer.isBold, layer.isItalic, false);
+                if (!document.fonts.check(aliasCheckStr)) {
+                  await document.fonts.load(aliasCheckStr);
+                }
+              }
             } catch (e) {
               console.warn(`Failed to load font for canvas: ${checkFontStr}`, e);
             }
           }
 
           if (layer.hasSuffixList && layer.selectedSuffix && layer.suffixFontFamily && !isGenericCssFont(layer.suffixFontFamily) && layer.suffixFontFamily !== fontFamily) {
+            const matchedSuf = fonts.find(f => f.name === layer.suffixFontFamily || normalizeFontLookup(f.name) === normalizeFontLookup(layer.suffixFontFamily));
             const sufCheckStr = buildCanvasFontSpec(layer.suffixFontSize || layer.fontSize, layer.suffixFontFamily, layer.isBold, layer.isItalic, false);
             if (!document.fonts.check(sufCheckStr)) {
               try {
                 await document.fonts.load(sufCheckStr);
               } catch (_) {}
+            }
+            if (matchedSuf && matchedSuf.name !== layer.suffixFontFamily) {
+              const matchedSufCheck = buildCanvasFontSpec(layer.suffixFontSize || layer.fontSize, matchedSuf.name, layer.isBold, layer.isItalic, false);
+              if (!document.fonts.check(matchedSufCheck)) {
+                try {
+                  await document.fonts.load(matchedSufCheck);
+                } catch (_) {}
+              }
             }
           }
 
@@ -2257,7 +2359,7 @@ export default function App() {
 
           if (isSinhalaDate) {
             const monthFontSize = ((layer.sinhalaMonthFontSize || layer.fontSize) * (canvas.width / 1000));
-            const monthFontStr = buildCanvasFontSpec(monthFontSize, layer.fontFamily, layer.isBold, layer.isItalic, true);
+            const monthFontStr = buildCanvasFontSpec(monthFontSize, layer.fontFamily, layer.isBold, layer.isItalic, true, fallbackAlias);
             
             // Calculate total width
             const w1 = ctx.measureText(yearStr + " ").width;
@@ -2325,7 +2427,9 @@ export default function App() {
 
               const suffixFontSize = layer.suffixFontSize || layer.fontSize;
               const suffixFontFamily = layer.suffixFontFamily || layer.fontFamily;
-              const suffixFontStr = buildCanvasFontSpec(suffixFontSize, suffixFontFamily, layer.isBold, layer.isItalic, true);
+              const matchedSuffixFont = fonts.find(f => f.name === suffixFontFamily || normalizeFontLookup(f.name) === normalizeFontLookup(suffixFontFamily));
+              const suffixFallbackAlias = matchedSuffixFont && matchedSuffixFont.name !== suffixFontFamily ? matchedSuffixFont.name : undefined;
+              const suffixFontStr = buildCanvasFontSpec(suffixFontSize, suffixFontFamily, layer.isBold, layer.isItalic, true, suffixFallbackAlias);
 
               ctx.font = suffixFontStr;
               ctx.textAlign = 'left';
@@ -2478,7 +2582,9 @@ export default function App() {
           displayText = convertNumberToSinhala(parentNumber.text, mode) || layer.text || "";
         }
       }
-      ctx.font = buildCanvasFontSpec(layer.fontSize, layer.fontFamily, layer.isBold, layer.isItalic, true);
+      const matchedHitFont = fonts.find(f => f.name === layer.fontFamily || normalizeFontLookup(f.name) === normalizeFontLookup(layer.fontFamily));
+      const hitFallback = matchedHitFont && matchedHitFont.name !== layer.fontFamily ? matchedHitFont.name : undefined;
+      ctx.font = buildCanvasFontSpec(layer.fontSize, layer.fontFamily, layer.isBold, layer.isItalic, true, hitFallback);
       const metrics = ctx.measureText(displayText);
       const x = (layer.x / 100) * canvas.width;
       const y = (layer.y / 100) * canvas.height;
@@ -2493,7 +2599,9 @@ export default function App() {
       let endX = startX + width;
       if (layer.hasSuffixList && layer.selectedSuffix) {
         const prevFont = ctx.font;
-        ctx.font = buildCanvasFontSpec(layer.suffixFontSize || layer.fontSize, layer.suffixFontFamily || layer.fontFamily, layer.isBold, layer.isItalic, true);
+        const matchedHitSuf = fonts.find(f => f.name === (layer.suffixFontFamily || layer.fontFamily) || normalizeFontLookup(f.name) === normalizeFontLookup(layer.suffixFontFamily || layer.fontFamily));
+        const sufHitFallback = matchedHitSuf && matchedHitSuf.name !== (layer.suffixFontFamily || layer.fontFamily) ? matchedHitSuf.name : undefined;
+        ctx.font = buildCanvasFontSpec(layer.suffixFontSize || layer.fontSize, layer.suffixFontFamily || layer.fontFamily, layer.isBold, layer.isItalic, true, sufHitFallback);
         const sufMetrics = ctx.measureText(layer.selectedSuffix);
         const gap = layer.suffixGap !== undefined ? layer.suffixGap : 4;
         endX += gap + sufMetrics.width;
@@ -2958,14 +3066,14 @@ export default function App() {
         )}
       </AnimatePresence>
       {/* Header */}
-      <header className="h-16 border-b border-slate-800 flex items-center justify-between px-2.5 sm:px-4 md:px-6 bg-slate-900/50 backdrop-blur-md sticky top-0 z-[100] gap-2">
+      <header className="h-16 border-b border-slate-800 flex items-center justify-between px-2 sm:px-4 md:px-6 bg-slate-900/50 backdrop-blur-md sticky top-0 z-[100] gap-1.5 sm:gap-2">
         <div className="flex items-center gap-1.5 sm:gap-2.5 min-w-0 shrink">
           <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center shrink-0 shadow-sm">
             <ImageIcon className="text-white w-4 h-4 sm:w-5 sm:h-5" />
           </div>
           <span className={cn(
             "font-bold text-base md:text-lg tracking-tight shrink-0",
-            currentProjectId ? "hidden lg:inline" : "hidden sm:inline"
+            currentProjectId ? "hidden xl:inline" : "hidden md:inline"
           )}>
             My Card Creator
           </span>
@@ -3075,6 +3183,14 @@ export default function App() {
                 className="p-1.5 sm:p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition-all border border-slate-700 shrink-0"
               >
                 <Download className="w-4 h-4 sm:w-[18px] sm:h-[18px]" />
+              </button>
+              <button
+                onClick={() => setShowBulkModal(true)}
+                title="Bulk Image Generator (Create multiple cards with spreadsheet data)"
+                className="flex items-center gap-1.5 px-2 sm:px-2.5 py-1.5 sm:py-2 bg-gradient-to-r from-blue-600/25 to-indigo-600/25 hover:from-blue-600/40 hover:to-indigo-600/40 text-blue-300 hover:text-white rounded-lg transition-all border border-blue-500/40 shadow-sm shrink-0"
+              >
+                <Layers className="w-4 h-4 text-blue-400" />
+                <span className="hidden xl:inline text-xs font-semibold">Bulk Create</span>
               </button>
             </div>
           )}
@@ -3394,7 +3510,29 @@ export default function App() {
 
                 {/* Font List Section */}
                 <div className="space-y-3">
-                  <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Installed Fonts</h4>
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Installed Fonts ({fonts.length})</h4>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          debouncedUpdatePreferences({ selectedFonts: fonts.map(f => f.name) });
+                        }}
+                        className="text-[11px] text-blue-400 hover:text-blue-300 font-medium px-2 py-0.5 rounded bg-blue-600/10 border border-blue-500/20 transition-colors"
+                      >
+                        Select All
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          debouncedUpdatePreferences({ selectedFonts: [] });
+                        }}
+                        className="text-[11px] text-slate-400 hover:text-slate-300 font-medium px-2 py-0.5 rounded bg-slate-800 border border-slate-700 transition-colors"
+                      >
+                        Deselect All
+                      </button>
+                    </div>
+                  </div>
                   <div className="grid grid-cols-1 gap-2">
                     {fonts.length === 0 ? (
                       <div className="text-center py-8 bg-slate-800/20 rounded-xl border border-slate-800 border-dashed">
@@ -4801,6 +4939,22 @@ export default function App() {
                                 </button>
 
                                 <div className="my-0.5 border-t border-slate-800" />
+
+                                {/* Bulk Image Creator */}
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setOpenKebabProjectId(null);
+                                    if (currentProjectId !== proj.id) {
+                                      loadProject(proj);
+                                    }
+                                    setShowBulkModal(true);
+                                  }}
+                                  className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-blue-600/20 text-blue-300 hover:text-white text-left transition-colors"
+                                >
+                                  <Layers size={13} className="text-blue-400 shrink-0" />
+                                  <span>Bulk Image Creator</span>
+                                </button>
 
                                 {/* Delete */}
                                 <button
@@ -6798,18 +6952,56 @@ export default function App() {
                       
                       <div 
                         id="font-dropdown"
-                        className="hidden absolute z-[100] w-full mt-1 bg-slate-900 border border-slate-700 rounded-lg shadow-2xl max-h-64 overflow-y-auto"
+                        className="hidden absolute z-[100] w-full mt-1 bg-slate-900 border border-slate-700 rounded-lg shadow-2xl max-h-72 overflow-y-auto"
                       >
-                        <div 
-                          className="px-3 py-2.5 hover:bg-blue-600/20 cursor-pointer border-b border-slate-800/50 transition-colors"
-                          onClick={() => {
-                            updateLayer(selectedLayer.id, { fontFamily: 'sans-serif' });
-                            document.getElementById('font-dropdown')?.classList.add('hidden');
-                          }}
-                        >
-                          <span className="font-sans text-xs text-slate-400 block mb-1 uppercase tracking-tighter">System Sans</span>
-                          <span className="font-sans text-lg">The quick brown fox</span>
+                        {/* Search and Tab filter */}
+                        <div className="p-2 border-b border-slate-800 sticky top-0 bg-slate-900 z-10 space-y-1.5" onClick={(e) => e.stopPropagation()}>
+                          <input 
+                            type="text" 
+                            placeholder="Search fonts (UN, Apex, Basuru...)"
+                            value={fontDropdownSearch}
+                            onChange={(e) => setFontDropdownSearch(e.target.value)}
+                            className="w-full bg-slate-800 border border-slate-700 rounded px-2.5 py-1 text-xs text-white placeholder-slate-500 outline-none focus:border-blue-500"
+                          />
+                          {user?.selectedFonts && user.selectedFonts.length > 0 && (
+                            <div className="flex gap-1">
+                              <button
+                                type="button"
+                                onClick={() => setFontDropdownTab('all')}
+                                className={cn(
+                                  "flex-1 py-1 text-[10px] rounded font-medium transition-colors",
+                                  fontDropdownTab === 'all' ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-400 hover:text-white"
+                                )}
+                              >
+                                All ({fonts.length})
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setFontDropdownTab('selected')}
+                                className={cn(
+                                  "flex-1 py-1 text-[10px] rounded font-medium transition-colors",
+                                  fontDropdownTab === 'selected' ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-400 hover:text-white"
+                                )}
+                              >
+                                My Fonts ({user.selectedFonts.length})
+                              </button>
+                            </div>
+                          )}
                         </div>
+
+                        {!fontDropdownSearch && (
+                          <div 
+                            className="px-3 py-2.5 hover:bg-blue-600/20 cursor-pointer border-b border-slate-800/50 transition-colors"
+                            onClick={() => {
+                              updateLayer(selectedLayer.id, { fontFamily: 'sans-serif' });
+                              document.getElementById('font-dropdown')?.classList.add('hidden');
+                              setFontDropdownSearch("");
+                            }}
+                          >
+                            <span className="font-sans text-xs text-slate-400 block mb-1 uppercase tracking-tighter">System Sans</span>
+                            <span className="font-sans text-base text-slate-300">The quick brown fox</span>
+                          </div>
+                        )}
                         {(() => {
                           const userSelected = (user?.selectedFonts && user.selectedFonts.length > 0)
                             ? Array.from(
@@ -6821,24 +7013,57 @@ export default function App() {
                                 ).values()
                               )
                             : fonts;
-                          const finalFonts = userSelected.length > 0 ? userSelected : fonts;
-                          return finalFonts.map((f, index) => (
-                            <div 
-                              key={`${f.name}-${index}`}
-                              className="px-3 py-2.5 hover:bg-blue-600/20 cursor-pointer border-b border-slate-800/50 transition-colors group/font"
-                              onClick={() => {
-                                updateLayer(selectedLayer.id, { fontFamily: f.name });
-                                document.getElementById('font-dropdown')?.classList.add('hidden');
-                              }}
-                            >
-                              <div className="flex items-center justify-between mb-1">
-                                <span className="font-sans text-xs text-slate-400 block uppercase tracking-tighter">{formatFontDisplayName(f.name)}</span>
+                          const baseFonts = (fontDropdownTab === 'selected' && userSelected.length > 0) ? userSelected : fonts;
+                          const query = fontDropdownSearch.trim().toLowerCase();
+                          const finalFonts = query 
+                            ? fonts.filter(f => 
+                                f.name.toLowerCase().includes(query) || 
+                                formatFontDisplayName(f.name).toLowerCase().includes(query) ||
+                                normalizeFontLookup(f.name).includes(normalizeFontLookup(query))
+                              )
+                            : baseFonts;
+
+                          if (finalFonts.length === 0) {
+                            return (
+                              <div className="px-3 py-4 text-center text-xs text-slate-500 italic">
+                                No fonts found matching "{fontDropdownSearch}"
                               </div>
-                              <span style={{ fontFamily: `"${f.name}", sans-serif` }} className="text-lg">
-                                The quick brown fox
-                              </span>
-                            </div>
-                          ));
+                            );
+                          }
+
+                          return finalFonts.map((f, index) => {
+                            const isUN = /^UN[-_\s]/i.test(f.name);
+                            return (
+                              <div 
+                                key={`${f.name}-${index}`}
+                                className="px-3 py-2.5 hover:bg-blue-600/20 cursor-pointer border-b border-slate-800/50 transition-colors group/font"
+                                onClick={() => {
+                                  updateLayer(selectedLayer.id, { fontFamily: f.name });
+                                  document.getElementById('font-dropdown')?.classList.add('hidden');
+                                  setFontDropdownSearch("");
+                                }}
+                              >
+                                <div className="flex items-center justify-between mb-1">
+                                  <div className="flex items-center gap-1.5 min-w-0">
+                                    {isUN && (
+                                      <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 shrink-0">
+                                        UN
+                                      </span>
+                                    )}
+                                    <span className="font-sans text-xs text-slate-400 block uppercase tracking-tighter truncate">
+                                      {formatFontDisplayName(f.name)}
+                                    </span>
+                                  </div>
+                                  <span className="text-[10px] text-slate-600 font-mono shrink-0">
+                                    {f.rawName ? f.rawName.split('.').pop()?.toUpperCase() : 'WOFF'}
+                                  </span>
+                                </div>
+                                <span style={{ fontFamily: `"${f.name}", sans-serif` }} className="text-lg block truncate">
+                                  The quick brown fox
+                                </span>
+                              </div>
+                            );
+                          });
                         })()}
                       </div>
                     </div>
@@ -7196,6 +7421,17 @@ export default function App() {
               <span className="font-medium">Share Image</span>
             </button>
 
+            <button
+              onClick={() => {
+                setCanvasContextMenu(null);
+                setShowBulkModal(true);
+              }}
+              className="flex items-center gap-2 px-2.5 py-2 text-slate-200 hover:text-white hover:bg-blue-600/20 rounded-lg transition-colors group text-left"
+            >
+              <Layers size={14} className="text-blue-400 group-hover:text-blue-300" />
+              <span className="font-medium">Bulk Create Images</span>
+            </button>
+
             {currentProjectId && (
               <>
                 <div className="my-1 border-t border-slate-800" />
@@ -7224,6 +7460,31 @@ export default function App() {
             )}
           </div>
         </div>
+      )}
+
+      {/* Bulk Image Generator Modal */}
+      {showBulkModal && (image || currentProjectId) && (
+        <BulkImageCreatorModal
+          isOpen={showBulkModal}
+          onClose={() => setShowBulkModal(false)}
+          project={projects.find(p => p.id === currentProjectId) || {
+            id: currentProjectId || 'temp',
+            username: user?.username || 'user',
+            imageUrl: image || '',
+            layers: layers,
+            name: 'Card Project',
+            createdAt: new Date().toISOString()
+          }}
+          image={image || (projects.find(p => p.id === currentProjectId)?.imageUrl ?? '')}
+          fonts={fonts}
+          user={user}
+          onRecordCreationEvents={async (count: number) => {
+            if (currentProjectId) {
+              await recordCreationEvent(currentProjectId, 'download', count);
+            }
+          }}
+          onNotification={setNotification}
+        />
       )}
     </div>
   );

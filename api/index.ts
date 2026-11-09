@@ -300,22 +300,25 @@ async function initDb() {
         "INSERT INTO users (username, password, role) VALUES ('admin', 'admin@1234', 'admin') ON CONFLICT (username) DO UPDATE SET role = 'admin'"
       );
 
-      // Sync any bundled Fonts/ files into custom_fonts so serverless cold starts always have them
-      const repoFontsDir = path.join(process.cwd(), "Fonts");
-      if (fs.existsSync(repoFontsDir) && fs.statSync(repoFontsDir).isDirectory()) {
-        for (const f of fs.readdirSync(repoFontsDir)) {
-          if (!isFontFilename(f)) continue;
-          const fp = path.join(repoFontsDir, f);
-          if (fs.statSync(fp).isFile()) {
-            const buf = fs.readFileSync(fp);
-            await safeQuery(
-              "INSERT INTO custom_fonts (name, data) VALUES ($1, $2) ON CONFLICT (name) DO NOTHING",
-              [f, buf]
-            );
+      // Sync any bundled font files into custom_fonts so serverless cold starts always have them
+      for (const dir of getExistingFontDirs()) {
+        try {
+          for (const f of fs.readdirSync(dir)) {
+            if (!isFontFilename(f)) continue;
+            const fp = path.join(dir, f);
+            if (fs.existsSync(fp) && fs.statSync(fp).isFile()) {
+              const buf = fs.readFileSync(fp);
+              await safeQuery(
+                "INSERT INTO custom_fonts (name, data) VALUES ($1, $2) ON CONFLICT (name) DO NOTHING",
+                [f, buf]
+              );
+            }
           }
+        } catch (dirErr) {
+          console.warn(`Could not sync font directory ${dir}:`, dirErr);
         }
-        cachedDbFontNames = null;
       }
+      cachedDbFontNames = null;
 
       isDbInitialized = true;
       dbInitError = null;

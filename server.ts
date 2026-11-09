@@ -67,6 +67,10 @@ function getExistingFontDirs(): string[] {
 // Database setup
 const HAS_POSTGRES = !!process.env.DATABASE_URL;
 
+let cachedDbFontNames: string[] | null = null;
+let lastFontNamesFetch = 0;
+const FONT_NAMES_CACHE_TTL = 60000; // 60 seconds
+
 if (HAS_POSTGRES) {
   const sanitizedUrl = process.env.DATABASE_URL!.replace(/:[^:@/]+@/, ':****@');
   console.log(`Postgres Database URL found: ${sanitizedUrl}`);
@@ -302,25 +306,25 @@ async function initDb() {
           "INSERT INTO users (username, password, role) VALUES ('admin', 'admin@1234', 'admin') ON CONFLICT (username) DO UPDATE SET role = 'admin'"
         );
 
-        // Sync any uploaded font files placed in /Fonts directory into custom_fonts so cloud/serverless deployments also have them
-        const rootFontsDir = path.join(process.cwd(), "Fonts");
-        if (fs.existsSync(rootFontsDir) && fs.statSync(rootFontsDir).isDirectory()) {
-          const uploadedFontFiles = fs.readdirSync(rootFontsDir).filter(isFontFilename);
-          for (const fontFile of uploadedFontFiles) {
-            try {
-              const filePath = path.join(rootFontsDir, fontFile);
-              if (fs.statSync(filePath).isFile()) {
+        // Sync any uploaded font files placed in font directories into custom_fonts so cloud/serverless deployments also have them
+        for (const dir of getExistingFontDirs()) {
+          try {
+            for (const fontFile of fs.readdirSync(dir)) {
+              if (!isFontFilename(fontFile)) continue;
+              const filePath = path.join(dir, fontFile);
+              if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
                 const buf = fs.readFileSync(filePath);
                 await safeQuery(
                   "INSERT INTO custom_fonts (name, data) VALUES ($1, $2) ON CONFLICT (name) DO NOTHING",
                   [fontFile, buf]
                 );
               }
-            } catch (syncErr) {
-              console.warn(`Could not sync font ${fontFile} from /Fonts:`, syncErr);
             }
+          } catch (syncErr) {
+            console.warn(`Could not sync font directory ${dir}:`, syncErr);
           }
         }
+        cachedDbFontNames = null;
 
         isDbInitialized = true;
         console.log("Database initialized successfully.");
@@ -760,11 +764,6 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
       res.status(500).json({ success: false, message: "Internal server error: Preferences update failed" });
     }
   });
-
-  // In-memory cache for custom font names to avoid querying DB on every /api/fonts request
-  let cachedDbFontNames: string[] | null = null;
-  let lastFontNamesFetch = 0;
-  const FONT_NAMES_CACHE_TTL = 60000; // 60 seconds
 
   // Fonts
   app.get("/api/fonts", async (req, res) => {
@@ -1224,7 +1223,8 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
   app.post(["/api/images/:id/creation", "/api/images/:id/track"], async (req, res) => {
     try {
       const { id } = req.params;
-      const { type, username } = req.body; // 'copy' | 'download' | 'share'
+      const { type, username, count: rawCount } = req.body; // 'copy' | 'download' | 'share'
+      const count = Math.max(1, Math.min(1000, Number(rawCount) || 1));
 
       let column = "copies_count";
       if (type === "download") column = "downloads_count";
@@ -1233,22 +1233,35 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
       else return res.status(400).json({ success: false, message: "Invalid creation type" });
 
       if (HAS_POSTGRES) {
-        // Log individual creation event with username
-        safeQuery(
-          `INSERT INTO font_app_image_creations (image_id, type, username, created_at) 
-           VALUES ($1, $2, COALESCE($3, (SELECT username FROM font_app_images WHERE id = $1)), CURRENT_TIMESTAMP)`,
-          [id, type, username || null]
-        ).catch(err => console.error("Error inserting creation event:", err));
+        // Log creation events with username
+        if (count === 1) {
+          safeQuery(
+            `INSERT INTO font_app_image_creations (image_id, type, username, created_at) 
+             VALUES ($1, $2, COALESCE($3, (SELECT username FROM font_app_images WHERE id = $1)), CURRENT_TIMESTAMP)`,
+            [id, type, username || null]
+          ).catch(err => console.error("Error inserting creation event:", err));
+        } else {
+          // Batch insert creation records
+          const valuesClauses: string[] = [];
+          const params: any[] = [id, type, username || null];
+          for (let i = 0; i < count; i++) {
+            valuesClauses.push(`($1, $2, COALESCE($3, (SELECT username FROM font_app_images WHERE id = $1)), CURRENT_TIMESTAMP)`);
+          }
+          safeQuery(
+            `INSERT INTO font_app_image_creations (image_id, type, username, created_at) VALUES ${valuesClauses.join(", ")}`,
+            params
+          ).catch(err => console.error("Error inserting bulk creation events:", err));
+        }
 
         const result = await safeQuery(
           `UPDATE font_app_images 
-           SET ${column} = COALESCE(${column}, 0) + 1 
+           SET ${column} = COALESCE(${column}, 0) + $2 
            WHERE id = $1 
            RETURNING id, 
                      COALESCE(copies_count, 0) as "copiesCount", 
                      COALESCE(downloads_count, 0) as "downloadsCount", 
                      COALESCE(shares_count, 0) as "sharesCount"`,
-          [id]
+          [id, count]
         );
         if (result.rowCount && result.rowCount > 0) {
           const row = result.rows[0];
