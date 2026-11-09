@@ -2958,12 +2958,17 @@ export default function App() {
         )}
       </AnimatePresence>
       {/* Header */}
-      <header className="h-16 border-b border-slate-800 flex items-center justify-between px-6 bg-slate-900/50 backdrop-blur-md sticky top-0 z-[100]">
-        <div className="flex items-center gap-3 min-w-0">
-          <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center shrink-0">
-            <ImageIcon className="text-white w-5 h-5" />
+      <header className="h-16 border-b border-slate-800 flex items-center justify-between px-2.5 sm:px-4 md:px-6 bg-slate-900/50 backdrop-blur-md sticky top-0 z-[100] gap-2">
+        <div className="flex items-center gap-1.5 sm:gap-2.5 min-w-0 shrink">
+          <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center shrink-0 shadow-sm">
+            <ImageIcon className="text-white w-4 h-4 sm:w-5 sm:h-5" />
           </div>
-          <span className="font-bold text-lg tracking-tight hidden sm:inline shrink-0">My Card Creator</span>
+          <span className={cn(
+            "font-bold text-base md:text-lg tracking-tight shrink-0",
+            currentProjectId ? "hidden lg:inline" : "hidden sm:inline"
+          )}>
+            My Card Creator
+          </span>
 
           {/* Current Project Name & Quick Rename */}
           {(() => {
@@ -2971,7 +2976,7 @@ export default function App() {
             if (!currentProject) return null;
 
             return (
-              <div className="flex items-center gap-1.5 ml-1 sm:ml-3 pl-2 sm:pl-3 border-l border-slate-800 min-w-0">
+              <div className="flex items-center gap-1 sm:gap-1.5 ml-1 sm:ml-2 pl-1.5 sm:pl-2.5 border-l border-slate-800 min-w-0">
                 {isEditingHeaderName ? (
                   <form
                     onSubmit={(e) => {
@@ -2981,7 +2986,7 @@ export default function App() {
                       }
                       setIsEditingHeaderName(false);
                     }}
-                    className="flex items-center gap-1"
+                    className="flex items-center gap-1 min-w-0"
                   >
                     <input
                       type="text"
@@ -2997,11 +3002,11 @@ export default function App() {
                         if (e.key === 'Escape') setIsEditingHeaderName(false);
                       }}
                       autoFocus
-                      className="bg-slate-800 border border-blue-500 rounded-lg px-2.5 py-1 text-xs sm:text-sm text-white focus:outline-none w-36 sm:w-56 md:w-72 shadow-inner"
+                      className="bg-slate-800 border border-blue-500 rounded-lg px-2 py-1 text-xs sm:text-sm text-white focus:outline-none w-28 xs:w-36 sm:w-48 md:w-64 shadow-inner"
                     />
                     <button
                       type="submit"
-                      className="p-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-colors shrink-0"
+                      className="p-1 sm:p-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-colors shrink-0"
                       title="Save name"
                     >
                       <Check size={14} />
@@ -3012,7 +3017,7 @@ export default function App() {
                         e.preventDefault();
                         setIsEditingHeaderName(false);
                       }}
-                      className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white rounded-lg transition-colors shrink-0"
+                      className="p-1 sm:p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white rounded-lg transition-colors shrink-0"
                       title="Cancel"
                     >
                       <X size={14} />
@@ -3024,11 +3029,11 @@ export default function App() {
                       setHeaderNameInput(currentProject.name);
                       setIsEditingHeaderName(true);
                     }}
-                    className="flex items-center gap-2 text-xs sm:text-sm font-medium text-slate-200 hover:text-white bg-slate-800/70 hover:bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700/60 transition-all group max-w-[150px] sm:max-w-xs md:max-w-sm truncate"
+                    className="flex items-center gap-1 sm:gap-1.5 text-xs sm:text-sm font-medium text-slate-200 hover:text-white bg-slate-800/70 hover:bg-slate-800 px-2 sm:px-2.5 py-1 sm:py-1.5 rounded-lg border border-slate-700/60 transition-all group max-w-[80px] xs:max-w-[120px] sm:max-w-[170px] md:max-w-xs min-w-0 shrink"
                     title="Click to rename project"
                   >
                     <span className="truncate">{currentProject.name}</span>
-                    <Edit2 size={13} className="text-slate-400 group-hover:text-blue-400 shrink-0 transition-colors" />
+                    <Edit2 size={12} className="text-slate-400 group-hover:text-blue-400 shrink-0 transition-colors" />
                   </button>
                 )}
 
@@ -3036,10 +3041,10 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => setSelectedStatsProject(currentProject)}
-                  className="flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 transition-all shadow-sm group shrink-0"
+                  className="flex items-center gap-1 text-[11px] sm:text-xs font-semibold px-1.5 sm:px-2 py-1 sm:py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 transition-all shadow-sm group shrink-0"
                   title={`Image Creations: ${currentProject.creationsCount || 0} (${currentProject.copiesCount || 0} copies, ${currentProject.downloadsCount || 0} downloads, ${currentProject.sharesCount || 0} shares). Click for details.`}
                 >
-                  <Sparkles size={13} className="text-amber-400 group-hover:scale-110 transition-transform" />
+                  <Sparkles size={12} className="text-amber-400 group-hover:scale-110 transition-transform" />
                   <span>{currentProject.creationsCount || 0}</span>
                   <span className="text-amber-400/80 hidden sm:inline text-[11px] font-normal">Creations</span>
                 </button>
@@ -3047,66 +3052,68 @@ export default function App() {
             );
           })()}
         </div>
-        <div className="flex items-center gap-2 md:gap-4">
+        <div className="flex items-center gap-1 sm:gap-1.5 md:gap-3 shrink-0">
           {image && (
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
               <button
                 onClick={shareWhatsApp}
                 title="Share on WhatsApp"
-                className="p-2 bg-green-600/20 hover:bg-green-600/30 text-green-400 rounded-lg transition-all border border-green-600/30"
+                className="p-1.5 sm:p-2 bg-green-600/20 hover:bg-green-600/30 text-green-400 rounded-lg transition-all border border-green-600/30 shrink-0"
               >
-                <MessageCircle size={18} />
+                <MessageCircle className="w-4 h-4 sm:w-[18px] sm:h-[18px]" />
               </button>
               <button
                 onClick={shareImage}
                 title="Share Image"
-                className="p-2 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 rounded-lg transition-all border border-blue-600/30"
+                className="p-1.5 sm:p-2 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 rounded-lg transition-all border border-blue-600/30 shrink-0"
               >
-                <Share2 size={18} />
+                <Share2 className="w-4 h-4 sm:w-[18px] sm:h-[18px]" />
               </button>
               <button
                 onClick={downloadImage}
                 title="Download Image"
-                className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition-all border border-slate-700"
+                className="p-1.5 sm:p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition-all border border-slate-700 shrink-0"
               >
-                <Download size={18} />
+                <Download className="w-4 h-4 sm:w-[18px] sm:h-[18px]" />
               </button>
             </div>
           )}
           <button 
             onClick={() => setIsPreviewMode(!isPreviewMode)}
             className={cn(
-              "p-2 rounded-lg transition-all",
+              "p-1.5 sm:p-2 rounded-lg transition-all shrink-0",
               isPreviewMode ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-300 hover:bg-slate-700"
             )}
             title={isPreviewMode ? "Exit Preview" : "Enter Preview"}
           >
-            <ImageIcon size={20} />
+            <ImageIcon className="w-4 h-4 sm:w-[18px] sm:h-[18px]" />
           </button>
           <button 
             onClick={() => setShowSidebar(!showSidebar)}
-            className="md:hidden p-2 bg-slate-800 rounded-lg text-slate-300"
+            className="md:hidden p-1.5 sm:p-2 bg-slate-800 rounded-lg text-slate-300 hover:bg-slate-700 transition-colors shrink-0"
+            title={showSidebar ? "Close Sidebar" : "Open Sidebar"}
           >
-            {showSidebar ? <X size={20} /> : <Menu size={20} />}
+            {showSidebar ? <X className="w-4 h-4 sm:w-5 sm:h-5" /> : <Menu className="w-4 h-4 sm:w-5 sm:h-5" />}
           </button>
-          <div className="flex items-center gap-2 bg-slate-800 rounded-lg px-2 sm:px-3 py-1.5">
-            <button onClick={() => setZoom(Math.max(0.1, zoom - 0.1))} className="hover:text-blue-400 p-1">
+          <div className="hidden md:flex items-center gap-1.5 bg-slate-800 rounded-lg px-2 sm:px-2.5 py-1 sm:py-1.5 shrink-0">
+            <button onClick={() => setZoom(Math.max(0.1, zoom - 0.1))} className="hover:text-blue-400 p-0.5" title="Zoom Out">
               <Minus size={14} />
             </button>
-            <span className="text-[10px] sm:text-xs font-mono w-8 sm:w-12 text-center">{Math.round(zoom * 100)}%</span>
-            <button onClick={() => setZoom(Math.min(3, zoom + 0.1))} className="hover:text-blue-400 p-1">
+            <span className="text-[10px] sm:text-xs font-mono w-9 sm:w-11 text-center">{Math.round(zoom * 100)}%</span>
+            <button onClick={() => setZoom(Math.min(3, zoom + 0.1))} className="hover:text-blue-400 p-0.5" title="Zoom In">
               <Plus size={14} />
             </button>
           </div>
           
-          <div className="relative">
+          <div className="relative shrink-0">
             <button 
               onClick={() => setShowUserMenu(!showUserMenu)}
-              className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 rounded-lg px-3 py-1.5 transition-all"
+              className="flex items-center gap-1.5 sm:gap-2 bg-slate-800 hover:bg-slate-700 rounded-lg px-2 sm:px-3 py-1.5 transition-all shrink-0"
+              title="User Account Menu"
             >
-              <UserCircle size={18} className="text-blue-400" />
-              <span className="text-sm font-medium">{user.username}</span>
-              <ChevronDown size={14} className={cn("transition-transform", showUserMenu && "rotate-180")} />
+              <UserCircle size={18} className="text-blue-400 shrink-0" />
+              <span className="text-xs sm:text-sm font-medium hidden sm:inline max-w-[80px] md:max-w-[120px] truncate">{user.username}</span>
+              <ChevronDown size={14} className={cn("transition-transform shrink-0", showUserMenu && "rotate-180")} />
             </button>
 
             <AnimatePresence>
@@ -7093,6 +7100,43 @@ export default function App() {
                   </div>
                 </div>
               </div>
+            </div>
+          )}
+
+          {/* Floating Mobile Zoom Controls (hidden on desktop md:) */}
+          {image && !isPreviewMode && (
+            <div className="md:hidden fixed bottom-4 right-4 z-40 bg-slate-900/90 backdrop-blur-md border border-slate-700/80 rounded-full px-2.5 py-1.5 flex items-center gap-2 shadow-2xl">
+              <button
+                onClick={() => setZoom(Math.max(0.1, zoom - 0.1))}
+                className="p-1 hover:text-blue-400 text-slate-300 active:scale-95 transition-transform"
+                title="Zoom Out"
+              >
+                <Minus size={13} />
+              </button>
+              <button
+                onClick={() => {
+                  const mainElement = document.querySelector('main');
+                  if (mainElement && imageCacheRef.current) {
+                    const padding = 32;
+                    const maxWidth = mainElement.clientWidth - padding;
+                    const scaleX = maxWidth / imageCacheRef.current.width;
+                    setZoom(Math.min(scaleX, 1));
+                  } else {
+                    setZoom(1);
+                  }
+                }}
+                className="text-[10px] font-mono font-medium text-slate-200 hover:text-blue-400 px-1"
+                title="Fit to Screen"
+              >
+                {Math.round(zoom * 100)}%
+              </button>
+              <button
+                onClick={() => setZoom(Math.min(3, zoom + 0.1))}
+                className="p-1 hover:text-blue-400 text-slate-300 active:scale-95 transition-transform"
+                title="Zoom In"
+              >
+                <Plus size={13} />
+              </button>
             </div>
           )}
         </main>
