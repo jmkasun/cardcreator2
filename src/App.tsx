@@ -1,10 +1,11 @@
 import React, { useState, useRef, useEffect } from "react";
 import { useDropzone } from "react-dropzone";
-import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, ChevronUp, RefreshCw, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check, Lock, Unlock, FileUp, FileDown, Copy, Undo2, List, Eye, EyeOff, Tag, Move, Hash, ListOrdered, Coins, Loader2, Sparkles, BarChart3, MoreVertical, Layers } from "lucide-react";
+import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, ChevronUp, RefreshCw, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check, Lock, Unlock, FileUp, FileDown, Copy, Undo2, List, Eye, EyeOff, Tag, Move, Hash, ListOrdered, Coins, Loader2, Sparkles, BarChart3, MoreVertical, Layers, Database, Search, ArrowRightLeft } from "lucide-react";
 import { cn } from "@/src/lib/utils";
 import { motion, AnimatePresence } from "motion/react";
 import { convertNumberToSinhala, numberToSinhalaWords, formatNumberForCanvas, isUnicodeFont } from "./utils/sinhalaConverter";
-import { BulkImageCreatorModal, isPriceLayer } from "./components/BulkImageCreatorModal";
+import { BulkImageCreatorModal, BulkRow, isPriceLayer } from "./components/BulkImageCreatorModal";
+import { ProjectDataListModal } from "./components/ProjectDataListModal";
 
 interface User {
   username: string;
@@ -277,7 +278,10 @@ export default function App() {
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
   const [selectedStatsProject, setSelectedStatsProject] = useState<ImageProject | null>(null);
   const [openKebabProjectId, setOpenKebabProjectId] = useState<string | null>(null);
+  const [kebabMenuPos, setKebabMenuPos] = useState<{ left: number; top?: number; bottom?: number } | null>(null);
   const [showBulkModal, setShowBulkModal] = useState(false);
+  const [showDataListModal, setShowDataListModal] = useState(false);
+  const [bulkPrefillRows, setBulkPrefillRows] = useState<BulkRow[] | null>(null);
   const [metricsDateRange, setMetricsDateRange] = useState<'alltime' | 'today' | 'yesterday' | 'week' | 'month' | 'custom'>('alltime');
   const [metricsCustomStartDate, setMetricsCustomStartDate] = useState<string>(() => {
     const d = new Date();
@@ -306,6 +310,14 @@ export default function App() {
   const [projectToDeleteId, setProjectToDeleteId] = useState<string | null>(null);
   const [projectToRename, setProjectToRename] = useState<{ id: string; name: string } | null>(null);
   const [renameInputVal, setRenameInputVal] = useState("");
+  const [copyProjectTarget, setCopyProjectTarget] = useState<{ id: string; name: string; username: string; imageUrl: string; isLocked?: boolean } | null>(null);
+  const [copyProjectSelectedUsers, setCopyProjectSelectedUsers] = useState<string[]>([]);
+  const [copyProjectNewName, setCopyProjectNewName] = useState("");
+  const [copyProjectIncludeDataList, setCopyProjectIncludeDataList] = useState(true);
+  const [copyProjectIncludeSettings, setCopyProjectIncludeSettings] = useState(true);
+  const [copyProjectPreserveLock, setCopyProjectPreserveLock] = useState(false);
+  const [copyProjectUserSearch, setCopyProjectUserSearch] = useState("");
+  const [isCopyingProject, setIsCopyingProject] = useState(false);
   const [isEditingHeaderName, setIsEditingHeaderName] = useState(false);
   const [headerNameInput, setHeaderNameInput] = useState("");
   const [showUserMenu, setShowUserMenu] = useState(false);
@@ -819,7 +831,7 @@ export default function App() {
       // Immediately inject CSS @font-face rules for all fonts and their candidate aliases using direct HTTP font URLs
       for (const font of apiFonts) {
         const rawUrl = font.url.startsWith("/") ? font.url : `/fonts/${encodeURIComponent(font.url)}`;
-        const primaryUrl = rawUrl.includes("?") ? rawUrl : `${rawUrl}?v=2`;
+        const primaryUrl = rawUrl.includes("?") ? rawUrl : `${rawUrl}?v=3`;
         const ext = font.url.toLowerCase();
         const fmt = ext.includes(".woff2") ? "woff2" : ext.includes(".woff") ? "woff" : ext.includes(".otf") ? "opentype" : "truetype";
         const aliases = generateFontAliases(font.name);
@@ -870,8 +882,8 @@ export default function App() {
         if (candidateFamilies.every(isFamilyLoadedInDoc)) return;
 
         const baseUrl = font.url.startsWith("/") ? font.url : `/fonts/${encodeURIComponent(font.url)}`;
-        // Ensure ?v=2 is present to bypass any poisoned 404 browser/CDN caches
-        const primaryUrl = baseUrl.includes("?") ? baseUrl : `${baseUrl}?v=2`;
+        // Ensure ?v=3 is present to bypass cached immutable font payloads
+        const primaryUrl = baseUrl.includes("?") ? baseUrl : `${baseUrl}?v=3`;
 
         const fetchFontBuffer = async (targetUrl: string, forceReload = false): Promise<ArrayBuffer> => {
           const response = await fetch(targetUrl, forceReload ? { cache: "reload" } : undefined);
@@ -1248,6 +1260,89 @@ export default function App() {
     } catch (err) {
       console.error("Failed to delete user", err);
       setNotification({ message: "Failed to delete user", type: 'error' });
+    }
+  };
+
+  const openCopyProjectModal = (proj: { id: string; name: string; username: string; imageUrl: string; isLocked?: boolean }) => {
+    if (!user || user.role !== 'admin') return;
+    setCopyProjectTarget(proj);
+    setCopyProjectSelectedUsers([]);
+    setCopyProjectNewName(proj.name);
+    setCopyProjectIncludeDataList(true);
+    setCopyProjectIncludeSettings(true);
+    setCopyProjectPreserveLock(false);
+    setCopyProjectUserSearch("");
+    if (allUsers.length === 0) {
+      fetchAllUsers();
+    }
+  };
+
+  const toggleCopyTargetUser = (targetUsername: string) => {
+    setCopyProjectSelectedUsers(prev =>
+      prev.includes(targetUsername)
+        ? prev.filter(u => u !== targetUsername)
+        : [...prev, targetUsername]
+    );
+  };
+
+  const handleCopyProjectToAccounts = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user || user.role !== 'admin' || !copyProjectTarget) return;
+    if (copyProjectSelectedUsers.length === 0) {
+      setNotification({ message: "Please select at least one target account", type: 'error' });
+      return;
+    }
+
+    setIsCopyingProject(true);
+    try {
+      const res = await fetch(`/api/admin/projects/${encodeURIComponent(copyProjectTarget.id)}/copy`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-sync-auth": btoa(user.username),
+        },
+        body: JSON.stringify({
+          targetUsernames: copyProjectSelectedUsers,
+          newName: copyProjectNewName.trim() || copyProjectTarget.name,
+          includeDataList: copyProjectIncludeDataList,
+          includeDataSettings: copyProjectIncludeSettings,
+          preserveLock: copyProjectPreserveLock,
+        }),
+      });
+      const data = await res.json().catch(() => ({ success: false, message: "Server error" }));
+      if (!res.ok || !data.success) {
+        setNotification({ message: data.message || "Failed to copy project", type: 'error' });
+        return;
+      }
+
+      const copiedProjects: ImageProject[] = Array.isArray(data.copiedProjects) ? data.copiedProjects : [];
+      const copiedForCurrentUser = copiedProjects.filter(p => p.username === user.username);
+      if (copiedForCurrentUser.length > 0) {
+        setProjects(prev => [...copiedForCurrentUser, ...prev]);
+      }
+
+      if (showUserManagementModal && adminMetricsData) {
+        fetchAdminCreationMetrics(adminMetricsRange, adminMetricsStartDate, adminMetricsEndDate, adminMetricsUserFilter);
+      }
+
+      const targetSummary =
+        copyProjectSelectedUsers.length === 1
+          ? copyProjectSelectedUsers[0]
+          : `${copyProjectSelectedUsers.length} accounts`;
+      const dataNote =
+        data.copiedDataRows > 0 && copyProjectIncludeDataList
+          ? ` (with ${data.copiedDataRows} saved data ${data.copiedDataRows === 1 ? "row" : "rows"})`
+          : "";
+      setNotification({
+        message: `Project "${copyProjectNewName.trim() || copyProjectTarget.name}" copied to ${targetSummary}${dataNote}`,
+        type: 'success',
+      });
+      setCopyProjectTarget(null);
+    } catch (err) {
+      console.error("Failed to copy project:", err);
+      setNotification({ message: "Failed to copy project to selected account(s)", type: 'error' });
+    } finally {
+      setIsCopyingProject(false);
     }
   };
 
@@ -3459,13 +3554,26 @@ export default function App() {
                 <Download className="w-4 h-4 sm:w-[18px] sm:h-[18px]" />
               </button>
               <button
-                onClick={() => setShowBulkModal(true)}
+                onClick={() => {
+                  setBulkPrefillRows(null);
+                  setShowBulkModal(true);
+                }}
                 title="Bulk Image Generator (Create multiple cards with spreadsheet data)"
                 className="flex items-center gap-1.5 px-2 sm:px-2.5 py-1.5 sm:py-2 bg-gradient-to-r from-blue-600/25 to-indigo-600/25 hover:from-blue-600/40 hover:to-indigo-600/40 text-blue-300 hover:text-white rounded-lg transition-all border border-blue-500/40 shadow-sm shrink-0"
               >
                 <Layers className="w-4 h-4 text-blue-400" />
                 <span className="hidden xl:inline text-xs font-semibold">Bulk Create</span>
               </button>
+              {currentProjectId && (
+                <button
+                  onClick={() => setShowDataListModal(true)}
+                  title="Saved Project Data List (Add, edit, delete, or import JSON/CSV records)"
+                  className="flex items-center gap-1.5 px-2 sm:px-2.5 py-1.5 sm:py-2 bg-emerald-600/20 hover:bg-emerald-600/35 text-emerald-300 hover:text-white rounded-lg transition-all border border-emerald-500/40 shadow-sm shrink-0"
+                >
+                  <Database className="w-4 h-4 text-emerald-400" />
+                  <span className="hidden xl:inline text-xs font-semibold">Data List</span>
+                </button>
+              )}
             </div>
           )}
           <button 
@@ -4491,28 +4599,48 @@ export default function App() {
                                           </div>
                                         </div>
 
-                                        {/* View Date Breakdown Button */}
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            setSelectedStatsProject({
-                                              id: proj.id,
-                                              name: proj.name,
-                                              imageUrl: proj.imageUrl,
-                                              layers: [],
-                                              isLocked: proj.isLocked,
-                                              createdAt: proj.createdAt,
-                                              copiesCount: proj.copiesCount,
-                                              downloadsCount: proj.downloadsCount,
-                                              sharesCount: proj.sharesCount,
-                                              creationsCount: proj.creationsCount
-                                            });
-                                          }}
-                                          className="w-full mt-2 py-1.5 px-2 bg-slate-700/50 hover:bg-amber-500/20 text-slate-300 hover:text-amber-300 border border-slate-700 hover:border-amber-500/30 rounded-lg text-[11px] font-medium flex items-center justify-center gap-1.5 transition-all"
-                                        >
-                                          <Sparkles size={11} className="text-amber-400" />
-                                          <span>View Date Breakdown</span>
-                                        </button>
+                                        {/* Project Action Buttons */}
+                                        <div className="mt-2 grid grid-cols-2 gap-1.5">
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              setSelectedStatsProject({
+                                                id: proj.id,
+                                                name: proj.name,
+                                                imageUrl: proj.imageUrl,
+                                                layers: [],
+                                                isLocked: proj.isLocked,
+                                                createdAt: proj.createdAt,
+                                                copiesCount: proj.copiesCount,
+                                                downloadsCount: proj.downloadsCount,
+                                                sharesCount: proj.sharesCount,
+                                                creationsCount: proj.creationsCount
+                                              });
+                                            }}
+                                            className="py-1.5 px-2 bg-slate-700/50 hover:bg-amber-500/20 text-slate-300 hover:text-amber-300 border border-slate-700 hover:border-amber-500/30 rounded-lg text-[11px] font-medium flex items-center justify-center gap-1 transition-all"
+                                          >
+                                            <Sparkles size={11} className="text-amber-400 shrink-0" />
+                                            <span className="truncate">Stats</span>
+                                          </button>
+
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              openCopyProjectModal({
+                                                id: proj.id,
+                                                name: proj.name,
+                                                username: u.username,
+                                                imageUrl: proj.imageUrl,
+                                                isLocked: proj.isLocked,
+                                              })
+                                            }
+                                            className="py-1.5 px-2 bg-indigo-600/20 hover:bg-indigo-600/35 text-indigo-300 hover:text-white border border-indigo-500/30 hover:border-indigo-400/50 rounded-lg text-[11px] font-medium flex items-center justify-center gap-1 transition-all"
+                                            title={`Copy "${proj.name}" to another account`}
+                                          >
+                                            <ArrowRightLeft size={11} className="text-indigo-400 shrink-0" />
+                                            <span className="truncate">Copy To</span>
+                                          </button>
+                                        </div>
                                       </div>
                                     ))}
                                   </div>
@@ -4711,6 +4839,468 @@ export default function App() {
             </motion.div>
           </div>
         )}
+
+        {copyProjectTarget && user?.role === 'admin' && (
+          <div
+            className="fixed inset-0 z-[130] flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm"
+            onClick={() => !isCopyingProject && setCopyProjectTarget(null)}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-slate-900 border border-slate-700/80 p-5 sm:p-6 rounded-2xl w-full max-w-lg shadow-2xl max-h-[90vh] flex flex-col overflow-hidden"
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between pb-3.5 border-b border-slate-800 shrink-0">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-10 h-10 rounded-xl bg-indigo-600/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400 shrink-0">
+                    <ArrowRightLeft size={18} />
+                  </div>
+                  <div className="min-w-0">
+                    <h3 className="text-base sm:text-lg font-bold text-white truncate">
+                      Copy Project to Account
+                    </h3>
+                    <p className="text-xs text-slate-400 truncate">
+                      Admin transfer • Duplicate template &amp; settings to another user
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={isCopyingProject}
+                  onClick={() => setCopyProjectTarget(null)}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              <form onSubmit={handleCopyProjectToAccounts} className="flex-1 overflow-y-auto pt-4 space-y-4 pr-1 custom-scrollbar">
+                {/* Source Project Summary */}
+                <div className="flex items-center gap-3 p-3 rounded-xl bg-slate-950/80 border border-slate-800">
+                  <div className="w-12 h-12 rounded-lg bg-slate-900 border border-slate-700 overflow-hidden shrink-0">
+                    <img
+                      src={copyProjectTarget.imageUrl}
+                      alt={copyProjectTarget.name}
+                      className="w-full h-full object-cover"
+                    />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold text-white truncate">{copyProjectTarget.name}</span>
+                      {copyProjectTarget.isLocked && (
+                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[10px]">
+                          <Lock size={9} /> Locked
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      Source owner: <span className="text-indigo-300 font-semibold">{copyProjectTarget.username}</span>
+                    </p>
+                  </div>
+                </div>
+
+                {/* New Name for Copied Project */}
+                <div>
+                  <label className="text-xs font-semibold text-slate-300 block mb-1.5">
+                    Project Name for Copy
+                  </label>
+                  <input
+                    type="text"
+                    value={copyProjectNewName}
+                    onChange={(e) => setCopyProjectNewName(e.target.value)}
+                    placeholder="Enter project name..."
+                    className="w-full bg-slate-950 border border-slate-700 focus:border-indigo-500 rounded-xl px-3.5 py-2 text-sm text-white placeholder-slate-500 outline-none transition-colors"
+                    required
+                  />
+                </div>
+
+                {/* Target Account Selection */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="text-xs font-semibold text-slate-300">
+                      Select Target Account(s)
+                      {copyProjectSelectedUsers.length > 0 && (
+                        <span className="ml-2 text-[11px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-mono">
+                          {copyProjectSelectedUsers.length} selected
+                        </span>
+                      )}
+                    </label>
+                    <div className="flex items-center gap-2 text-[11px]">
+                      {allUsers.some(u => u.username !== copyProjectTarget.username) && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setCopyProjectSelectedUsers(
+                              allUsers
+                                .filter(u => u.username !== copyProjectTarget.username)
+                                .map(u => u.username)
+                            )
+                          }
+                          className="text-indigo-400 hover:text-indigo-300 font-medium"
+                        >
+                          Select All Others
+                        </button>
+                      )}
+                      {copyProjectSelectedUsers.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setCopyProjectSelectedUsers([])}
+                          className="text-slate-400 hover:text-white font-medium"
+                        >
+                          Clear
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {allUsers.length > 4 && (
+                    <div className="relative">
+                      <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+                      <input
+                        type="text"
+                        value={copyProjectUserSearch}
+                        onChange={(e) => setCopyProjectUserSearch(e.target.value)}
+                        placeholder="Filter accounts..."
+                        className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded-xl pl-8 pr-3 py-1.5 text-xs text-white placeholder-slate-500 outline-none"
+                      />
+                    </div>
+                  )}
+
+                  <div className="bg-slate-950 border border-slate-800 rounded-xl divide-y divide-slate-800/70 max-h-48 overflow-y-auto custom-scrollbar">
+                    {allUsers.length === 0 ? (
+                      <div className="flex items-center justify-center gap-2 py-6 text-xs text-slate-400">
+                        <Loader2 size={14} className="animate-spin text-indigo-400" />
+                        <span>Loading accounts...</span>
+                      </div>
+                    ) : (
+                      allUsers
+                        .filter(u =>
+                          !copyProjectUserSearch.trim() ||
+                          u.username.toLowerCase().includes(copyProjectUserSearch.trim().toLowerCase())
+                        )
+                        .map(u => {
+                          const isChecked = copyProjectSelectedUsers.includes(u.username);
+                          const isOwner = u.username === copyProjectTarget.username;
+                          return (
+                            <label
+                              key={u.username}
+                              className={cn(
+                                "flex items-center justify-between gap-3 px-3 py-2.5 cursor-pointer transition-colors",
+                                isChecked ? "bg-indigo-600/15" : "hover:bg-slate-900/80"
+                              )}
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <input
+                                  type="checkbox"
+                                  checked={isChecked}
+                                  onChange={() => toggleCopyTargetUser(u.username)}
+                                  className="rounded bg-slate-900 border-slate-700 text-indigo-500 focus:ring-0"
+                                />
+                                <div className="w-7 h-7 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center text-xs font-bold text-slate-300 shrink-0">
+                                  {u.username[0]?.toUpperCase()}
+                                </div>
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span className="text-xs font-semibold text-white truncate">
+                                      {u.username}
+                                    </span>
+                                    {u.role === 'admin' && (
+                                      <span className="inline-flex items-center gap-0.5 text-[10px] px-1.5 py-0.2 rounded bg-blue-500/20 text-blue-300 border border-blue-500/30">
+                                        <Shield size={9} /> Admin
+                                      </span>
+                                    )}
+                                    {isOwner && (
+                                      <span className="text-[10px] px-1.5 py-0.2 rounded bg-slate-800 text-slate-400 border border-slate-700">
+                                        Current owner
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                              {isChecked && <Check size={14} className="text-indigo-400 shrink-0" />}
+                            </label>
+                          );
+                        })
+                    )}
+                  </div>
+                </div>
+
+                {/* Copy Options */}
+                <div className="space-y-2 pt-1">
+                  <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400 block">
+                    What to Copy
+                  </label>
+                  <div className="space-y-1.5 bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs">
+                    <label className="flex items-center justify-between gap-2 cursor-pointer py-0.5">
+                      <div>
+                        <span className="text-slate-200 font-medium block">Include Saved Data List</span>
+                        <span className="text-[10px] text-slate-500">Copy all saved database entries for this project</span>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={copyProjectIncludeDataList}
+                        onChange={(e) => setCopyProjectIncludeDataList(e.target.checked)}
+                        className="rounded bg-slate-900 border-slate-700 text-indigo-500 focus:ring-0"
+                      />
+                    </label>
+
+                    <div className="border-t border-slate-800/80 my-1" />
+
+                    <label className="flex items-center justify-between gap-2 cursor-pointer py-0.5">
+                      <div>
+                        <span className="text-slate-200 font-medium block">Include Group &amp; Layout Settings</span>
+                        <span className="text-[10px] text-slate-500">Copy Group By field, field order, spacing &amp; font scale</span>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={copyProjectIncludeSettings}
+                        onChange={(e) => setCopyProjectIncludeSettings(e.target.checked)}
+                        className="rounded bg-slate-900 border-slate-700 text-indigo-500 focus:ring-0"
+                      />
+                    </label>
+
+                    <div className="border-t border-slate-800/80 my-1" />
+
+                    <label className="flex items-center justify-between gap-2 cursor-pointer py-0.5">
+                      <div>
+                        <span className="text-slate-200 font-medium block">Keep Lock Status</span>
+                        <span className="text-[10px] text-slate-500">
+                          {copyProjectTarget.isLocked
+                            ? "Source project is locked (copied project will also be locked)"
+                            : "Copied project starts unlocked unless checked"}
+                        </span>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={copyProjectPreserveLock}
+                        onChange={(e) => setCopyProjectPreserveLock(e.target.checked)}
+                        className="rounded bg-slate-900 border-slate-700 text-indigo-500 focus:ring-0"
+                      />
+                    </label>
+                  </div>
+                </div>
+
+                {/* Footer */}
+                <div className="flex gap-3 pt-2 border-t border-slate-800">
+                  <button
+                    type="button"
+                    disabled={isCopyingProject}
+                    onClick={() => setCopyProjectTarget(null)}
+                    className="flex-1 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl transition-all font-medium text-sm disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isCopyingProject || copyProjectSelectedUsers.length === 0 || !copyProjectNewName.trim()}
+                    className="flex-1 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-xl transition-all font-semibold text-sm flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/20"
+                  >
+                    {isCopyingProject ? (
+                      <>
+                        <Loader2 size={15} className="animate-spin" />
+                        <span>Copying...</span>
+                      </>
+                    ) : (
+                      <>
+                        <ArrowRightLeft size={15} />
+                        <span>
+                          {copyProjectSelectedUsers.length > 1
+                            ? `Copy to ${copyProjectSelectedUsers.length} Accounts`
+                            : "Copy Project"}
+                        </span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+
+        {/* Floating Viewport-Clamped Project Kebab Menu */}
+        {openKebabProjectId && kebabMenuPos && (() => {
+          const proj = projects.find(p => p.id === openKebabProjectId);
+          if (!proj) return null;
+          const closeKebab = () => {
+            setOpenKebabProjectId(null);
+            setKebabMenuPos(null);
+          };
+          return (
+            <>
+              <div
+                className="fixed inset-0 z-[124] cursor-default"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  closeKebab();
+                }}
+              />
+              <div
+                onClick={(e) => e.stopPropagation()}
+                style={{
+                  left: `${kebabMenuPos.left}px`,
+                  top: kebabMenuPos.top !== undefined ? `${kebabMenuPos.top}px` : undefined,
+                  bottom: kebabMenuPos.bottom !== undefined ? `${kebabMenuPos.bottom}px` : undefined,
+                }}
+                className="fixed z-[125] w-46 min-w-[184px] max-h-[calc(100vh-16px)] overflow-y-auto bg-slate-900/95 backdrop-blur-md border border-slate-700/90 rounded-xl shadow-2xl p-1 animate-in fade-in zoom-in-95 duration-100 flex flex-col gap-0.5 text-xs text-slate-200"
+              >
+                {/* Lock / Unlock */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    closeKebab();
+                    toggleProjectLock(proj.id);
+                  }}
+                  className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-slate-800 text-left transition-colors"
+                >
+                  {proj.isLocked ? (
+                    <>
+                      <Unlock size={13} className="text-amber-400 shrink-0" />
+                      <span>Unlock Project</span>
+                    </>
+                  ) : (
+                    <>
+                      <Lock size={13} className="text-slate-400 shrink-0" />
+                      <span>Lock Project</span>
+                    </>
+                  )}
+                </button>
+
+                {/* Rename */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    closeKebab();
+                    setProjectToRename({ id: proj.id, name: proj.name });
+                    setRenameInputVal(proj.name);
+                  }}
+                  className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-slate-800 text-left transition-colors"
+                >
+                  <Edit2 size={13} className="text-blue-400 shrink-0" />
+                  <span>Rename</span>
+                </button>
+
+                {/* Export Layers */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    closeKebab();
+                    exportLayers(proj.id, proj.layers);
+                  }}
+                  className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-slate-800 text-left transition-colors"
+                >
+                  <FileDown size={13} className="text-cyan-400 shrink-0" />
+                  <span>Export Layers</span>
+                </button>
+
+                {/* Import Layers */}
+                <label
+                  className={cn(
+                    "flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left transition-colors cursor-pointer",
+                    proj.isLocked
+                      ? "opacity-50 cursor-not-allowed text-slate-500"
+                      : "hover:bg-slate-800 text-slate-200"
+                  )}
+                >
+                  <input
+                    type="file"
+                    className="hidden"
+                    accept=".json"
+                    onChange={(e) => {
+                      closeKebab();
+                      importLayers(e, proj.id);
+                    }}
+                    disabled={proj.isLocked}
+                  />
+                  <FileUp size={13} className="text-green-400 shrink-0" />
+                  <span>Import Layers</span>
+                </label>
+
+                {/* Creation Stats */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    closeKebab();
+                    setSelectedStatsProject(proj);
+                  }}
+                  className="flex items-center justify-between px-2.5 py-1.5 rounded-lg hover:bg-amber-500/10 text-amber-300 text-left transition-colors"
+                >
+                  <div className="flex items-center gap-2">
+                    <Sparkles size={13} className="text-amber-400 shrink-0" />
+                    <span>Creation Stats</span>
+                  </div>
+                  <span className="text-[10px] font-bold font-mono px-1 rounded bg-amber-500/20">
+                    {proj.creationsCount || 0}
+                  </span>
+                </button>
+
+                <div className="my-0.5 border-t border-slate-800" />
+
+                {/* Saved Data List */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    closeKebab();
+                    if (currentProjectId !== proj.id) {
+                      loadProject(proj);
+                    }
+                    setShowDataListModal(true);
+                  }}
+                  className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-emerald-600/20 text-emerald-300 hover:text-white text-left transition-colors"
+                >
+                  <Database size={13} className="text-emerald-400 shrink-0" />
+                  <span>Saved Data List</span>
+                </button>
+
+                {/* Bulk Image Creator */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    closeKebab();
+                    if (currentProjectId !== proj.id) {
+                      loadProject(proj);
+                    }
+                    setBulkPrefillRows(null);
+                    setShowBulkModal(true);
+                  }}
+                  className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-blue-600/20 text-blue-300 hover:text-white text-left transition-colors"
+                >
+                  <Layers size={13} className="text-blue-400 shrink-0" />
+                  <span>Bulk Image Creator</span>
+                </button>
+
+                {/* Admin: Copy Project to Another Account */}
+                {user?.role === 'admin' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      closeKebab();
+                      openCopyProjectModal(proj);
+                    }}
+                    className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-indigo-600/20 text-indigo-300 hover:text-white text-left transition-colors"
+                  >
+                    <ArrowRightLeft size={13} className="text-indigo-400 shrink-0" />
+                    <span>Copy to Account</span>
+                  </button>
+                )}
+
+                {/* Delete */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    closeKebab();
+                    deleteProject(proj.id);
+                  }}
+                  className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-red-500/20 text-red-400 hover:text-red-300 text-left transition-colors"
+                >
+                  <Trash2 size={13} className="shrink-0" />
+                  <span>Delete Project</span>
+                </button>
+              </div>
+            </>
+          );
+        })()}
 
         {/* Image Creation Analytics Modal */}
         {selectedStatsProject && (
@@ -4987,7 +5577,15 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar pb-72 md:pb-8">
+          <div
+            onScroll={() => {
+              if (openKebabProjectId) {
+                setOpenKebabProjectId(null);
+                setKebabMenuPos(null);
+              }
+            }}
+            className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar pb-72 md:pb-8"
+          >
             {/* Projects Section */}
             <div className="border-b border-slate-800">
               <div className="p-4 pb-2 flex items-center justify-between gap-1">
@@ -5098,7 +5696,26 @@ export default function App() {
                             type="button"
                             onClick={(e) => {
                               e.stopPropagation();
-                              setOpenKebabProjectId(openKebabProjectId === proj.id ? null : proj.id);
+                              if (openKebabProjectId === proj.id) {
+                                setOpenKebabProjectId(null);
+                                setKebabMenuPos(null);
+                                return;
+                              }
+                              const rect = e.currentTarget.getBoundingClientRect();
+                              const menuWidth = 188;
+                              const margin = 10;
+                              const idealLeft = rect.right - menuWidth >= margin
+                                ? rect.right - menuWidth
+                                : Math.max(margin, rect.left - 36);
+                              const clampedLeft = Math.max(margin, Math.min(idealLeft, window.innerWidth - menuWidth - margin));
+                              const approxMenuHeight = 320;
+                              const openUpward = rect.bottom + approxMenuHeight > window.innerHeight - margin && rect.top > approxMenuHeight;
+                              setKebabMenuPos(
+                                openUpward
+                                  ? { left: clampedLeft, bottom: Math.max(margin, window.innerHeight - rect.top + 4) }
+                                  : { left: clampedLeft, top: Math.max(margin, rect.bottom + 4) }
+                              );
+                              setOpenKebabProjectId(proj.id);
                             }}
                             className={cn(
                               "p-1 rounded bg-black/75 hover:bg-black text-slate-200 hover:text-white border border-slate-700/60 shadow-md backdrop-blur-sm transition-all flex items-center justify-center",
@@ -5110,144 +5727,6 @@ export default function App() {
                           >
                             <MoreVertical size={13} />
                           </button>
-
-                          {/* Kebab Dropdown Menu */}
-                          {openKebabProjectId === proj.id && (
-                            <>
-                              <div 
-                                className="fixed inset-0 z-40 cursor-default" 
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setOpenKebabProjectId(null);
-                                }} 
-                              />
-                              <div 
-                                onClick={(e) => e.stopPropagation()}
-                                className="absolute top-7 right-0 z-50 w-44 bg-slate-900/95 backdrop-blur-md border border-slate-700/90 rounded-xl shadow-2xl p-1 animate-in fade-in zoom-in-95 duration-100 flex flex-col gap-0.5 text-xs text-slate-200"
-                              >
-                                {/* Lock / Unlock */}
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setOpenKebabProjectId(null);
-                                    toggleProjectLock(proj.id);
-                                  }}
-                                  className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-slate-800 text-left transition-colors"
-                                >
-                                  {proj.isLocked ? (
-                                    <>
-                                      <Unlock size={13} className="text-amber-400 shrink-0" />
-                                      <span>Unlock Project</span>
-                                    </>
-                                  ) : (
-                                    <>
-                                      <Lock size={13} className="text-slate-400 shrink-0" />
-                                      <span>Lock Project</span>
-                                    </>
-                                  )}
-                                </button>
-
-                                {/* Rename */}
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setOpenKebabProjectId(null);
-                                    setProjectToRename({ id: proj.id, name: proj.name });
-                                    setRenameInputVal(proj.name);
-                                  }}
-                                  className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-slate-800 text-left transition-colors"
-                                >
-                                  <Edit2 size={13} className="text-blue-400 shrink-0" />
-                                  <span>Rename</span>
-                                </button>
-
-                                {/* Export Layers */}
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setOpenKebabProjectId(null);
-                                    exportLayers(proj.id, proj.layers);
-                                  }}
-                                  className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-slate-800 text-left transition-colors"
-                                >
-                                  <FileDown size={13} className="text-cyan-400 shrink-0" />
-                                  <span>Export Layers</span>
-                                </button>
-
-                                {/* Import Layers */}
-                                <label
-                                  className={cn(
-                                    "flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left transition-colors cursor-pointer",
-                                    proj.isLocked 
-                                      ? "opacity-50 cursor-not-allowed text-slate-500" 
-                                      : "hover:bg-slate-800 text-slate-200"
-                                  )}
-                                >
-                                  <input 
-                                    type="file" 
-                                    className="hidden" 
-                                    accept=".json" 
-                                    onChange={(e) => {
-                                      setOpenKebabProjectId(null);
-                                      importLayers(e, proj.id);
-                                    }} 
-                                    disabled={proj.isLocked}
-                                  />
-                                  <FileUp size={13} className="text-green-400 shrink-0" />
-                                  <span>Import Layers</span>
-                                </label>
-
-                                {/* Creation Stats */}
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setOpenKebabProjectId(null);
-                                    setSelectedStatsProject(proj);
-                                  }}
-                                  className="flex items-center justify-between px-2.5 py-1.5 rounded-lg hover:bg-amber-500/10 text-amber-300 text-left transition-colors"
-                                >
-                                  <div className="flex items-center gap-2">
-                                    <Sparkles size={13} className="text-amber-400 shrink-0" />
-                                    <span>Creation Stats</span>
-                                  </div>
-                                  <span className="text-[10px] font-bold font-mono px-1 rounded bg-amber-500/20">
-                                    {proj.creationsCount || 0}
-                                  </span>
-                                </button>
-
-                                <div className="my-0.5 border-t border-slate-800" />
-
-                                {/* Bulk Image Creator */}
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setOpenKebabProjectId(null);
-                                    if (currentProjectId !== proj.id) {
-                                      loadProject(proj);
-                                    }
-                                    setShowBulkModal(true);
-                                  }}
-                                  className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-blue-600/20 text-blue-300 hover:text-white text-left transition-colors"
-                                >
-                                  <Layers size={13} className="text-blue-400 shrink-0" />
-                                  <span>Bulk Image Creator</span>
-                                </button>
-
-                                {/* Delete */}
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setOpenKebabProjectId(null);
-                                    deleteProject(proj.id);
-                                  }}
-                                  className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-red-500/20 text-red-400 hover:text-red-300 text-left transition-colors"
-                                >
-                                  <Trash2 size={13} className="shrink-0" />
-                                  <span>Delete Project</span>
-                                </button>
-                              </div>
-                            </>
-                          )}
                         </div>
                       </div>
                     ))
@@ -7711,6 +8190,7 @@ export default function App() {
             <button
               onClick={() => {
                 setCanvasContextMenu(null);
+                setBulkPrefillRows(null);
                 setShowBulkModal(true);
               }}
               className="flex items-center gap-2 px-2.5 py-2 text-slate-200 hover:text-white hover:bg-blue-600/20 rounded-lg transition-colors group text-left"
@@ -7718,6 +8198,19 @@ export default function App() {
               <Layers size={14} className="text-blue-400 group-hover:text-blue-300" />
               <span className="font-medium">Bulk Create Images</span>
             </button>
+
+            {currentProjectId && (
+              <button
+                onClick={() => {
+                  setCanvasContextMenu(null);
+                  setShowDataListModal(true);
+                }}
+                className="flex items-center gap-2 px-2.5 py-2 text-slate-200 hover:text-white hover:bg-emerald-600/20 rounded-lg transition-colors group text-left"
+              >
+                <Database size={14} className="text-emerald-400 group-hover:text-emerald-300" />
+                <span className="font-medium">Saved Data List</span>
+              </button>
+            )}
 
             {currentProjectId && (
               <>
@@ -7753,7 +8246,10 @@ export default function App() {
       {showBulkModal && (image || currentProjectId) && (
         <BulkImageCreatorModal
           isOpen={showBulkModal}
-          onClose={() => setShowBulkModal(false)}
+          onClose={() => {
+            setShowBulkModal(false);
+            setBulkPrefillRows(null);
+          }}
           project={projects.find(p => p.id === currentProjectId) || {
             id: currentProjectId || 'temp',
             username: user?.username || 'user',
@@ -7765,6 +8261,63 @@ export default function App() {
           image={image || (projects.find(p => p.id === currentProjectId)?.imageUrl ?? '')}
           fonts={fonts}
           user={user}
+          initialRows={bulkPrefillRows}
+          onRecordCreationEvents={async (count: number, type?: 'copy' | 'download' | 'share') => {
+            if (currentProjectId) {
+              await recordCreationEvent(currentProjectId, type || 'download', count);
+            }
+          }}
+          onNotification={setNotification}
+        />
+      )}
+
+      {/* Project Saved Data List Modal */}
+      {showDataListModal && currentProjectId && (
+        <ProjectDataListModal
+          isOpen={showDataListModal}
+          onClose={() => setShowDataListModal(false)}
+          project={projects.find(p => p.id === currentProjectId) || {
+            id: currentProjectId,
+            username: user?.username || 'user',
+            imageUrl: image || '',
+            layers: layers,
+            name: 'Card Project',
+            createdAt: new Date().toISOString()
+          }}
+          image={image || (projects.find(p => p.id === currentProjectId)?.imageUrl ?? '')}
+          fonts={fonts}
+          user={user}
+          onApplyRowToCanvas={(rowValues) => {
+            setLayers(prev => {
+              const updated = prev.map(l => {
+                const nextLayer = { ...l };
+                if (rowValues[l.id] !== undefined) {
+                  nextLayer.text = rowValues[l.id];
+                }
+                if (rowValues[`${l.id}__suffix`] !== undefined) {
+                  nextLayer.selectedSuffix = rowValues[`${l.id}__suffix`];
+                }
+                return nextLayer;
+              });
+              // Recompute linked Sinhala number words if empty
+              return updated.map(l => {
+                if (l.isNumberLabel && l.linkedNumberId && !rowValues[l.id]) {
+                  const parent = updated.find(p => p.id === l.linkedNumberId);
+                  if (parent) {
+                    const mode = parent.numberFontMode || l.numberFontMode || 'fm';
+                    return { ...l, text: convertNumberToSinhala(parent.text, mode) || "" };
+                  }
+                }
+                return l;
+              });
+            });
+            setNotification({ message: "Record loaded onto card canvas!", type: "success" });
+          }}
+          onOpenInBulkCreator={(bulkRows) => {
+            setShowDataListModal(false);
+            setBulkPrefillRows(bulkRows);
+            setShowBulkModal(true);
+          }}
           onRecordCreationEvents={async (count: number, type?: 'copy' | 'download' | 'share') => {
             if (currentProjectId) {
               await recordCreationEvent(currentProjectId, type || 'download', count);

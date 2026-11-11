@@ -287,8 +287,8 @@ export function convertNumberToSinhala(
 export function isUnicodeFont(fontFamily?: string, mode?: 'fm' | 'unicode'): boolean {
   if (fontFamily) {
     const lower = fontFamily.toLowerCase().trim();
-    // Legacy ANSI / FM-compatible font families (FM, DL, DS, UN, APEX, AMS, AM, etc.)
-    if (/^(fm|dl|ds|kdu|un|apex|ams|am_|am\b|thar|keka|nilanthi|m_gemunu)/i.test(lower)) {
+    // Legacy ANSI / FM-compatible font families (FM, DL, DS, KDU, APEX, AMS, AM, etc.) — UN-* fonts are Unicode
+    if (/^(fm|dl|ds|kdu|apex|ams|am_|am\b|thar|keka|nilanthi|m_gemunu)/i.test(lower)) {
       return false;
     }
     return true;

@@ -3,7 +3,7 @@ import {
   X, Plus, Trash2, Copy, Download, Sparkles, FileSpreadsheet, Upload, 
   Eye, Check, AlertCircle, RefreshCw, Layers, ArrowDown, ChevronRight, FileDown, 
   CheckCircle2, Calendar, Share2, MessageCircle, Clock, Search, CheckCheck, FileUp,
-  Coins, Tag, MoreVertical
+  Coins, Tag, MoreVertical, Database, Save
 } from "lucide-react";
 import { 
   TextLayer, Font, prepareLayersForRow, generateBulkCardsZip, 
@@ -104,6 +104,7 @@ interface BulkImageCreatorModalProps {
   image: string;
   fonts: Font[];
   user: { username: string; role: 'admin' | 'user' } | null;
+  initialRows?: BulkRow[] | null;
   onRecordCreationEvents: (count: number, type?: 'copy' | 'download' | 'share') => Promise<void>;
   onNotification: (notif: { message: string; type: 'success' | 'error' | 'info' }) => void;
 }
@@ -123,6 +124,7 @@ export function BulkImageCreatorModal({
   image,
   fonts,
   user,
+  initialRows,
   onRecordCreationEvents,
   onNotification,
 }: BulkImageCreatorModalProps) {
@@ -168,8 +170,11 @@ export function BulkImageCreatorModal({
     return (project.layers || []).filter(l => l.visible !== false);
   }, [project.layers]);
 
-  // Initial rows: default to 1 row pre-filled with current project layer values
+  // Initial rows: use provided initialRows or default to 1 row pre-filled with current project layer values
   const [rows, setRows] = useState<BulkRow[]>(() => {
+    if (initialRows && initialRows.length > 0) {
+      return initialRows;
+    }
     const initialValues: Record<string, string> = {};
     activeLayers.forEach(l => {
       initialValues[l.id] = l.text || "";
@@ -185,6 +190,69 @@ export function BulkImageCreatorModal({
       }
     ];
   });
+
+  useEffect(() => {
+    if (initialRows && initialRows.length > 0) {
+      setRows(initialRows);
+      setSelectedRowIndex(0);
+      setGeneratedCardsMap({});
+      setActiveTab('editor');
+    }
+  }, [initialRows]);
+
+  const [isSyncingProjectList, setIsSyncingProjectList] = useState(false);
+
+  const handleLoadFromProjectDataList = async () => {
+    if (!project.id || project.id === 'temp') return;
+    setIsSyncingProjectList(true);
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}/data-list`);
+      if (!res.ok) throw new Error("Failed to fetch");
+      const data = await res.json();
+      const items = Array.isArray(data.items) ? data.items : [];
+      if (items.length === 0) {
+        onNotification({ message: "No saved records in this project's database list yet.", type: "info" });
+        return;
+      }
+      const loadedRows: BulkRow[] = items.map((item: any, idx: number) => ({
+        id: `row_${Date.now()}_${idx}`,
+        name: item.rowName || `${project.name} ${idx + 1}`,
+        values: { ...(item.rowValues || {}) },
+      }));
+      setRows(loadedRows);
+      setSelectedRowIndex(0);
+      setGeneratedCardsMap({});
+      onNotification({ message: `Loaded ${loadedRows.length} saved records from database!`, type: "success" });
+    } catch (err) {
+      console.error("Failed to load project data list:", err);
+      onNotification({ message: "Failed to load project saved list", type: "error" });
+    } finally {
+      setIsSyncingProjectList(false);
+    }
+  };
+
+  const handleSaveToProjectDataList = async () => {
+    if (!project.id || project.id === 'temp' || rows.length === 0) return;
+    setIsSyncingProjectList(true);
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}/data-list`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: user?.username || "user",
+          mode: "append",
+          items: rows.map(r => ({ rowName: r.name || "", rowValues: r.values || {} })),
+        }),
+      });
+      if (!res.ok) throw new Error("Save failed");
+      onNotification({ message: `Saved ${rows.length} rows to project database list!`, type: "success" });
+    } catch (err) {
+      console.error("Failed to save to project data list:", err);
+      onNotification({ message: "Failed to save rows to project list", type: "error" });
+    } finally {
+      setIsSyncingProjectList(false);
+    }
+  };
 
   const [selectedRowIndex, setSelectedRowIndex] = useState<number>(0);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -236,6 +304,13 @@ export function BulkImageCreatorModal({
   const [shareTargetCard, setShareTargetCard] = useState<{ name: string; filename: string; blob: Blob; dataUrl: string } | null>(null);
   const [isProcessingRowId, setIsProcessingRowId] = useState<string | null>(null);
   const [activeKebabRowId, setActiveKebabRowId] = useState<string | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    message: string;
+    confirmLabel: string;
+    onConfirm: () => Promise<void> | void;
+  } | null>(null);
+  const [isConfirmExecuting, setIsConfirmExecuting] = useState(false);
 
   // Close kebab menu when clicking anywhere outside
   useEffect(() => {
@@ -986,27 +1061,33 @@ export function BulkImageCreatorModal({
   };
 
   // Delete a history batch
-  const handleDeleteBatch = async (batchId: string) => {
-    if (!confirm("Are you sure you want to delete this creation history batch?")) return;
-    try {
-      await fetch(`/api/bulk-history/${batchId}`, { method: "DELETE" });
-      setHistoryBatches(prev => prev.filter(b => b.id !== batchId));
+  const handleDeleteBatch = (batchId: string) => {
+    setConfirmDialog({
+      title: "Delete History Batch",
+      message: "Are you sure you want to delete this creation history batch?",
+      confirmLabel: "Delete Batch",
+      onConfirm: async () => {
+        try {
+          await fetch(`/api/bulk-history/${batchId}`, { method: "DELETE" });
+          setHistoryBatches(prev => prev.filter(b => b.id !== batchId));
 
-      try {
-        const localKey = `bulk_history_${project.id}`;
-        const rawLocal = localStorage.getItem(localKey);
-        if (rawLocal) {
-          const list: BulkHistoryBatch[] = JSON.parse(rawLocal);
-          localStorage.setItem(localKey, JSON.stringify(list.filter(b => b.id !== batchId)));
+          try {
+            const localKey = `bulk_history_${project.id}`;
+            const rawLocal = localStorage.getItem(localKey);
+            if (rawLocal) {
+              const list: BulkHistoryBatch[] = JSON.parse(rawLocal);
+              localStorage.setItem(localKey, JSON.stringify(list.filter(b => b.id !== batchId)));
+            }
+          } catch (e) {
+            console.warn("Could not update local storage on delete", e);
+          }
+
+          onNotification({ message: "History batch deleted", type: "info" });
+        } catch (err) {
+          console.error("Failed to delete history batch:", err);
         }
-      } catch (e) {
-        console.warn("Could not update local storage on delete", e);
-      }
-
-      onNotification({ message: "History batch deleted", type: "info" });
-    } catch (err) {
-      console.error("Failed to delete history batch:", err);
-    }
+      },
+    });
   };
 
   // Copy card image to clipboard
@@ -1119,35 +1200,40 @@ export function BulkImageCreatorModal({
   };
 
   // Delete all batches for the selected date
-  const handleClearDateHistory = async () => {
+  const handleClearDateHistory = () => {
     if (filteredHistoryBatches.length === 0) return;
     const count = allHistoryRows.length;
     const dateLabel = selectedHistoryDate === 'all' ? 'all dates' : selectedHistoryDate;
-    if (!confirm(`Are you sure you want to delete all ${count} history cards for ${dateLabel}?`)) return;
+    setConfirmDialog({
+      title: "Clear History",
+      message: `Are you sure you want to delete all ${count} history cards for ${dateLabel}?`,
+      confirmLabel: "Clear History",
+      onConfirm: async () => {
+        try {
+          for (const b of filteredHistoryBatches) {
+            await fetch(`/api/bulk-history/${b.id}`, { method: "DELETE" });
+          }
+          const batchIdsToRemove = new Set(filteredHistoryBatches.map(b => b.id));
+          setHistoryBatches(prev => prev.filter(b => !batchIdsToRemove.has(b.id)));
 
-    try {
-      for (const b of filteredHistoryBatches) {
-        await fetch(`/api/bulk-history/${b.id}`, { method: "DELETE" });
-      }
-      const batchIdsToRemove = new Set(filteredHistoryBatches.map(b => b.id));
-      setHistoryBatches(prev => prev.filter(b => !batchIdsToRemove.has(b.id)));
+          try {
+            const localKey = `bulk_history_${project.id}`;
+            const rawLocal = localStorage.getItem(localKey);
+            if (rawLocal) {
+              const list: BulkHistoryBatch[] = JSON.parse(rawLocal);
+              localStorage.setItem(localKey, JSON.stringify(list.filter(b => !batchIdsToRemove.has(b.id))));
+            }
+          } catch (e) {
+            console.warn("Could not update local storage on delete", e);
+          }
 
-      try {
-        const localKey = `bulk_history_${project.id}`;
-        const rawLocal = localStorage.getItem(localKey);
-        if (rawLocal) {
-          const list: BulkHistoryBatch[] = JSON.parse(rawLocal);
-          localStorage.setItem(localKey, JSON.stringify(list.filter(b => !batchIdsToRemove.has(b.id))));
+          onNotification({ message: `History cleared for ${dateLabel}`, type: "info" });
+        } catch (err) {
+          console.error("Failed to delete history batches:", err);
+          onNotification({ message: "Failed to clear history", type: "error" });
         }
-      } catch (e) {
-        console.warn("Could not update local storage on delete", e);
-      }
-
-      onNotification({ message: `History cleared for ${dateLabel}`, type: "info" });
-    } catch (err) {
-      console.error("Failed to delete history batches:", err);
-      onNotification({ message: "Failed to clear history", type: "error" });
-    }
+      },
+    });
   };
 
   return (
@@ -1279,15 +1365,44 @@ export function BulkImageCreatorModal({
                   <span className="hidden sm:inline">CSV Template</span>
                 </button>
 
+                {/* Project Saved List Integration */}
+                {project.id && project.id !== 'temp' && (
+                  <>
+                    <button
+                      onClick={handleLoadFromProjectDataList}
+                      disabled={isSyncingProjectList}
+                      className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-cyan-600/15 hover:bg-cyan-600/25 text-cyan-300 border border-cyan-500/30 font-medium transition-colors"
+                      title="Load rows from this project's saved database list"
+                    >
+                      <Database size={13} className={isSyncingProjectList ? "animate-pulse" : ""} />
+                      <span className="hidden md:inline">Load Saved List</span>
+                    </button>
+                    <button
+                      onClick={handleSaveToProjectDataList}
+                      disabled={isSyncingProjectList || rows.length === 0}
+                      className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 font-medium transition-colors"
+                      title="Append current table rows into this project's saved database list"
+                    >
+                      <Save size={13} className="text-emerald-400" />
+                      <span className="hidden lg:inline">Save to List</span>
+                    </button>
+                  </>
+                )}
+
                 {/* Reset Rows */}
                 {rows.length > 1 && (
                   <button
                     onClick={() => {
-                      if (confirm("Reset rows back to 1 entry?")) {
-                        setRows([rows[0]]);
-                        setSelectedRowIndex(0);
-                        setGeneratedCardsMap({});
-                      }
+                      setConfirmDialog({
+                        title: "Reset Rows",
+                        message: "Reset rows back to 1 entry? Unsaved extra rows in the editor will be removed.",
+                        confirmLabel: "Reset Rows",
+                        onConfirm: () => {
+                          setRows([rows[0]]);
+                          setSelectedRowIndex(0);
+                          setGeneratedCardsMap({});
+                        },
+                      });
                     }}
                     className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-rose-400 hover:bg-rose-500/10 transition-colors"
                     title="Clear extra rows"
@@ -2348,6 +2463,59 @@ export function BulkImageCreatorModal({
                   className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium"
                 >
                   Close
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Modal Overlay: In-App Confirmation Dialog */}
+        {confirmDialog && (
+          <div className="fixed inset-0 z-[190] flex items-center justify-center bg-black/85 backdrop-blur-sm p-4">
+            <div className="bg-slate-900 border border-slate-700/80 rounded-2xl shadow-2xl max-w-md w-full p-5 flex flex-col gap-4 animate-in zoom-in-95 duration-150">
+              <div className="flex items-start gap-3">
+                <div className="w-10 h-10 rounded-xl bg-rose-500/15 border border-rose-500/30 flex items-center justify-center text-rose-400 shrink-0">
+                  <Trash2 size={18} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h3 className="text-sm sm:text-base font-bold text-white">
+                    {confirmDialog.title}
+                  </h3>
+                  <p className="text-xs text-slate-300 mt-1 leading-relaxed">
+                    {confirmDialog.message}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+                <button
+                  type="button"
+                  disabled={isConfirmExecuting}
+                  onClick={() => setConfirmDialog(null)}
+                  className="px-4 py-2 rounded-xl text-xs font-medium text-slate-300 hover:text-white hover:bg-slate-800 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={isConfirmExecuting}
+                  onClick={async () => {
+                    setIsConfirmExecuting(true);
+                    try {
+                      await confirmDialog.onConfirm();
+                    } finally {
+                      setIsConfirmExecuting(false);
+                      setConfirmDialog(null);
+                    }
+                  }}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold shadow-lg disabled:opacity-50 transition-colors"
+                >
+                  {isConfirmExecuting ? (
+                    <RefreshCw size={13} className="animate-spin" />
+                  ) : (
+                    <Trash2 size={13} />
+                  )}
+                  <span>{confirmDialog.confirmLabel}</span>
                 </button>
               </div>
             </div>

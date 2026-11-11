@@ -316,6 +316,31 @@ async function initDb() {
         CREATE INDEX IF NOT EXISTS idx_bulk_hist_user_date ON font_app_bulk_history (username, created_date DESC);
       `);
 
+      await safeQuery(`
+        CREATE TABLE IF NOT EXISTS font_app_project_data (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          username TEXT NOT NULL,
+          row_name TEXT NOT NULL DEFAULT '',
+          row_values JSONB NOT NULL DEFAULT '{}'::jsonb,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      await safeQuery(`
+        CREATE INDEX IF NOT EXISTS idx_project_data_proj ON font_app_project_data (project_id, sort_order ASC, created_at ASC);
+      `);
+
+      await safeQuery(`
+        CREATE TABLE IF NOT EXISTS font_app_project_data_settings (
+          project_id TEXT PRIMARY KEY,
+          group_by_layer_id TEXT NOT NULL DEFAULT '',
+          group_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+
       await safeQuery(
         "INSERT INTO users (username, password, role) VALUES ('admin', 'admin@1234', 'admin') ON CONFLICT (username) DO UPDATE SET role = 'admin'"
       );
@@ -329,7 +354,7 @@ async function initDb() {
             if (fs.existsSync(fp) && fs.statSync(fp).isFile()) {
               const buf = fs.readFileSync(fp);
               await safeQuery(
-                "INSERT INTO custom_fonts (name, data) VALUES ($1, $2) ON CONFLICT (name) DO NOTHING",
+                "INSERT INTO custom_fonts (name, data) VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET data = EXCLUDED.data WHERE custom_fonts.data IS DISTINCT FROM EXCLUDED.data",
                 [f, buf]
               );
             }
@@ -820,7 +845,7 @@ app.get("/api/fonts", async (req, res) => {
     }
 
     setNoCacheHeaders(res);
-    res.json(Array.from(byStem.values()).map(f => ({ name: f, url: `/fonts/${encodeURIComponent(f)}?v=2` })));
+    res.json(Array.from(byStem.values()).map(f => ({ name: f, url: `/fonts/${encodeURIComponent(f)}?v=3` })));
   } catch (err) {
     console.error("Fetch fonts error:", err);
     res.status(500).json({ success: false, message: "Internal server error" });
@@ -865,7 +890,7 @@ app.post("/api/upload-font", upload.single("font"), async (req, res) => {
         );
         cachedDbFontNames = null;
         fontCache.clear();
-        return res.json({ success: true, url: `/fonts/${encodeURIComponent(fileName)}?v=2`, name: fileName });
+        return res.json({ success: true, url: `/fonts/${encodeURIComponent(fileName)}?v=3`, name: fileName });
       } catch (err) {
         console.error("DB Font upload error:", err);
       }
@@ -874,7 +899,7 @@ app.post("/api/upload-font", upload.single("font"), async (req, res) => {
     const filePath = path.join(WRITABLE_FONTS_DIR, fileName);
     fs.writeFileSync(filePath, file.buffer);
     fontCache.clear();
-    res.json({ success: true, url: `/fonts/${encodeURIComponent(fileName)}?v=2`, name: fileName });
+    res.json({ success: true, url: `/fonts/${encodeURIComponent(fileName)}?v=3`, name: fileName });
   } catch (err) {
     console.error("Upload font error:", err);
     res.status(500).json({ success: false, message: "Internal server error" });
@@ -1521,6 +1546,286 @@ app.delete("/api/bulk-history/:id", async (req, res) => {
   }
 });
 
+// Project Saved Data List Endpoints
+app.get("/api/projects/:projectId/data-list", async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    if (HAS_POSTGRES) {
+      const result = await safeQuery(
+        `SELECT id, project_id as "projectId", username, row_name as "rowName",
+                row_values as "rowValues", sort_order as "sortOrder",
+                created_at as "createdAt", updated_at as "updatedAt"
+         FROM font_app_project_data
+         WHERE project_id = $1
+         ORDER BY sort_order ASC, created_at ASC`,
+        [projectId]
+      );
+      return res.json({ success: true, items: result.rows });
+    } else {
+      const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
+      const items = (data.projectData || [])
+        .filter((item: any) => item.projectId === projectId)
+        .sort((a: any, b: any) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+      return res.json({ success: true, items });
+    }
+  } catch (err) {
+    console.error("Error fetching project data list in api/index.ts:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+app.post("/api/projects/:projectId/data-list", async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const { username, mode = "append", item, items } = req.body;
+    const inputList: Array<{ id?: string; rowName?: string; rowValues?: Record<string, string> }> =
+      Array.isArray(items) ? items : item ? [item] : [];
+
+    if (inputList.length === 0 && mode !== "replace") {
+      return res.status(400).json({ success: false, message: "No items provided" });
+    }
+
+    const now = new Date().toISOString();
+
+    if (HAS_POSTGRES) {
+      if (mode === "replace") {
+        await safeQuery("DELETE FROM font_app_project_data WHERE project_id = $1", [projectId]);
+      }
+
+      const maxRes = await safeQuery(
+        "SELECT COALESCE(MAX(sort_order), -1) as max_order FROM font_app_project_data WHERE project_id = $1",
+        [projectId]
+      );
+      let nextOrder = Number(maxRes.rows[0]?.max_order ?? -1) + 1;
+
+      const insertedItems: any[] = [];
+      for (const entry of inputList) {
+        const rowId = entry.id || `pd_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+        const rowName = String(entry.rowName ?? "");
+        const rowValues = entry.rowValues || {};
+        const sortOrder = nextOrder++;
+
+        const insRes = await safeQuery(
+          `INSERT INTO font_app_project_data (id, project_id, username, row_name, row_values, sort_order, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+           ON CONFLICT (id) DO UPDATE SET
+             row_name = EXCLUDED.row_name,
+             row_values = EXCLUDED.row_values,
+             sort_order = EXCLUDED.sort_order,
+             updated_at = CURRENT_TIMESTAMP
+           RETURNING id, project_id as "projectId", username, row_name as "rowName",
+                     row_values as "rowValues", sort_order as "sortOrder",
+                     created_at as "createdAt", updated_at as "updatedAt"`,
+          [rowId, projectId, username || "user", rowName, JSON.stringify(rowValues), sortOrder]
+        );
+        if (insRes.rows[0]) {
+          insertedItems.push(insRes.rows[0]);
+        }
+      }
+      return res.json({ success: true, items: insertedItems });
+    } else {
+      const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
+      if (!data.projectData) data.projectData = [];
+
+      if (mode === "replace") {
+        data.projectData = data.projectData.filter((d: any) => d.projectId !== projectId);
+      }
+
+      const existingForProj = data.projectData.filter((d: any) => d.projectId === projectId);
+      let nextOrder = existingForProj.reduce((max: number, d: any) => Math.max(max, d.sortOrder ?? 0), -1) + 1;
+
+      const insertedItems: any[] = [];
+      for (const entry of inputList) {
+        const newItem = {
+          id: entry.id || `pd_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+          projectId,
+          username: username || "user",
+          rowName: String(entry.rowName ?? ""),
+          rowValues: entry.rowValues || {},
+          sortOrder: nextOrder++,
+          createdAt: now,
+          updatedAt: now
+        };
+        data.projectData.push(newItem);
+        insertedItems.push(newItem);
+      }
+      fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+      return res.json({ success: true, items: insertedItems });
+    }
+  } catch (err) {
+    console.error("Error adding project data list items in api/index.ts:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+app.get("/api/projects/:projectId/data-list/settings", async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    if (HAS_POSTGRES) {
+      const result = await safeQuery(
+        `SELECT project_id as "projectId", group_by_layer_id as "groupByLayerId",
+                group_config as "groupConfig", updated_at as "updatedAt"
+         FROM font_app_project_data_settings
+         WHERE project_id = $1`,
+        [projectId]
+      );
+      return res.json({ success: true, settings: result.rows[0] || null });
+    } else {
+      const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
+      const settings = (data.projectDataSettings && data.projectDataSettings[projectId]) || null;
+      return res.json({ success: true, settings });
+    }
+  } catch (err) {
+    console.error("Error fetching project data list settings in api/index.ts:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+app.put("/api/projects/:projectId/data-list/settings", async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const { groupByLayerId = "", groupConfig = {} } = req.body as {
+      groupByLayerId?: string;
+      groupConfig?: Record<string, any>;
+    };
+    const now = new Date().toISOString();
+
+    if (HAS_POSTGRES) {
+      const result = await safeQuery(
+        `INSERT INTO font_app_project_data_settings (project_id, group_by_layer_id, group_config, updated_at)
+         VALUES ($1, $2, $3::jsonb, $4)
+         ON CONFLICT (project_id) DO UPDATE
+         SET group_by_layer_id = EXCLUDED.group_by_layer_id,
+             group_config = EXCLUDED.group_config,
+             updated_at = EXCLUDED.updated_at
+         RETURNING project_id as "projectId", group_by_layer_id as "groupByLayerId",
+                   group_config as "groupConfig", updated_at as "updatedAt"`,
+        [projectId, String(groupByLayerId || ""), JSON.stringify(groupConfig || {}), now]
+      );
+      return res.json({ success: true, settings: result.rows[0] });
+    } else {
+      const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
+      if (!data.projectDataSettings) data.projectDataSettings = {};
+      const saved = {
+        projectId,
+        groupByLayerId: String(groupByLayerId || ""),
+        groupConfig: groupConfig || {},
+        updatedAt: now,
+      };
+      data.projectDataSettings[projectId] = saved;
+      fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+      return res.json({ success: true, settings: saved });
+    }
+  } catch (err) {
+    console.error("Error saving project data list settings in api/index.ts:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+app.put("/api/projects/:projectId/data-list/:id", async (req, res) => {
+  try {
+    const { projectId, id } = req.params;
+    const { rowName, rowValues, sortOrder } = req.body;
+
+    if (HAS_POSTGRES) {
+      const result = await safeQuery(
+        `UPDATE font_app_project_data
+         SET row_name = COALESCE($3, row_name),
+             row_values = COALESCE($4::jsonb, row_values),
+             sort_order = COALESCE($5, sort_order),
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1 AND project_id = $2
+         RETURNING id, project_id as "projectId", username, row_name as "rowName",
+                   row_values as "rowValues", sort_order as "sortOrder",
+                   created_at as "createdAt", updated_at as "updatedAt"`,
+        [
+          id,
+          projectId,
+          rowName !== undefined ? String(rowName) : null,
+          rowValues !== undefined ? JSON.stringify(rowValues) : null,
+          sortOrder !== undefined ? Number(sortOrder) : null
+        ]
+      );
+      if (result.rowCount === 0) {
+        return res.status(404).json({ success: false, message: "Item not found" });
+      }
+      return res.json({ success: true, item: result.rows[0] });
+    } else {
+      const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
+      if (!data.projectData) data.projectData = [];
+      const idx = data.projectData.findIndex((d: any) => d.id === id && d.projectId === projectId);
+      if (idx < 0) {
+        return res.status(404).json({ success: false, message: "Item not found" });
+      }
+      const existing = data.projectData[idx];
+      const updated = {
+        ...existing,
+        rowName: rowName !== undefined ? String(rowName) : existing.rowName,
+        rowValues: rowValues !== undefined ? rowValues : existing.rowValues,
+        sortOrder: sortOrder !== undefined ? Number(sortOrder) : existing.sortOrder,
+        updatedAt: new Date().toISOString()
+      };
+      data.projectData[idx] = updated;
+      fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+      return res.json({ success: true, item: updated });
+    }
+  } catch (err) {
+    console.error("Error updating project data item in api/index.ts:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+app.delete("/api/projects/:projectId/data-list/:id", async (req, res) => {
+  try {
+    const { projectId, id } = req.params;
+    if (HAS_POSTGRES) {
+      await safeQuery("DELETE FROM font_app_project_data WHERE id = $1 AND project_id = $2", [id, projectId]);
+    } else {
+      const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
+      if (data.projectData) {
+        data.projectData = data.projectData.filter((d: any) => !(d.id === id && d.projectId === projectId));
+        fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+      }
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Error deleting project data item in api/index.ts:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+app.post("/api/projects/:projectId/data-list/bulk-delete", async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const { ids } = req.body as { ids?: string[] };
+    if (HAS_POSTGRES) {
+      if (Array.isArray(ids) && ids.length > 0) {
+        await safeQuery(
+          "DELETE FROM font_app_project_data WHERE project_id = $1 AND id = ANY($2::text[])",
+          [projectId, ids]
+        );
+      } else {
+        await safeQuery("DELETE FROM font_app_project_data WHERE project_id = $1", [projectId]);
+      }
+    } else {
+      const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
+      if (data.projectData) {
+        if (Array.isArray(ids) && ids.length > 0) {
+          const idSet = new Set(ids);
+          data.projectData = data.projectData.filter((d: any) => !(d.projectId === projectId && idSet.has(d.id)));
+        } else {
+          data.projectData = data.projectData.filter((d: any) => d.projectId !== projectId);
+        }
+        fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+      }
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Error bulk deleting project data items in api/index.ts:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
 // Helper to parse date ranges for creation metrics
 function parseDateRange(range?: string, startDate?: string, endDate?: string) {
   if (range === "alltime" && !startDate && !endDate) {
@@ -1808,6 +2113,292 @@ app.get("/api/admin/creation-metrics", async (req, res) => {
     });
   } catch (err) {
     console.error("Error fetching admin creation metrics in api/index.ts:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+// Admin: Copy a project (image, layers, optional saved data list & layout settings) to one or more user accounts
+app.post("/api/admin/projects/:projectId/copy", async (req, res) => {
+  try {
+    const authHeader = req.headers["x-sync-auth"];
+    if (!authHeader || typeof authHeader !== "string") {
+      return res.status(403).json({ success: false, message: "Unauthorized: Admin authentication required" });
+    }
+
+    const requester = Buffer.from(authHeader, "base64").toString("utf-8").trim();
+    const { projectId } = req.params;
+    const {
+      targetUsername,
+      targetUsernames,
+      newName,
+      includeDataList = true,
+      includeDataSettings = true,
+      preserveLock = false,
+    } = req.body as {
+      targetUsername?: string;
+      targetUsernames?: string[];
+      newName?: string;
+      includeDataList?: boolean;
+      includeDataSettings?: boolean;
+      preserveLock?: boolean;
+    };
+
+    const rawTargets = Array.isArray(targetUsernames)
+      ? targetUsernames
+      : targetUsername
+        ? [targetUsername]
+        : [];
+    const cleanTargets = Array.from(
+      new Set(rawTargets.map(u => String(u || "").trim()).filter(Boolean))
+    );
+
+    if (cleanTargets.length === 0) {
+      return res.status(400).json({ success: false, message: "Please select at least one target account" });
+    }
+
+    if (HAS_POSTGRES) {
+      await initDb();
+
+      const adminRes = await safeQuery(
+        "SELECT username, role FROM users WHERE LOWER(TRIM(username)) = LOWER($1)",
+        [requester]
+      );
+      const adminUser = adminRes.rows[0];
+      if (!adminUser || adminUser.role !== "admin") {
+        return res.status(403).json({ success: false, message: "Unauthorized: Admin access required" });
+      }
+
+      const sourceRes = await safeQuery(
+        `SELECT id, username, image_url, layers, name, is_locked
+         FROM font_app_images
+         WHERE id = $1`,
+        [projectId]
+      );
+      if (!sourceRes.rowCount || sourceRes.rowCount === 0) {
+        return res.status(404).json({ success: false, message: "Source project not found" });
+      }
+      const source = sourceRes.rows[0];
+
+      const usersRes = await safeQuery(
+        "SELECT username FROM users WHERE username = ANY($1::text[])",
+        [cleanTargets]
+      );
+      const validUserSet = new Set(usersRes.rows.map((r: any) => r.username));
+      const missingUsers = cleanTargets.filter(u => !validUserSet.has(u));
+      if (missingUsers.length > 0) {
+        return res.status(404).json({
+          success: false,
+          message: `Target account not found: ${missingUsers.join(", ")}`,
+        });
+      }
+
+      const dataRows = includeDataList
+        ? (
+            await safeQuery(
+              `SELECT row_name, row_values, sort_order
+               FROM font_app_project_data
+               WHERE project_id = $1
+               ORDER BY sort_order ASC, created_at ASC`,
+              [projectId]
+            )
+          ).rows
+        : [];
+
+      const settingsRow = includeDataSettings
+        ? (
+            await safeQuery(
+              `SELECT group_by_layer_id, group_config
+               FROM font_app_project_data_settings
+               WHERE project_id = $1`,
+              [projectId]
+            )
+          ).rows[0] || null
+        : null;
+
+      const targetName =
+        typeof newName === "string" && newName.trim()
+          ? newName.trim()
+          : source.name || "Copied Project";
+      const targetLocked = preserveLock ? Boolean(source.is_locked) : false;
+      const serializedLayers = JSON.stringify(source.layers || []);
+
+      const copiedProjects: any[] = [];
+
+      for (let idx = 0; idx < cleanTargets.length; idx++) {
+        const targetUser = cleanTargets[idx];
+        const newProjectId = `${Math.random().toString(36).slice(2, 9)}${idx}${Date.now().toString(36).slice(-4)}`;
+
+        const insertRes = await safeQuery(
+          `INSERT INTO font_app_images
+             (id, username, image_url, layers, name, is_locked, copies_count, downloads_count, shares_count)
+           VALUES ($1, $2, $3, $4, $5, $6, 0, 0, 0)
+           RETURNING id, username, layers, name, is_locked as "isLocked", created_at as "createdAt"`,
+          [
+            newProjectId,
+            targetUser,
+            source.image_url || "",
+            serializedLayers,
+            targetName,
+            targetLocked,
+          ]
+        );
+
+        const inserted = insertRes.rows[0];
+
+        if (dataRows.length > 0) {
+          for (let rIdx = 0; rIdx < dataRows.length; rIdx++) {
+            const r = dataRows[rIdx];
+            const newRowId = `pdi_${Date.now().toString(36)}_${idx}_${rIdx}_${Math.random().toString(36).slice(2, 6)}`;
+            await safeQuery(
+              `INSERT INTO font_app_project_data (id, project_id, username, row_name, row_values, sort_order)
+               VALUES ($1, $2, $3, $4, $5::jsonb, $6)`,
+              [
+                newRowId,
+                newProjectId,
+                targetUser,
+                r.row_name || "",
+                JSON.stringify(r.row_values || {}),
+                Number(r.sort_order ?? rIdx),
+              ]
+            );
+          }
+        }
+
+        if (settingsRow) {
+          await safeQuery(
+            `INSERT INTO font_app_project_data_settings (project_id, group_by_layer_id, group_config)
+             VALUES ($1, $2, $3::jsonb)
+             ON CONFLICT (project_id) DO UPDATE SET
+               group_by_layer_id = EXCLUDED.group_by_layer_id,
+               group_config = EXCLUDED.group_config,
+               updated_at = CURRENT_TIMESTAMP`,
+            [
+              newProjectId,
+              settingsRow.group_by_layer_id || "",
+              JSON.stringify(settingsRow.group_config || {}),
+            ]
+          );
+        }
+
+        copiedProjects.push({
+          id: inserted.id,
+          username: inserted.username,
+          imageUrl: `/api/images/${inserted.id}/image`,
+          layers: inserted.layers || [],
+          name: inserted.name,
+          isLocked: Boolean(inserted.isLocked),
+          createdAt: inserted.createdAt,
+          copiesCount: 0,
+          downloadsCount: 0,
+          sharesCount: 0,
+          creationsCount: 0,
+          copiedDataCount: dataRows.length,
+        });
+      }
+
+      return res.json({
+        success: true,
+        copiedCount: copiedProjects.length,
+        copiedProjects,
+        copiedDataRows: dataRows.length,
+      });
+    } else {
+      const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
+      const adminUser = (data.users || []).find(
+        (u: any) => String(u.username || "").trim().toLowerCase() === requester.toLowerCase()
+      );
+      if (!adminUser || adminUser.role !== "admin") {
+        return res.status(403).json({ success: false, message: "Unauthorized: Admin access required" });
+      }
+
+      const source = (data.images || []).find((img: any) => img.id === projectId);
+      if (!source) {
+        return res.status(404).json({ success: false, message: "Source project not found" });
+      }
+
+      const validUserSet = new Set((data.users || []).map((u: any) => u.username));
+      const missingUsers = cleanTargets.filter(u => !validUserSet.has(u));
+      if (missingUsers.length > 0) {
+        return res.status(404).json({
+          success: false,
+          message: `Target account not found: ${missingUsers.join(", ")}`,
+        });
+      }
+
+      const sourceDataRows = includeDataList
+        ? (data.projectData || []).filter((d: any) => d.projectId === projectId)
+        : [];
+      const sourceSettings =
+        includeDataSettings && data.projectDataSettings
+          ? data.projectDataSettings[projectId] || null
+          : null;
+
+      const targetName =
+        typeof newName === "string" && newName.trim()
+          ? newName.trim()
+          : source.name || "Copied Project";
+      const targetLocked = preserveLock ? Boolean(source.isLocked) : false;
+
+      if (!data.images) data.images = [];
+      if (includeDataList && !data.projectData) data.projectData = [];
+      if (includeDataSettings && !data.projectDataSettings) data.projectDataSettings = {};
+
+      const copiedProjects: any[] = [];
+      for (let idx = 0; idx < cleanTargets.length; idx++) {
+        const targetUser = cleanTargets[idx];
+        const newProjectId = `${Math.random().toString(36).slice(2, 9)}${idx}${Date.now().toString(36).slice(-4)}`;
+        const now = new Date().toISOString();
+
+        const newProj = {
+          ...source,
+          id: newProjectId,
+          username: targetUser,
+          name: targetName,
+          isLocked: targetLocked,
+          createdAt: now,
+          copiesCount: 0,
+          downloadsCount: 0,
+          sharesCount: 0,
+          layers: JSON.parse(JSON.stringify(source.layers || [])),
+        };
+        data.images.push(newProj);
+
+        sourceDataRows.forEach((r: any, rIdx: number) => {
+          data.projectData.push({
+            ...r,
+            id: `pdi_${Date.now().toString(36)}_${idx}_${rIdx}_${Math.random().toString(36).slice(2, 6)}`,
+            projectId: newProjectId,
+            username: targetUser,
+            createdAt: now,
+            updatedAt: now,
+          });
+        });
+
+        if (sourceSettings) {
+          data.projectDataSettings[newProjectId] = {
+            ...sourceSettings,
+            projectId: newProjectId,
+            updatedAt: now,
+          };
+        }
+
+        copiedProjects.push({
+          ...newProj,
+          creationsCount: 0,
+          copiedDataCount: sourceDataRows.length,
+        });
+      }
+
+      fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+      return res.json({
+        success: true,
+        copiedCount: copiedProjects.length,
+        copiedProjects,
+        copiedDataRows: sourceDataRows.length,
+      });
+    }
+  } catch (err) {
+    console.error("Error copying project to another account in api/index.ts:", err);
     res.status(500).json({ success: false, message: "Internal server error" });
   }
 });
