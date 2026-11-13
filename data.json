@@ -1,0 +1,10 @@
+{
+  "users": [
+    {
+      "username": "admin",
+      "password": "admin@1234",
+      "role": "admin"
+    }
+  ],
+  "images": []
+}

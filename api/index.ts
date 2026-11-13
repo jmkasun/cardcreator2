@@ -119,6 +119,17 @@ function setCachedProjectImage(id: string, buffer: Buffer, contentType: string) 
   projectImageCache.set(id, { buffer, contentType });
 }
 
+const projectTemplateImageCache = new Map<string, { buffer: Buffer; contentType: string }>();
+const MAX_CACHED_TEMPLATE_IMAGES = 60;
+
+function setCachedTemplateImage(id: string, buffer: Buffer, contentType: string) {
+  if (projectTemplateImageCache.size >= MAX_CACHED_TEMPLATE_IMAGES) {
+    const oldestKey = projectTemplateImageCache.keys().next().value;
+    if (oldestKey) projectTemplateImageCache.delete(oldestKey);
+  }
+  projectTemplateImageCache.set(id, { buffer, contentType });
+}
+
 pool.on('error', (err: any) => {
   // Managed Postgres providers routinely close idle connections (57P01).
   // pg.Pool automatically evicts the closed idle client and reconnects on the next query.
@@ -339,6 +350,19 @@ async function initDb() {
           group_config JSONB NOT NULL DEFAULT '{}'::jsonb,
           updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
+      `);
+
+      await safeQuery(`
+        CREATE TABLE IF NOT EXISTS font_app_project_templates (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          image_data TEXT NOT NULL,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      await safeQuery(`
+        CREATE INDEX IF NOT EXISTS idx_project_templates_proj ON font_app_project_templates (project_id, created_at ASC);
       `);
 
       await safeQuery(
@@ -1279,10 +1303,18 @@ app.delete("/api/images/:id", async (req, res) => {
     
     if (process.env.DATABASE_URL) {
       await initDb();
+      const tplRows = await safeQuery("SELECT id FROM font_app_project_templates WHERE project_id = $1", [id]);
+      for (const row of tplRows.rows) {
+        projectTemplateImageCache.delete(row.id);
+      }
+      await safeQuery("DELETE FROM font_app_project_templates WHERE project_id = $1", [id]);
+      await safeQuery("DELETE FROM font_app_project_data WHERE project_id = $1", [id]);
+      await safeQuery("DELETE FROM font_app_project_data_settings WHERE project_id = $1", [id]);
       await safeQuery("DELETE FROM font_app_images WHERE id = $1", [id]);
     } else {
       const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
       data.images = data.images.filter((img: any) => img.id !== id);
+      if (data.projectTemplates) delete data.projectTemplates[id];
       fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
     }
     projectImageCache.delete(id);
@@ -1718,6 +1750,221 @@ app.put("/api/projects/:projectId/data-list/settings", async (req, res) => {
     }
   } catch (err) {
     console.error("Error saving project data list settings in api/index.ts:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+// Project Alternative Template Images (within the same project)
+app.get("/api/projects/:projectId/templates", async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    if (HAS_POSTGRES) {
+      await initDb();
+      const result = await safeQuery(
+        `SELECT id, project_id as "projectId", name, created_at as "createdAt"
+         FROM font_app_project_templates
+         WHERE project_id = $1
+         ORDER BY created_at ASC`,
+        [projectId]
+      );
+      const templates = result.rows.map(row => ({
+        ...row,
+        url: `/api/projects/${encodeURIComponent(projectId)}/templates/${encodeURIComponent(row.id)}/image`,
+      }));
+      return res.json({ success: true, templates });
+    } else {
+      const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
+      const list = ((data.projectTemplates && data.projectTemplates[projectId]) || []) as Array<any>;
+      const templates = list.map(t => ({
+        id: t.id,
+        projectId,
+        name: t.name,
+        createdAt: t.createdAt,
+        url: `/api/projects/${encodeURIComponent(projectId)}/templates/${encodeURIComponent(t.id)}/image`,
+      }));
+      return res.json({ success: true, templates });
+    }
+  } catch (err) {
+    console.error("Error fetching project templates in api/index.ts:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+app.get("/api/projects/:projectId/templates/:tplId/image", async (req, res) => {
+  try {
+    const { projectId, tplId } = req.params;
+    const etag = `"tpl_${tplId}"`;
+
+    if (req.headers["if-none-match"] === etag) {
+      res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+      res.setHeader("ETag", etag);
+      return res.status(304).end();
+    }
+
+    if (projectTemplateImageCache.has(tplId)) {
+      const cached = projectTemplateImageCache.get(tplId)!;
+      res.setHeader("Content-Type", cached.contentType);
+      res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+      res.setHeader("ETag", etag);
+      return res.send(cached.buffer);
+    }
+
+    let rawUrl = "";
+    if (HAS_POSTGRES) {
+      await initDb();
+      const result = await safeQuery(
+        "SELECT image_data FROM font_app_project_templates WHERE id = $1 AND project_id = $2",
+        [tplId, projectId]
+      );
+      if (result.rowCount && result.rowCount > 0) {
+        rawUrl = result.rows[0].image_data || "";
+      }
+    } else {
+      const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
+      const list = ((data.projectTemplates && data.projectTemplates[projectId]) || []) as Array<any>;
+      const found = list.find(t => t.id === tplId);
+      if (found) rawUrl = found.imageData || "";
+    }
+
+    if (!rawUrl) return res.status(404).send("Template image not found");
+
+    if (rawUrl.startsWith("data:")) {
+      const matches = rawUrl.match(/^data:([^;]+);base64,(.+)$/s);
+      if (matches && matches.length === 3) {
+        const contentType = matches[1];
+        const buffer = Buffer.from(matches[2], "base64");
+        setCachedTemplateImage(tplId, buffer, contentType);
+        res.setHeader("Content-Type", contentType);
+        res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+        res.setHeader("ETag", etag);
+        return res.send(buffer);
+      }
+    }
+
+    return res.redirect(rawUrl);
+  } catch (err) {
+    console.error("Error serving project template image in api/index.ts:", err);
+    res.status(500).send("Internal server error");
+  }
+});
+
+app.post("/api/projects/:projectId/templates", async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const { name, imageData } = req.body as { name?: string; imageData?: string };
+
+    if (!imageData || typeof imageData !== "string" || !imageData.startsWith("data:image/")) {
+      return res.status(400).json({ success: false, message: "Valid imageData data URL is required" });
+    }
+
+    const tplId = `tpl_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+    const cleanName = (typeof name === "string" && name.trim()) ? name.trim().slice(0, 120) : "Template Image";
+    const now = new Date().toISOString();
+
+    if (HAS_POSTGRES) {
+      await initDb();
+      await safeQuery(
+        `INSERT INTO font_app_project_templates (id, project_id, name, image_data)
+         VALUES ($1, $2, $3, $4)`,
+        [tplId, projectId, cleanName, imageData]
+      );
+    } else {
+      const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
+      if (!data.projectTemplates) data.projectTemplates = {};
+      if (!Array.isArray(data.projectTemplates[projectId])) data.projectTemplates[projectId] = [];
+      data.projectTemplates[projectId].push({
+        id: tplId,
+        projectId,
+        name: cleanName,
+        imageData,
+        createdAt: now,
+      });
+      fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+    }
+
+    return res.json({
+      success: true,
+      template: {
+        id: tplId,
+        projectId,
+        name: cleanName,
+        createdAt: now,
+        url: `/api/projects/${encodeURIComponent(projectId)}/templates/${encodeURIComponent(tplId)}/image`,
+      },
+    });
+  } catch (err) {
+    console.error("Error creating project template in api/index.ts:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+app.put("/api/projects/:projectId/templates/:tplId", async (req, res) => {
+  try {
+    const { projectId, tplId } = req.params;
+    const { name } = req.body as { name?: string };
+    const cleanName = (typeof name === "string" && name.trim()) ? name.trim().slice(0, 120) : "Template Image";
+
+    if (HAS_POSTGRES) {
+      await initDb();
+      const result = await safeQuery(
+        `UPDATE font_app_project_templates
+         SET name = $3
+         WHERE id = $1 AND project_id = $2
+         RETURNING id, project_id as "projectId", name, created_at as "createdAt"`,
+        [tplId, projectId, cleanName]
+      );
+      if (!result.rowCount) return res.status(404).json({ success: false, message: "Template not found" });
+      return res.json({
+        success: true,
+        template: {
+          ...result.rows[0],
+          url: `/api/projects/${encodeURIComponent(projectId)}/templates/${encodeURIComponent(tplId)}/image`,
+        },
+      });
+    } else {
+      const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
+      const list = ((data.projectTemplates && data.projectTemplates[projectId]) || []) as Array<any>;
+      const target = list.find(t => t.id === tplId);
+      if (!target) return res.status(404).json({ success: false, message: "Template not found" });
+      target.name = cleanName;
+      fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+      return res.json({
+        success: true,
+        template: {
+          id: target.id,
+          projectId,
+          name: target.name,
+          createdAt: target.createdAt,
+          url: `/api/projects/${encodeURIComponent(projectId)}/templates/${encodeURIComponent(tplId)}/image`,
+        },
+      });
+    }
+  } catch (err) {
+    console.error("Error renaming project template in api/index.ts:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+app.delete("/api/projects/:projectId/templates/:tplId", async (req, res) => {
+  try {
+    const { projectId, tplId } = req.params;
+    if (HAS_POSTGRES) {
+      await initDb();
+      await safeQuery(
+        "DELETE FROM font_app_project_templates WHERE id = $1 AND project_id = $2",
+        [tplId, projectId]
+      );
+    } else {
+      const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
+      if (data.projectTemplates && Array.isArray(data.projectTemplates[projectId])) {
+        data.projectTemplates[projectId] = data.projectTemplates[projectId].filter((t: any) => t.id !== tplId);
+        fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+      }
+    }
+    projectTemplateImageCache.delete(tplId);
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("Error deleting project template in api/index.ts:", err);
     res.status(500).json({ success: false, message: "Internal server error" });
   }
 });
@@ -2264,7 +2511,45 @@ app.post("/api/admin/projects/:projectId/copy", async (req, res) => {
           }
         }
 
+        const templateRows = (
+          await safeQuery(
+            `SELECT id, name, image_data
+             FROM font_app_project_templates
+             WHERE project_id = $1
+             ORDER BY created_at ASC`,
+            [projectId]
+          )
+        ).rows;
+
+        const tplIdMap = new Map<string, string>();
+        for (let tIdx = 0; tIdx < templateRows.length; tIdx++) {
+          const tpl = templateRows[tIdx];
+          const newTplId = `tpl_${Date.now().toString(36)}_${idx}_${tIdx}_${Math.random().toString(36).slice(2, 6)}`;
+          tplIdMap.set(tpl.id, newTplId);
+          await safeQuery(
+            `INSERT INTO font_app_project_templates (id, project_id, name, image_data)
+             VALUES ($1, $2, $3, $4)`,
+            [newTplId, newProjectId, tpl.name || "Template Image", tpl.image_data || ""]
+          );
+        }
+
         if (settingsRow) {
+          const copiedConfig = JSON.parse(JSON.stringify(settingsRow.group_config || {}));
+          if (copiedConfig.imageRules && typeof copiedConfig.imageRules === "object") {
+            for (const k of ["maleTemplateId", "femaleTemplateId", "multipleTemplateId", "singleFallbackTemplateId"]) {
+              if (copiedConfig.imageRules[k] && tplIdMap.has(copiedConfig.imageRules[k])) {
+                copiedConfig.imageRules[k] = tplIdMap.get(copiedConfig.imageRules[k]);
+              }
+            }
+          }
+          if (copiedConfig.groupImageOverrides && typeof copiedConfig.groupImageOverrides === "object") {
+            for (const gk of Object.keys(copiedConfig.groupImageOverrides)) {
+              const ov = copiedConfig.groupImageOverrides[gk];
+              if (ov && tplIdMap.has(ov)) {
+                copiedConfig.groupImageOverrides[gk] = tplIdMap.get(ov);
+              }
+            }
+          }
           await safeQuery(
             `INSERT INTO font_app_project_data_settings (project_id, group_by_layer_id, group_config)
              VALUES ($1, $2, $3::jsonb)
@@ -2275,7 +2560,7 @@ app.post("/api/admin/projects/:projectId/copy", async (req, res) => {
             [
               newProjectId,
               settingsRow.group_by_layer_id || "",
-              JSON.stringify(settingsRow.group_config || {}),
+              JSON.stringify(copiedConfig),
             ]
           );
         }
