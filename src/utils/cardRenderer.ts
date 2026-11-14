@@ -1366,7 +1366,7 @@ export async function renderGroupedLayersOnCanvas(
   // Calculate vertical auto-fit scaling so entries never clip off the bottom edge or overlap lower blessing lines
   const maxFieldFontSize = Math.max(...orderedFieldLayers.map(l => l.fontSize || 32));
   const userFontScale = Math.max(0.4, Math.min(2.0, options.fontScale || 1));
-  const lineGap = Math.max(1.05, Math.min(3.0, options.lineGapScale || 1.55));
+  const lineGap = Math.max(1.30, Math.min(3.0, options.lineGapScale || 1.55));
 
   const priceFieldsForTotal = options.showGroupTotal
     ? orderedFieldLayers.filter(isNumericPriceField)
@@ -1421,8 +1421,8 @@ export async function renderGroupedLayersOnCanvas(
 
       if (desiredCenterSpan > allowedCenterSpan) {
         // First compress inter-row and subline spacing slightly before shrinking font size
-        const minRowStep = maxFieldFontSize * userFontScale * Math.min(lineGap, 1.12);
-        const minSublineStep = maxFieldFontSize * userFontScale * 1.02;
+        const minRowStep = maxFieldFontSize * userFontScale * Math.min(lineGap, 1.30);
+        const minSublineStep = maxFieldFontSize * userFontScale * 1.05;
         const minSpacingSpan = sublineStepsCount * minSublineStep + itemStepsCount * minRowStep;
 
         if (minSpacingSpan <= allowedCenterSpan && desiredCenterSpan > minSpacingSpan) {
@@ -1795,7 +1795,7 @@ export async function renderGroupedCardToCanvas(
     const maxFieldFontSize = Math.max(...orderedFieldLayers.map(l => l.fontSize || 32));
     const userFontScale = Math.max(0.4, Math.min(2.0, options.fontScale || 1));
     const baseFS = maxFieldFontSize * userFontScale;
-    const userLineGap = Math.max(1.05, Math.min(3.0, options.lineGapScale || 1.55));
+    const userLineGap = Math.max(1.30, Math.min(3.0, options.lineGapScale || 1.55));
     const userRowStep = baseFS * userLineGap;
     const userSublineGap = baseFS * 1.15;
 
@@ -1804,7 +1804,8 @@ export async function renderGroupedCardToCanvas(
       : [];
     const hasTotalRow = options.showGroupTotal && priceFieldsForTotal.length > 0;
 
-    const userPadPx = Math.round(Math.max(6, ((options.spacePaddingPercent ?? 2.0) / 100) * bgH));
+    const clampedPadPercent = Math.max(1.5, options.spacePaddingPercent ?? 2.0);
+    const userPadPx = Math.round(Math.max(6, (clampedPadPercent / 100) * bgH));
 
     // Measure exact visual ink ascent/descent for every line to guarantee true visual centering
     canvas.width = bgW;
@@ -1904,37 +1905,41 @@ export async function renderGroupedCardToCanvas(
 
     const G = detectedGap.origHeight;
     const allowAutoCenter = options.autoCenterInAvailableSpace !== false;
-    const minComfortPad = Math.max(6, Math.round(bgH * 0.008));
-    const minComfortRowStep = baseFS * 1.22;
+    const minComfortPad = Math.max(6, Math.round(bgH * 0.015));
+    const minComfortRowStep = baseFS * 1.30;
     const minComfortSubGap = baseFS * 1.05;
     const minFitCenterSpan = sublineStepsCount * minComfortSubGap + itemStepsCount * minComfortRowStep;
     const minFitHeight = line1Ascent + minFitCenterSpan + lastLineDescent + minComfortPad * 2;
 
     // --- FAST SYMMETRIC AUTO-CENTER PATH (when fixed-height template already has enough blank space) ---
+    const onePercentPx = bgH * 0.01;
     if (isFixedHeightMode && allowAutoCenter && minFitHeight <= G) {
       let chosenFontScale = userFontScale;
       let chosenRowStep = userRowStep;
       let chosenSublineGap = userSublineGap;
+      let targetAutoPadPx: number | null = null;
 
       if (totalStepCount > 0) {
         const sumInkTotal = line1Ascent + lastLineDescent + totalStepCount * avgPairInk;
         const totalWhiteSpace = Math.max(0, G - sumInkTotal);
         // Reserve ~55% of visual line gap for wrapped sublines of the same record vs separate rows
         const effectiveGapWeight = itemStepsCount + 0.55 * sublineStepsCount;
-        // Frame the block symmetrically so top/bottom outer margins are ~1.5x the gap between rows
-        const idealOuterPad = totalWhiteSpace / Math.max(2, 2 + 0.65 * effectiveGapWeight);
-        const idealVisualRowGap = 0.65 * idealOuterPad;
+        // Base symmetric outer margin, then set automatically 1% smaller per user preference
+        const baseIdealOuterPad = totalWhiteSpace / Math.max(2, 2 + 0.65 * effectiveGapWeight);
+        targetAutoPadPx = Math.max(minComfortPad, baseIdealOuterPad - onePercentPx);
+        const freedWhiteSpaceForGaps = Math.max(0, totalWhiteSpace - targetAutoPadPx * 2);
+        const targetVisualRowGap = freedWhiteSpaceForGaps / Math.max(0.5, effectiveGapWeight);
 
-        const minVisualRowGap = Math.max(3, baseFS * 0.22);
-        const maxVisualRowGap = Math.max(minVisualRowGap, baseFS * 1.15);
-        const clampedVisualRowGap = Math.max(minVisualRowGap, Math.min(maxVisualRowGap, idealVisualRowGap));
+        const minVisualRowGap = Math.max(3, baseFS * 0.25);
+        const maxVisualRowGap = Math.max(minVisualRowGap, baseFS * 1.35);
+        const clampedVisualRowGap = Math.max(minVisualRowGap, Math.min(maxVisualRowGap, targetVisualRowGap));
 
         chosenRowStep = Math.max(
-          baseFS * 1.18,
-          Math.min(baseFS * 2.25, avgPairInk + clampedVisualRowGap)
+          minComfortRowStep,
+          Math.min(baseFS * 2.40, avgPairInk + clampedVisualRowGap)
         );
         chosenSublineGap = Math.max(
-          baseFS * 1.05,
+          minComfortSubGap,
           avgPairInk + 0.55 * Math.max(0, chosenRowStep - avgPairInk)
         );
 
@@ -1942,14 +1947,18 @@ export async function renderGroupedCardToCanvas(
         const maxAllowedSpan = Math.max(4, G - minComfortPad * 2 - line1Ascent - lastLineDescent);
         if (rawSpan > maxAllowedSpan && rawSpan > 0) {
           const shrink = maxAllowedSpan / rawSpan;
-          chosenRowStep *= shrink;
-          chosenSublineGap *= shrink;
+          chosenRowStep = Math.max(minComfortRowStep, chosenRowStep * shrink);
+          chosenSublineGap = Math.max(minComfortSubGap, chosenSublineGap * shrink);
         }
       }
 
       const finalCenterSpan = sublineStepsCount * chosenSublineGap + itemStepsCount * chosenRowStep;
       const finalTextHeight = line1Ascent + finalCenterSpan + lastLineDescent;
-      const equalPadPx = Math.max(minComfortPad, (G - finalTextHeight) / 2);
+      const centeredPadPx = Math.max(minComfortPad, (G - finalTextHeight) / 2);
+      const equalPadPx =
+        targetAutoPadPx !== null
+          ? Math.max(minComfortPad, Math.max(targetAutoPadPx, centeredPadPx - onePercentPx))
+          : Math.max(minComfortPad, centeredPadPx - onePercentPx);
 
       canvas.width = bgW;
       canvas.height = bgH;
@@ -2109,7 +2118,7 @@ export async function renderGroupedCardToCanvas(
       let finalFontScale = userFontScale;
       let finalRowStep = userRowStep;
       let finalSublineGap = userSublineGap;
-      const minEffectivePad = Math.max(4, Math.round(bgH * 0.006));
+      const minEffectivePad = Math.max(6, Math.round(bgH * 0.015));
       const maxAllowedSpan = Math.max(8, newMainHeight - minEffectivePad * 2 - line1Ascent - lastLineDescent);
 
       if (userCenterSpan > maxAllowedSpan) {
@@ -2118,8 +2127,8 @@ export async function renderGroupedCardToCanvas(
           finalFontScale = userFontScale * fitRatio;
           finalRowStep = userRowStep * fitRatio;
         } else {
-          const minRowStep = baseFS * Math.min(userLineGap, 1.12);
-          const minSublineStep = baseFS * 1.02;
+          const minRowStep = baseFS * Math.min(userLineGap, 1.30);
+          const minSublineStep = baseFS * 1.05;
           const minSpacingSpan = sublineStepsCount * minSublineStep + itemStepsCount * minRowStep;
 
           if (minSpacingSpan <= maxAllowedSpan && userCenterSpan > minSpacingSpan) {
@@ -2142,7 +2151,7 @@ export async function renderGroupedCardToCanvas(
       const finalTextHeight = scaledLine1Ascent + finalCenterSpan + scaledLastLineDescent;
 
       const effectivePadPx = allowAutoCenter
-        ? Math.max(minEffectivePad, (newMainHeight - finalTextHeight) / 2)
+        ? Math.max(minEffectivePad, (newMainHeight - finalTextHeight) / 2 - onePercentPx)
         : (finalTextHeight + userPadPx * 2 > newMainHeight
             ? Math.max(minEffectivePad, Math.floor((newMainHeight - finalTextHeight) / 2))
             : userPadPx);
