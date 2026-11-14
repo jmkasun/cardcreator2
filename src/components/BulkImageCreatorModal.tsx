@@ -7,7 +7,8 @@ import {
 } from "lucide-react";
 import { 
   TextLayer, Font, prepareLayersForRow, generateBulkCardsZip, 
-  generateCardBlob, BulkCardResult, renderLayersOnCanvas, loadImage
+  generateCardBlob, BulkCardResult, renderLayersOnCanvas, loadImage,
+  ensurePngBlobForClipboard
 } from "../utils/cardRenderer";
 import { convertNumberToSinhala } from "../utils/sinhalaConverter";
 import { cn } from "../lib/utils";
@@ -732,7 +733,7 @@ export function BulkImageCreatorModal({
     if (!img) throw new Error("Base image is not loaded");
 
     const cardTitle = row.name?.trim() || `${project.name} ${index + 1}`;
-    const safeFilename = `${String(index + 1).padStart(2, "0")}_${cardTitle.replace(/[^a-zA-Z0-9_\u0D80-\u0DFF-]/g, "_")}.png`;
+    const safeFilename = `${String(index + 1).padStart(2, "0")}_${cardTitle.replace(/[^a-zA-Z0-9_\u0D80-\u0DFF-]/g, "_")}.jpg`;
     const rowLayers = prepareLayersForRow(activeLayers, row.values);
 
     const blob = await generateCardBlob(img, rowLayers, fonts);
@@ -937,7 +938,7 @@ export function BulkImageCreatorModal({
         setGeneratedCardsMap(prev => ({ ...prev, [row.id]: cardData }));
       }
 
-      const file = new File([cardData.blob], cardData.filename, { type: "image/png" });
+      const file = new File([cardData.blob], cardData.filename, { type: "image/jpeg" });
 
       if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
         try {
@@ -982,7 +983,7 @@ export function BulkImageCreatorModal({
       if (!img) throw new Error("Project background image is not loaded");
 
       const cardTitle = row.name || `Card_${index + 1}`;
-      const safeFilename = `${String(index + 1).padStart(2, "0")}_${cardTitle.replace(/[^a-zA-Z0-9_\u0D80-\u0DFF-]/g, "_")}.png`;
+      const safeFilename = `${String(index + 1).padStart(2, "0")}_${cardTitle.replace(/[^a-zA-Z0-9_\u0D80-\u0DFF-]/g, "_")}.jpg`;
       const rowLayers = prepareLayersForRow(batch.layersData || activeLayers, row.values);
       const blob = await generateCardBlob(img, rowLayers, fonts);
       const dataUrl = URL.createObjectURL(blob);
@@ -1009,12 +1010,12 @@ export function BulkImageCreatorModal({
       if (!img) throw new Error("Project background image is not loaded");
 
       const cardTitle = row.name || `Card_${index + 1}`;
-      const safeFilename = `${String(index + 1).padStart(2, "0")}_${cardTitle.replace(/[^a-zA-Z0-9_\u0D80-\u0DFF-]/g, "_")}.png`;
+      const safeFilename = `${String(index + 1).padStart(2, "0")}_${cardTitle.replace(/[^a-zA-Z0-9_\u0D80-\u0DFF-]/g, "_")}.jpg`;
       const rowLayers = prepareLayersForRow(batch.layersData || activeLayers, row.values);
       const blob = await generateCardBlob(img, rowLayers, fonts);
       const dataUrl = URL.createObjectURL(blob);
 
-      const file = new File([blob], safeFilename, { type: "image/png" });
+      const file = new File([blob], safeFilename, { type: "image/jpeg" });
 
       if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
         try {
@@ -1094,8 +1095,9 @@ export function BulkImageCreatorModal({
   const handleCopyCardToClipboard = async (blob: Blob) => {
     try {
       if (navigator.clipboard && (window as any).ClipboardItem) {
+        const pngBlob = await ensurePngBlobForClipboard(blob);
         await navigator.clipboard.write([
-          new (window as any).ClipboardItem({ "image/png": blob })
+          new (window as any).ClipboardItem({ "image/png": pngBlob })
         ]);
         onNotification({ message: "Card image copied to clipboard!", type: "success" });
       } else {
@@ -1740,7 +1742,7 @@ export function BulkImageCreatorModal({
                                         ) : (
                                           <Download size={13} className="text-emerald-400 shrink-0" />
                                         )}
-                                        <span className="font-medium">Download PNG</span>
+                                        <span className="font-medium">Download JPG</span>
                                       </button>
 
                                       <div className="h-[1px] bg-slate-800 my-1" />
@@ -2204,7 +2206,7 @@ export function BulkImageCreatorModal({
                                     <button
                                       onClick={() => handleDownloadHistoryItem(item.batch, item.row, item.originalIndex)}
                                       className="p-1.5 rounded-lg bg-slate-800 hover:bg-emerald-600/20 text-slate-300 hover:text-emerald-400 border border-slate-700 hover:border-emerald-500/40 transition-colors"
-                                      title="Download card as PNG"
+                                      title="Download card as JPG"
                                     >
                                       <Download size={13} />
                                     </button>
@@ -2451,7 +2453,7 @@ export function BulkImageCreatorModal({
                 >
                   <div className="flex items-center gap-2.5">
                     <Download size={16} className="text-blue-400" />
-                    <span>Download Image PNG</span>
+                    <span>Download Image JPG</span>
                   </div>
                   <span className="text-[10px] text-blue-400/80 font-mono">Save</span>
                 </button>

@@ -3190,8 +3190,8 @@ export default function App() {
 
     setTimeout(() => {
       const link = document.createElement("a");
-      link.download = "overlay-image.png";
-      link.href = canvas.toDataURL("image/png");
+      link.download = "overlay-image.jpg";
+      link.href = canvas.toDataURL("image/jpeg", 0.95);
       link.click();
       isExportingRef.current = false;
       drawCanvas();
@@ -3211,10 +3211,10 @@ export default function App() {
     
     setTimeout(async () => {
       try {
-        const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'));
+        const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.95));
         if (!blob) return;
         
-        const file = new File([blob], 'shared-image.png', { type: 'image/png' });
+        const file = new File([blob], 'shared-image.jpg', { type: 'image/jpeg' });
         
         if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
           await navigator.share({
@@ -4448,7 +4448,7 @@ export default function App() {
                       <div className="text-2xl font-extrabold text-white font-mono">
                         {isAdminMetricsLoading ? <Loader2 size={20} className="animate-spin inline text-blue-400" /> : (adminMetricsData?.summary.totalDownloads || 0)}
                       </div>
-                      <div className="text-[10px] text-slate-400 mt-0.5">PNG image files saved</div>
+                      <div className="text-[10px] text-slate-400 mt-0.5">JPG image files saved</div>
                     </div>
 
                     <div className="bg-slate-800/40 border border-slate-700/60 rounded-xl p-3 text-center">
@@ -5437,7 +5437,7 @@ export default function App() {
                       {metricsData !== null ? metricsData.downloadsCount : (selectedStatsProject.downloadsCount || 0)}
                     </div>
                     <div className="text-[11px] font-medium text-slate-300 mt-0.5">Downloads</div>
-                    <div className="text-[9px] text-slate-500">PNG exports</div>
+                    <div className="text-[9px] text-slate-500">JPG exports</div>
                   </div>
 
                   {/* Shares */}

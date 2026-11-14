@@ -2299,7 +2299,7 @@ export async function renderGroupedCardToCanvas(
 }
 
 /**
- * Generates a single grouped PNG Blob combining multiple records into one card image.
+ * Generates a single grouped JPG Blob combining multiple records into one card image.
  */
 export async function generateGroupedCardBlob(
   bgImage: HTMLImageElement | string,
@@ -2313,9 +2313,34 @@ export async function generateGroupedCardBlob(
   return new Promise<Blob>((resolve, reject) => {
     canvas.toBlob((blob) => {
       if (blob) resolve(blob);
-      else reject(new Error("Failed to produce PNG blob from grouped canvas"));
-    }, "image/png");
+      else reject(new Error("Failed to produce JPG blob from grouped canvas"));
+    }, "image/jpeg", 0.95);
   });
+}
+
+/**
+ * Ensures any image Blob (e.g. JPEG) is converted to PNG for ClipboardItem compatibility.
+ */
+export async function ensurePngBlobForClipboard(blob: Blob): Promise<Blob> {
+  if (blob.type === "image/png") return blob;
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = await loadImage(url);
+    const canvas = document.createElement("canvas");
+    canvas.width = img.naturalWidth || img.width;
+    canvas.height = img.naturalHeight || img.height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("Could not create 2D canvas context");
+    ctx.drawImage(img, 0, 0);
+    return await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((pngBlob) => {
+        if (pngBlob) resolve(pngBlob);
+        else reject(new Error("Failed to convert image to PNG for clipboard"));
+      }, "image/png");
+    });
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 /**
@@ -2382,7 +2407,7 @@ export function prepareLayersForRow(baseLayers: TextLayer[], rowData: Record<str
 }
 
 /**
- * Renders a single card and returns a PNG Blob
+ * Renders a single card and returns a JPG Blob
  */
 export async function generateCardBlob(
   bgImage: HTMLImageElement | string,
@@ -2397,6 +2422,8 @@ export async function generateCardBlob(
   const ctx = canvas.getContext("2d", { alpha: false });
   if (!ctx) throw new Error("Could not create 2D canvas context");
 
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.drawImage(img, 0, 0);
   await renderLayersOnCanvas(ctx, canvas.width, canvas.height, layers, fonts, {
     isPreviewMode: true,
@@ -2406,8 +2433,8 @@ export async function generateCardBlob(
   return new Promise<Blob>((resolve, reject) => {
     canvas.toBlob((blob) => {
       if (blob) resolve(blob);
-      else reject(new Error("Failed to produce PNG blob from canvas"));
-    }, "image/png");
+      else reject(new Error("Failed to produce JPG blob from canvas"));
+    }, "image/jpeg", 0.95);
   });
 }
 
@@ -2430,7 +2457,7 @@ export async function generateBulkCardsZip(
     const row = rows[i];
     const rowNum = i + 1;
     const cardTitle = row.name?.trim() || `Card_${String(rowNum).padStart(2, "0")}`;
-    const safeFilename = `${String(rowNum).padStart(2, "0")}_${cardTitle.replace(/[^a-zA-Z0-9_\u0D80-\u0DFF-]/g, "_")}.png`;
+    const safeFilename = `${String(rowNum).padStart(2, "0")}_${cardTitle.replace(/[^a-zA-Z0-9_\u0D80-\u0DFF-]/g, "_")}.jpg`;
 
     if (onProgress) {
       onProgress(rowNum, total, `Rendering image ${rowNum} of ${total}: ${cardTitle}...`);

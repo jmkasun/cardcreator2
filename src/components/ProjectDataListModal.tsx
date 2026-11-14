@@ -9,7 +9,8 @@ import {
 } from "lucide-react";
 import {
   TextLayer, Font, prepareLayersForRow, generateCardBlob, loadImage,
-  GroupedCardOptions, renderGroupedCardToCanvas, generateGroupedCardBlob, GroupedRenderResult
+  GroupedCardOptions, renderGroupedCardToCanvas, generateGroupedCardBlob, GroupedRenderResult,
+  ensurePngBlobForClipboard
 } from "../utils/cardRenderer";
 import { convertNumberToSinhala } from "../utils/sinhalaConverter";
 import { isPriceLayer, parsePriceValue, formatPriceNumber } from "./BulkImageCreatorModal";
@@ -1886,7 +1887,7 @@ export function ProjectDataListModal({
       });
       const img = await getLoadedImageForUrl(selection.url);
       const cardTitle = item.rowName?.trim() || `${project.name}_${idx + 1}`;
-      const safeFilename = `${String(idx + 1).padStart(2, "0")}_${cardTitle.replace(/[^a-zA-Z0-9_\u0D80-\u0DFF-]/g, "_")}.png`;
+      const safeFilename = `${String(idx + 1).padStart(2, "0")}_${cardTitle.replace(/[^a-zA-Z0-9_\u0D80-\u0DFF-]/g, "_")}.jpg`;
       const rowLayers = prepareLayersForRow(activeLayers, item.rowValues || {});
       const blob = await generateCardBlob(img, rowLayers, fonts);
       const dataUrl = URL.createObjectURL(blob);
@@ -1902,7 +1903,7 @@ export function ProjectDataListModal({
         onRecordCreationEvents(1, "download").catch(() => {});
         onNotification({ message: `Downloaded "${safeFilename}" (${selection.label})`, type: "success" });
       } else {
-        const file = new File([blob], safeFilename, { type: "image/png" });
+        const file = new File([blob], safeFilename, { type: "image/jpeg" });
         if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
           try {
             await navigator.share({ files: [file], title: cardTitle });
@@ -2019,7 +2020,7 @@ export function ProjectDataListModal({
       const groupTitle = effectiveGroupBy
         ? `${groupLayer?.name || "Group"}_${group.displayValue}`
         : `${project.name}_${group.displayValue}`;
-      const safeFilename = `${project.name.replace(/[^a-zA-Z0-9_\u0D80-\u0DFF-]/g, "_")}_${(group.displayValue || "List").replace(/[^a-zA-Z0-9_\u0D80-\u0DFF-]/g, "_")}_Card.png`;
+      const safeFilename = `${project.name.replace(/[^a-zA-Z0-9_\u0D80-\u0DFF-]/g, "_")}_${(group.displayValue || "List").replace(/[^a-zA-Z0-9_\u0D80-\u0DFF-]/g, "_")}_Card.jpg`;
 
       const options: GroupedCardOptions = {
         groupByLayerId: effectiveGroupBy,
@@ -2064,7 +2065,7 @@ export function ProjectDataListModal({
         onRecordCreationEvents(1, "download").catch(() => {});
         onNotification({ message: `Downloaded grouped image "${safeFilename}" (${selection.label})`, type: "success" });
       } else {
-        const file = new File([blob], safeFilename, { type: "image/png" });
+        const file = new File([blob], safeFilename, { type: "image/jpeg" });
         if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
           try {
             await navigator.share({ files: [file], title: groupTitle });
@@ -3309,7 +3310,7 @@ export function ProjectDataListModal({
                             onClick={() => handleGroupCardAction(group, "download")}
                             disabled={isGenerating}
                             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-bold shadow-md disabled:opacity-50 transition-all"
-                            title="Generate one combined PNG image for all entries in this group"
+                            title="Generate one combined JPG image for all entries in this group"
                           >
                             {isGenerating ? (
                               <RefreshCw size={13} className="animate-spin" />
@@ -3606,7 +3607,7 @@ export function ProjectDataListModal({
                             onClick={() => handleRowCardAction(item, idx, "download")}
                             disabled={isProcessing}
                             className="p-1.5 rounded-lg bg-blue-600/15 hover:bg-blue-600/30 text-blue-400 transition-colors disabled:opacity-40"
-                            title="Download PNG card for this record"
+                            title="Download JPG card for this record"
                           >
                             {isProcessing ? (
                               <RefreshCw size={14} className="animate-spin" />
@@ -4207,8 +4208,9 @@ export function ProjectDataListModal({
                   onClick={async () => {
                     try {
                       if (navigator.clipboard && (window as any).ClipboardItem) {
+                        const pngBlob = await ensurePngBlobForClipboard(shareTargetCard.blob);
                         await navigator.clipboard.write([
-                          new (window as any).ClipboardItem({ "image/png": shareTargetCard.blob }),
+                          new (window as any).ClipboardItem({ "image/png": pngBlob }),
                         ]);
                         onNotification({ message: "Card image copied to clipboard!", type: "success" });
                       } else {
@@ -4242,7 +4244,7 @@ export function ProjectDataListModal({
                 >
                   <div className="flex items-center gap-2.5">
                     <Download size={16} className="text-blue-400" />
-                    <span>Download Image PNG</span>
+                    <span>Download Image JPG</span>
                   </div>
                   <ChevronRight size={14} />
                 </button>
@@ -4785,7 +4787,7 @@ export function ProjectDataListModal({
                     ) : (
                       <Download size={14} />
                     )}
-                    <span>Download Group PNG</span>
+                    <span>Download Group JPG</span>
                   </button>
                 </div>
               </div>
@@ -4923,7 +4925,7 @@ export function ProjectDataListModal({
                     ) : (
                       <Download size={14} />
                     )}
-                    <span>Download PNG</span>
+                    <span>Download JPG</span>
                   </button>
                 </div>
               </div>
