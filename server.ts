@@ -277,6 +277,9 @@ async function initDb() {
         await safeQuery(`
           ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS shares_count INTEGER DEFAULT 0;
         `);
+        await safeQuery(`
+          ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS image_updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
+        `);
         
         await safeQuery(`
           CREATE TABLE IF NOT EXISTS custom_fonts (
@@ -364,8 +367,12 @@ async function initDb() {
             project_id TEXT NOT NULL,
             name TEXT NOT NULL,
             image_data TEXT NOT NULL,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
           );
+        `);
+        await safeQuery(`
+          ALTER TABLE font_app_project_templates ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
         `);
         await safeQuery(`
           CREATE INDEX IF NOT EXISTS idx_project_templates_proj ON font_app_project_templates (project_id, created_at ASC);
@@ -1083,22 +1090,32 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
   app.get("/api/images/:id/image", async (req, res) => {
     try {
       const { id } = req.params;
-      const etag = `"${id}"`;
+      const vParam = typeof req.query.v === "string" ? req.query.v.trim() : "";
 
-      // 1. Fast HTTP conditional cache check: if browser already has this image, bypass DB read entirely!
-      if (req.headers["if-none-match"] === etag) {
-        res.setHeader("Cache-Control", "public, max-age=86400, immutable");
-        res.setHeader("ETag", etag);
-        return res.status(304).end();
+      if (vParam) {
+        const verEtag = `"${id}_v_${vParam}"`;
+        if (req.headers["if-none-match"] === verEtag) {
+          res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+          res.setHeader("ETag", verEtag);
+          return res.status(304).end();
+        }
       }
 
-      // 2. Check in-memory cache
+      const sendCachedBuffer = (buffer: Buffer, contentType: string) => {
+        const etag = vParam ? `"${id}_v_${vParam}"` : `"${id}_len_${buffer.length}"`;
+        res.setHeader("Content-Type", contentType);
+        res.setHeader("Cache-Control", vParam ? "public, max-age=86400, immutable" : "public, no-cache");
+        res.setHeader("ETag", etag);
+        if (req.headers["if-none-match"] === etag) {
+          return res.status(304).end();
+        }
+        return res.send(buffer);
+      };
+
+      // Check in-memory cache
       if (projectImageCache.has(id)) {
         const cached = projectImageCache.get(id)!;
-        res.setHeader("Content-Type", cached.contentType);
-        res.setHeader("Cache-Control", "public, max-age=86400, immutable");
-        res.setHeader("ETag", etag);
-        return res.send(cached.buffer);
+        return sendCachedBuffer(cached.buffer, cached.contentType);
       }
 
       if (HAS_POSTGRES) {
@@ -1113,20 +1130,25 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
               const contentType = matches[1];
               const buffer = Buffer.from(matches[2], "base64");
               setCachedProjectImage(id, buffer, contentType);
-              
-              const etag = `"${id}"`;
-              res.setHeader("Content-Type", contentType);
-              res.setHeader("Cache-Control", "public, max-age=86400, immutable");
-              res.setHeader("ETag", etag);
-              if (req.headers["if-none-match"] === etag) {
-                return res.status(304).end();
-              }
-              return res.send(buffer);
+              return sendCachedBuffer(buffer, contentType);
             }
           }
 
           // If external or regular URL, redirect
           return res.redirect(rawUrl);
+        }
+      } else {
+        ensureFallbackDataFile();
+        const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
+        const img = (data.images || []).find((i: any) => i.id === id);
+        if (img && img.imageUrl && img.imageUrl.startsWith("data:")) {
+          const matches = img.imageUrl.match(/^data:([^;]+);base64,(.+)$/s);
+          if (matches && matches.length === 3) {
+            const contentType = matches[1];
+            const buffer = Buffer.from(matches[2], "base64");
+            setCachedProjectImage(id, buffer, contentType);
+            return sendCachedBuffer(buffer, contentType);
+          }
         }
       }
 
@@ -1144,6 +1166,7 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
       if (HAS_POSTGRES) {
         const result = await safeQuery(
           `SELECT id, username, layers, name, is_locked as "isLocked", created_at as "createdAt",
+                  COALESCE(image_updated_at, created_at) as "imageUpdatedAt",
                   COALESCE(copies_count, 0) as "copiesCount",
                   COALESCE(downloads_count, 0) as "downloadsCount",
                   COALESCE(shares_count, 0) as "sharesCount" 
@@ -1155,9 +1178,15 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
           const copies = Number(row.copiesCount || 0);
           const downloads = Number(row.downloadsCount || 0);
           const shares = Number(row.sharesCount || 0);
+          const ver = row.imageUpdatedAt ? new Date(row.imageUpdatedAt).getTime() : "";
           return res.json({
-            ...row,
-            imageUrl: `/api/images/${row.id}/image`,
+            id: row.id,
+            username: row.username,
+            layers: row.layers,
+            name: row.name,
+            isLocked: row.isLocked,
+            createdAt: row.createdAt,
+            imageUrl: `/api/images/${row.id}/image${ver ? `?v=${ver}` : ""}`,
             copiesCount: copies,
             downloadsCount: downloads,
             sharesCount: shares,
@@ -1184,6 +1213,7 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
       if (HAS_POSTGRES) {
         const query = `
           SELECT id, username, layers, name, is_locked as "isLocked", created_at as "createdAt",
+                 COALESCE(image_updated_at, created_at) as "imageUpdatedAt",
                  COALESCE(copies_count, 0) as "copiesCount",
                  COALESCE(downloads_count, 0) as "downloadsCount",
                  COALESCE(shares_count, 0) as "sharesCount"
@@ -1196,10 +1226,11 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
           const copies = Number(row.copiesCount || 0);
           const downloads = Number(row.downloadsCount || 0);
           const shares = Number(row.sharesCount || 0);
+          const ver = row.imageUpdatedAt ? new Date(row.imageUpdatedAt).getTime() : "";
           return {
             id: row.id,
             username: row.username,
-            imageUrl: `/api/images/${row.id}/image`,
+            imageUrl: `/api/images/${row.id}/image${ver ? `?v=${ver}` : ""}`,
             layers: row.layers,
             name: row.name,
             isLocked: row.isLocked,
@@ -1223,39 +1254,45 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
   app.post("/api/images", async (req, res) => {
     try {
       const { id, username, imageUrl, layers, name, isLocked } = req.body;
+      let verQuery = "";
       
       if (HAS_POSTGRES) {
         const isNewDataImage = typeof imageUrl === "string" && imageUrl.startsWith("data:");
         
         if (isNewDataImage) {
           // New image upload - store the base64 image and layers
-          await safeQuery(
-            `INSERT INTO font_app_images (id, username, image_url, layers, name, is_locked)
-             VALUES ($1, $2, $3, $4, $5, $6)
+          const upsertRes = await safeQuery(
+            `INSERT INTO font_app_images (id, username, image_url, layers, name, is_locked, image_updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
              ON CONFLICT (id) DO UPDATE SET
              username = EXCLUDED.username,
              image_url = EXCLUDED.image_url,
              layers = EXCLUDED.layers,
              name = EXCLUDED.name,
-             is_locked = EXCLUDED.is_locked`,
+             is_locked = EXCLUDED.is_locked,
+             image_updated_at = CURRENT_TIMESTAMP
+             RETURNING COALESCE(image_updated_at, created_at) as "imageUpdatedAt"`,
             [id, username, imageUrl, JSON.stringify(layers || []), name || "New Project", !!isLocked]
           );
           projectImageCache.delete(id);
+          const ts = upsertRes.rows[0]?.imageUpdatedAt ? new Date(upsertRes.rows[0].imageUpdatedAt).getTime() : Date.now();
+          verQuery = `?v=${ts}`;
         } else {
           // Existing project update - ONLY update lightweight fields (layers, name, is_locked)
           // Bypasses TOAST rewrites and prevents heavy database write spikes!
           const updateRes = await safeQuery(
             `UPDATE font_app_images 
              SET layers = $1, name = $2, is_locked = $3 
-             WHERE id = $4 AND username = $5`,
+             WHERE id = $4 AND username = $5
+             RETURNING COALESCE(image_updated_at, created_at) as "imageUpdatedAt"`,
             [JSON.stringify(layers || []), name || "Project", !!isLocked, id, username]
           );
 
           // If row doesn't exist yet (fallback), insert it
           if (updateRes.rowCount === 0) {
             await safeQuery(
-              `INSERT INTO font_app_images (id, username, image_url, layers, name, is_locked)
-               VALUES ($1, $2, $3, $4, $5, $6)
+              `INSERT INTO font_app_images (id, username, image_url, layers, name, is_locked, image_updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
                ON CONFLICT (id) DO UPDATE SET
                username = EXCLUDED.username,
                layers = EXCLUDED.layers,
@@ -1263,11 +1300,13 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
                is_locked = EXCLUDED.is_locked`,
               [id, username, imageUrl || "", JSON.stringify(layers || []), name || "New Project", !!isLocked]
             );
+          } else if (updateRes.rows[0]?.imageUpdatedAt) {
+            verQuery = `?v=${new Date(updateRes.rows[0].imageUpdatedAt).getTime()}`;
           }
         }
       }
       
-      res.json({ success: true, id, imageUrl: `/api/images/${id}/image` });
+      res.json({ success: true, id, imageUrl: `/api/images/${id}/image${verQuery}` });
     } catch (err) {
       console.error("Save image error details:", err instanceof Error ? err.message : String(err));
       res.status(500).json({ success: false, message: "Internal server error" });
@@ -1933,34 +1972,95 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
     }
   });
 
+  // Project Default Canvas Image Update
+  app.put("/api/projects/:projectId/default-image", async (req, res) => {
+    try {
+      const { projectId } = req.params;
+      const { imageData } = req.body as { imageData?: string };
+
+      if (!imageData || typeof imageData !== "string" || !imageData.startsWith("data:image/")) {
+        return res.status(400).json({ success: false, message: "Valid imageData data URL is required" });
+      }
+
+      const nowMs = Date.now();
+      let ver = nowMs;
+
+      if (HAS_POSTGRES) {
+        const result = await safeQuery(
+          `UPDATE font_app_images
+           SET image_url = $2, image_updated_at = CURRENT_TIMESTAMP
+           WHERE id = $1
+           RETURNING id, image_updated_at as "imageUpdatedAt"`,
+          [projectId, imageData]
+        );
+        if (!result.rowCount) {
+          return res.status(404).json({ success: false, message: "Project not found" });
+        }
+        if (result.rows[0]?.imageUpdatedAt) {
+          ver = new Date(result.rows[0].imageUpdatedAt).getTime();
+        }
+      } else {
+        ensureFallbackDataFile();
+        const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
+        if (!Array.isArray(data.images)) data.images = [];
+        const target = data.images.find((i: any) => i.id === projectId);
+        if (!target) {
+          return res.status(404).json({ success: false, message: "Project not found" });
+        }
+        target.imageUrl = imageData;
+        target.imageUpdatedAt = new Date(nowMs).toISOString();
+        fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+      }
+
+      projectImageCache.delete(projectId);
+      return res.json({
+        success: true,
+        projectId,
+        imageUrl: `/api/images/${encodeURIComponent(projectId)}/image?v=${ver}`,
+      });
+    } catch (err) {
+      console.error("Error updating project default image:", err);
+      res.status(500).json({ success: false, message: "Internal server error" });
+    }
+  });
+
   // Project Alternative Template Images (within the same project)
   app.get("/api/projects/:projectId/templates", async (req, res) => {
     try {
       const { projectId } = req.params;
       if (HAS_POSTGRES) {
         const result = await safeQuery(
-          `SELECT id, project_id as "projectId", name, created_at as "createdAt"
+          `SELECT id, project_id as "projectId", name, created_at as "createdAt",
+                  COALESCE(updated_at, created_at) as "updatedAt"
            FROM font_app_project_templates
            WHERE project_id = $1
            ORDER BY created_at ASC`,
           [projectId]
         );
-        const templates = result.rows.map(row => ({
-          ...row,
-          url: `/api/projects/${encodeURIComponent(projectId)}/templates/${encodeURIComponent(row.id)}/image`,
-        }));
+        const templates = result.rows.map(row => {
+          const ver = row.updatedAt ? new Date(row.updatedAt).getTime() : "";
+          return {
+            ...row,
+            url: `/api/projects/${encodeURIComponent(projectId)}/templates/${encodeURIComponent(row.id)}/image${ver ? `?v=${ver}` : ""}`,
+          };
+        });
         return res.json({ success: true, templates });
       } else {
         ensureFallbackDataFile();
         const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
         const list = ((data.projectTemplates && data.projectTemplates[projectId]) || []) as Array<any>;
-        const templates = list.map(t => ({
-          id: t.id,
-          projectId,
-          name: t.name,
-          createdAt: t.createdAt,
-          url: `/api/projects/${encodeURIComponent(projectId)}/templates/${encodeURIComponent(t.id)}/image`,
-        }));
+        const templates = list.map(t => {
+          const verStr = t.updatedAt || t.createdAt;
+          const ver = verStr ? new Date(verStr).getTime() : "";
+          return {
+            id: t.id,
+            projectId,
+            name: t.name,
+            createdAt: t.createdAt,
+            updatedAt: t.updatedAt || t.createdAt,
+            url: `/api/projects/${encodeURIComponent(projectId)}/templates/${encodeURIComponent(t.id)}/image${ver ? `?v=${ver}` : ""}`,
+          };
+        });
         return res.json({ success: true, templates });
       }
     } catch (err) {
@@ -1972,20 +2072,31 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
   app.get("/api/projects/:projectId/templates/:tplId/image", async (req, res) => {
     try {
       const { projectId, tplId } = req.params;
-      const etag = `"tpl_${tplId}"`;
+      const vParam = typeof req.query.v === "string" ? req.query.v.trim() : "";
 
-      if (req.headers["if-none-match"] === etag) {
-        res.setHeader("Cache-Control", "public, max-age=86400, immutable");
-        res.setHeader("ETag", etag);
-        return res.status(304).end();
+      if (vParam) {
+        const verEtag = `"tpl_${tplId}_v_${vParam}"`;
+        if (req.headers["if-none-match"] === verEtag) {
+          res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+          res.setHeader("ETag", verEtag);
+          return res.status(304).end();
+        }
       }
+
+      const sendCachedTpl = (buffer: Buffer, contentType: string) => {
+        const etag = vParam ? `"tpl_${tplId}_v_${vParam}"` : `"tpl_${tplId}_len_${buffer.length}"`;
+        res.setHeader("Content-Type", contentType);
+        res.setHeader("Cache-Control", vParam ? "public, max-age=86400, immutable" : "public, no-cache");
+        res.setHeader("ETag", etag);
+        if (req.headers["if-none-match"] === etag) {
+          return res.status(304).end();
+        }
+        return res.send(buffer);
+      };
 
       if (projectTemplateImageCache.has(tplId)) {
         const cached = projectTemplateImageCache.get(tplId)!;
-        res.setHeader("Content-Type", cached.contentType);
-        res.setHeader("Cache-Control", "public, max-age=86400, immutable");
-        res.setHeader("ETag", etag);
-        return res.send(cached.buffer);
+        return sendCachedTpl(cached.buffer, cached.contentType);
       }
 
       let rawUrl = "";
@@ -2013,10 +2124,7 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
           const contentType = matches[1];
           const buffer = Buffer.from(matches[2], "base64");
           setCachedTemplateImage(tplId, buffer, contentType);
-          res.setHeader("Content-Type", contentType);
-          res.setHeader("Cache-Control", "public, max-age=86400, immutable");
-          res.setHeader("ETag", etag);
-          return res.send(buffer);
+          return sendCachedTpl(buffer, contentType);
         }
       }
 
@@ -2038,12 +2146,13 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
 
       const tplId = `tpl_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
       const cleanName = (typeof name === "string" && name.trim()) ? name.trim().slice(0, 120) : "Template Image";
-      const now = new Date().toISOString();
+      const nowMs = Date.now();
+      const now = new Date(nowMs).toISOString();
 
       if (HAS_POSTGRES) {
         await safeQuery(
-          `INSERT INTO font_app_project_templates (id, project_id, name, image_data)
-           VALUES ($1, $2, $3, $4)`,
+          `INSERT INTO font_app_project_templates (id, project_id, name, image_data, updated_at)
+           VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)`,
           [tplId, projectId, cleanName, imageData]
         );
       } else {
@@ -2057,6 +2166,7 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
           name: cleanName,
           imageData,
           createdAt: now,
+          updatedAt: now,
         });
         fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
       }
@@ -2068,7 +2178,8 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
           projectId,
           name: cleanName,
           createdAt: now,
-          url: `/api/projects/${encodeURIComponent(projectId)}/templates/${encodeURIComponent(tplId)}/image`,
+          updatedAt: now,
+          url: `/api/projects/${encodeURIComponent(projectId)}/templates/${encodeURIComponent(tplId)}/image?v=${nowMs}`,
         },
       });
     } catch (err) {
@@ -2080,23 +2191,59 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
   app.put("/api/projects/:projectId/templates/:tplId", async (req, res) => {
     try {
       const { projectId, tplId } = req.params;
-      const { name } = req.body as { name?: string };
-      const cleanName = (typeof name === "string" && name.trim()) ? name.trim().slice(0, 120) : "Template Image";
+      const { name, imageData } = req.body as { name?: string; imageData?: string };
+      const hasName = typeof name === "string" && name.trim().length > 0;
+      const hasImage = typeof imageData === "string" && imageData.startsWith("data:image/");
+
+      if (typeof imageData === "string" && !hasImage) {
+        return res.status(400).json({ success: false, message: "Valid imageData data URL is required" });
+      }
+      if (!hasName && !hasImage) {
+        return res.status(400).json({ success: false, message: "Provide name or imageData to update" });
+      }
+
+      const cleanName = hasName ? name!.trim().slice(0, 120) : undefined;
+      const nowMs = Date.now();
+      const nowIso = new Date(nowMs).toISOString();
 
       if (HAS_POSTGRES) {
-        const result = await safeQuery(
-          `UPDATE font_app_project_templates
-           SET name = $3
-           WHERE id = $1 AND project_id = $2
-           RETURNING id, project_id as "projectId", name, created_at as "createdAt"`,
-          [tplId, projectId, cleanName]
-        );
+        let result;
+        if (cleanName && hasImage) {
+          result = await safeQuery(
+            `UPDATE font_app_project_templates
+             SET name = $3, image_data = $4, updated_at = CURRENT_TIMESTAMP
+             WHERE id = $1 AND project_id = $2
+             RETURNING id, project_id as "projectId", name, created_at as "createdAt", COALESCE(updated_at, created_at) as "updatedAt"`,
+            [tplId, projectId, cleanName, imageData]
+          );
+        } else if (hasImage) {
+          result = await safeQuery(
+            `UPDATE font_app_project_templates
+             SET image_data = $3, updated_at = CURRENT_TIMESTAMP
+             WHERE id = $1 AND project_id = $2
+             RETURNING id, project_id as "projectId", name, created_at as "createdAt", COALESCE(updated_at, created_at) as "updatedAt"`,
+            [tplId, projectId, imageData]
+          );
+        } else {
+          result = await safeQuery(
+            `UPDATE font_app_project_templates
+             SET name = $3
+             WHERE id = $1 AND project_id = $2
+             RETURNING id, project_id as "projectId", name, created_at as "createdAt", COALESCE(updated_at, created_at) as "updatedAt"`,
+            [tplId, projectId, cleanName]
+          );
+        }
+
         if (!result.rowCount) return res.status(404).json({ success: false, message: "Template not found" });
+        if (hasImage) projectTemplateImageCache.delete(tplId);
+
+        const row = result.rows[0];
+        const ver = row.updatedAt ? new Date(row.updatedAt).getTime() : nowMs;
         return res.json({
           success: true,
           template: {
-            ...result.rows[0],
-            url: `/api/projects/${encodeURIComponent(projectId)}/templates/${encodeURIComponent(tplId)}/image`,
+            ...row,
+            url: `/api/projects/${encodeURIComponent(projectId)}/templates/${encodeURIComponent(tplId)}/image?v=${ver}`,
           },
         });
       } else {
@@ -2105,8 +2252,15 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
         const list = ((data.projectTemplates && data.projectTemplates[projectId]) || []) as Array<any>;
         const target = list.find(t => t.id === tplId);
         if (!target) return res.status(404).json({ success: false, message: "Template not found" });
-        target.name = cleanName;
+        if (cleanName) target.name = cleanName;
+        if (hasImage) {
+          target.imageData = imageData;
+          target.updatedAt = nowIso;
+          projectTemplateImageCache.delete(tplId);
+        }
         fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+        const verStr = target.updatedAt || target.createdAt;
+        const ver = verStr ? new Date(verStr).getTime() : nowMs;
         return res.json({
           success: true,
           template: {
@@ -2114,12 +2268,13 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
             projectId,
             name: target.name,
             createdAt: target.createdAt,
-            url: `/api/projects/${encodeURIComponent(projectId)}/templates/${encodeURIComponent(tplId)}/image`,
+            updatedAt: target.updatedAt || target.createdAt,
+            url: `/api/projects/${encodeURIComponent(projectId)}/templates/${encodeURIComponent(tplId)}/image?v=${ver}`,
           },
         });
       }
     } catch (err) {
-      console.error("Error renaming project template:", err);
+      console.error("Error updating project template:", err);
       res.status(500).json({ success: false, message: "Internal server error" });
     }
   });

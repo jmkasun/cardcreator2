@@ -526,6 +526,7 @@ export interface GroupedCardOptions {
   totalLabel?: string;
   includeStaticLabels?: boolean;
   autoAdjustSpace?: boolean;
+  autoCenterInAvailableSpace?: boolean; // When true (default), auto-centers names in blank gap by balancing top/bottom padding and line spacing when space allows
   keepOriginalHeight?: boolean;
   spacePaddingPercent?: number;
   spaceAbsorptionScale?: number;
@@ -538,6 +539,9 @@ export interface GroupedCardOptions {
     deltaHeight: number;
     startYPx: number;
     maxBottomPx: number;
+    fontScaleOverride?: number;
+    rowStepOverride?: number;
+    sublineGapOverride?: number;
     getShiftedY?: (origY: number) => number;
   };
 }
@@ -1381,51 +1385,56 @@ export async function renderGroupedLayersOnCanvas(
   const baseSublineGap = maxFieldFontSize * userFontScale * 1.15;
 
   // Measure actual wrapped lines first (in inline mode) so overflow protection accounts for 2-line wrapped items
-  let effectiveFontScale = userFontScale;
-  let effectiveRowStep = desiredLineStep;
-  let effectiveSublineGap = baseSublineGap;
+  let effectiveFontScale = layoutOv?.fontScaleOverride ?? userFontScale;
+  let effectiveRowStep = layoutOv?.rowStepOverride ?? desiredLineStep;
+  let effectiveSublineGap = layoutOv?.sublineGapOverride ?? baseSublineGap;
 
-  if (options.layoutStyle === 'columns') {
-    const spanBetweenCenters =
-      Math.max(0, options.items.length - 1) * desiredLineStep +
-      (hasTotalRow ? desiredLineStep * 1.25 : 0);
-    const visualHeightNeed = spanBetweenCenters + maxFieldFontSize * userFontScale * 0.6;
-    const verticalFitRatio =
-      visualHeightNeed > availableHeight
-        ? Math.max(0.35, availableHeight / visualHeightNeed)
-        : 1;
-    effectiveFontScale = userFontScale * verticalFitRatio;
-    effectiveRowStep = desiredLineStep * verticalFitRatio;
-  } else {
-    const initialPlans = buildGroupedInlinePlans(
-      ctx,
-      width,
-      visibleLayers,
-      orderedFieldLayers,
-      fonts,
-      options,
-      userFontScale
-    );
-    const sublineStepsCount = initialPlans.reduce((acc, p) => acc + Math.max(0, p.lines.length - 1), 0);
-    const itemStepsCount = Math.max(0, initialPlans.length - 1) + (hasTotalRow ? 1.1 : 0);
-    const desiredCenterSpan = sublineStepsCount * baseSublineGap + itemStepsCount * desiredLineStep;
-    const allowedCenterSpan = Math.max(8, availableHeight - maxFieldFontSize * userFontScale * 0.55);
+  if (
+    layoutOv?.fontScaleOverride === undefined &&
+    layoutOv?.rowStepOverride === undefined
+  ) {
+    if (options.layoutStyle === 'columns') {
+      const spanBetweenCenters =
+        Math.max(0, options.items.length - 1) * desiredLineStep +
+        (hasTotalRow ? desiredLineStep * 1.25 : 0);
+      const visualHeightNeed = spanBetweenCenters + maxFieldFontSize * userFontScale * 0.6;
+      const verticalFitRatio =
+        visualHeightNeed > availableHeight
+          ? Math.max(0.35, availableHeight / visualHeightNeed)
+          : 1;
+      effectiveFontScale = userFontScale * verticalFitRatio;
+      effectiveRowStep = desiredLineStep * verticalFitRatio;
+    } else {
+      const initialPlans = buildGroupedInlinePlans(
+        ctx,
+        width,
+        visibleLayers,
+        orderedFieldLayers,
+        fonts,
+        options,
+        userFontScale
+      );
+      const sublineStepsCount = initialPlans.reduce((acc, p) => acc + Math.max(0, p.lines.length - 1), 0);
+      const itemStepsCount = Math.max(0, initialPlans.length - 1) + (hasTotalRow ? 1.1 : 0);
+      const desiredCenterSpan = sublineStepsCount * baseSublineGap + itemStepsCount * desiredLineStep;
+      const allowedCenterSpan = Math.max(8, availableHeight - maxFieldFontSize * userFontScale * 0.55);
 
-    if (desiredCenterSpan > allowedCenterSpan) {
-      // First compress inter-row and subline spacing slightly before shrinking font size
-      const minRowStep = maxFieldFontSize * userFontScale * Math.min(lineGap, 1.12);
-      const minSublineStep = maxFieldFontSize * userFontScale * 1.02;
-      const minSpacingSpan = sublineStepsCount * minSublineStep + itemStepsCount * minRowStep;
+      if (desiredCenterSpan > allowedCenterSpan) {
+        // First compress inter-row and subline spacing slightly before shrinking font size
+        const minRowStep = maxFieldFontSize * userFontScale * Math.min(lineGap, 1.12);
+        const minSublineStep = maxFieldFontSize * userFontScale * 1.02;
+        const minSpacingSpan = sublineStepsCount * minSublineStep + itemStepsCount * minRowStep;
 
-      if (minSpacingSpan <= allowedCenterSpan && desiredCenterSpan > minSpacingSpan) {
-        const t = (allowedCenterSpan - minSpacingSpan) / Math.max(1, desiredCenterSpan - minSpacingSpan);
-        effectiveRowStep = minRowStep + t * (desiredLineStep - minRowStep);
-        effectiveSublineGap = minSublineStep + t * (baseSublineGap - minSublineStep);
-      } else {
-        const fitRatio = Math.max(0.45, allowedCenterSpan / Math.max(1, minSpacingSpan));
-        effectiveFontScale = userFontScale * fitRatio;
-        effectiveRowStep = minRowStep * fitRatio;
-        effectiveSublineGap = minSublineStep * fitRatio;
+        if (minSpacingSpan <= allowedCenterSpan && desiredCenterSpan > minSpacingSpan) {
+          const t = (allowedCenterSpan - minSpacingSpan) / Math.max(1, desiredCenterSpan - minSpacingSpan);
+          effectiveRowStep = minRowStep + t * (desiredLineStep - minRowStep);
+          effectiveSublineGap = minSublineStep + t * (baseSublineGap - minSublineStep);
+        } else {
+          const fitRatio = Math.max(0.45, allowedCenterSpan / Math.max(1, minSpacingSpan));
+          effectiveFontScale = userFontScale * fitRatio;
+          effectiveRowStep = minRowStep * fitRatio;
+          effectiveSublineGap = minSublineStep * fitRatio;
+        }
       }
     }
   }
@@ -1701,6 +1710,47 @@ export interface GroupedRenderResult {
   adjustedGapCount?: number;
   reclaimedSpacePx?: number;
   heightPreserved?: boolean;
+  autoCentered?: boolean;
+  appliedPaddingPercent?: number;
+  appliedLineGapScale?: number;
+}
+
+function measureSegmentsVerticalBounds(
+  ctx: CanvasRenderingContext2D,
+  segments: TextSegment[],
+  fonts: Font[],
+  scale = 1
+): { ascent: number; descent: number } {
+  let maxAscent = 0;
+  let maxDescent = 0;
+  let maxFS = 0;
+  for (const seg of segments) {
+    const fs = Math.max(8, seg.fontSize * scale);
+    if (fs > maxFS) maxFS = fs;
+    const matched = fonts.find(
+      f => f.name === seg.fontFamily || normalizeFontLookup(f.name) === normalizeFontLookup(seg.fontFamily)
+    );
+    const alias = matched && matched.name !== seg.fontFamily ? matched.name : undefined;
+    ctx.font = buildCanvasFontSpec(fs, seg.fontFamily, seg.isBold, seg.isItalic, true, alias);
+    ctx.textBaseline = 'middle';
+    const sample = seg.text.trim() || "මප";
+    const m = ctx.measureText(sample);
+    const asc =
+      typeof m.actualBoundingBoxAscent === 'number' && m.actualBoundingBoxAscent > 0
+        ? m.actualBoundingBoxAscent
+        : fs * 0.40;
+    const desc =
+      typeof m.actualBoundingBoxDescent === 'number' && m.actualBoundingBoxDescent > 0
+        ? m.actualBoundingBoxDescent
+        : fs * 0.36;
+    if (asc > maxAscent) maxAscent = asc;
+    if (desc > maxDescent) maxDescent = desc;
+  }
+  const fallbackFS = Math.max(8, maxFS || 24);
+  return {
+    ascent: maxAscent > 0 ? Math.max(maxAscent, fallbackFS * 0.24) : fallbackFS * 0.40,
+    descent: maxDescent > 0 ? Math.max(maxDescent, fallbackFS * 0.20) : fallbackFS * 0.36,
+  };
 }
 
 /**
@@ -1739,55 +1789,208 @@ export async function renderGroupedCardToCanvas(
   let finalOptions: GroupedCardOptions = options;
 
   if (shouldAutoAdjust && detectedGap) {
-    // Ensure custom fonts are ready BEFORE measuring exact wrapped line counts
+    // Ensure custom fonts are ready BEFORE measuring exact wrapped line counts & glyph bounds
     await ensureCanvasFontsLoaded(baseLayers, fonts);
 
     const maxFieldFontSize = Math.max(...orderedFieldLayers.map(l => l.fontSize || 32));
     const userFontScale = Math.max(0.4, Math.min(2.0, options.fontScale || 1));
-    const lineGap = Math.max(1.05, Math.min(3.0, options.lineGapScale || 1.55));
-    const rowStep = maxFieldFontSize * userFontScale * lineGap;
-    const itemSublineGap = maxFieldFontSize * userFontScale * 1.15;
+    const baseFS = maxFieldFontSize * userFontScale;
+    const userLineGap = Math.max(1.05, Math.min(3.0, options.lineGapScale || 1.55));
+    const userRowStep = baseFS * userLineGap;
+    const userSublineGap = baseFS * 1.15;
 
     const priceFieldsForTotal = options.showGroupTotal
       ? orderedFieldLayers.filter(isNumericPriceField)
       : [];
     const hasTotalRow = options.showGroupTotal && priceFieldsForTotal.length > 0;
 
-    const padPx = Math.round(Math.max(6, ((options.spacePaddingPercent ?? 2.0) / 100) * bgH));
-    const topVisualHalf = 0.55 * maxFieldFontSize * userFontScale;
-    const bottomVisualHalf = 0.60 * maxFieldFontSize * userFontScale;
+    const userPadPx = Math.round(Math.max(6, ((options.spacePaddingPercent ?? 2.0) / 100) * bgH));
 
-    let centerSpan = 0;
-    if (options.layoutStyle !== 'columns') {
-      canvas.width = bgW;
-      canvas.height = bgH;
-      const measureCtx = canvas.getContext("2d", { alpha: false });
-      if (measureCtx) {
-        const plans = buildGroupedInlinePlans(
-          measureCtx,
-          bgW,
-          visibleLayers,
-          orderedFieldLayers,
-          fonts,
-          options,
-          userFontScale
-        );
-        for (let i = 0; i < plans.length; i++) {
-          const lc = plans[i].lines.length;
-          if (lc > 1) centerSpan += (lc - 1) * itemSublineGap;
-          if (i < plans.length - 1) centerSpan += rowStep;
+    // Measure exact visual ink ascent/descent for every line to guarantee true visual centering
+    canvas.width = bgW;
+    canvas.height = bgH;
+    const measureCtx = canvas.getContext("2d", { alpha: false });
+
+    let sublineStepsCount = 0;
+    let itemStepsCount = Math.max(0, options.items.length - 1) + (hasTotalRow ? (options.layoutStyle === 'columns' ? 1.25 : 1.1) : 0);
+    const lineMetrics: Array<{ ascent: number; descent: number }> = [];
+
+    if (measureCtx && options.layoutStyle !== 'columns') {
+      const plans = buildGroupedInlinePlans(
+        measureCtx,
+        bgW,
+        visibleLayers,
+        orderedFieldLayers,
+        fonts,
+        options,
+        userFontScale
+      );
+      sublineStepsCount = plans.reduce((acc, p) => acc + Math.max(0, p.lines.length - 1), 0);
+      itemStepsCount = Math.max(0, plans.length - 1) + (hasTotalRow ? 1.1 : 0);
+      const maxAllowedRowWidth = bgW * 0.90;
+
+      for (const plan of plans) {
+        for (const lineSegs of plan.lines) {
+          let lineW = 0;
+          for (const seg of lineSegs) {
+            const matched = fonts.find(
+              f => f.name === seg.fontFamily || normalizeFontLookup(f.name) === normalizeFontLookup(seg.fontFamily)
+            );
+            const alias = matched && matched.name !== seg.fontFamily ? matched.name : undefined;
+            measureCtx.font = buildCanvasFontSpec(seg.fontSize, seg.fontFamily, seg.isBold, seg.isItalic, true, alias);
+            lineW += measureCtx.measureText(seg.text).width + (seg.gapBefore || 0);
+          }
+          const lineScale = lineW > maxAllowedRowWidth ? maxAllowedRowWidth / lineW : 1;
+          lineMetrics.push(measureSegmentsVerticalBounds(measureCtx, lineSegs, fonts, lineScale));
         }
-        if (hasTotalRow) centerSpan += rowStep * 1.1;
-      } else {
-        centerSpan =
-          Math.max(0, options.items.length - 1) * rowStep + (hasTotalRow ? rowStep * 1.1 : 0);
       }
-    } else {
-      centerSpan =
-        Math.max(0, options.items.length - 1) * rowStep + (hasTotalRow ? rowStep * 1.25 : 0);
+      if (hasTotalRow && priceFieldsForTotal[0]) {
+        const refP = priceFieldsForTotal[0];
+        lineMetrics.push(
+          measureSegmentsVerticalBounds(
+            measureCtx,
+            [
+              {
+                text: `${options.totalLabel || "Total"}: 1000`,
+                fontSize: Math.max(10, refP.fontSize * userFontScale),
+                fontFamily: refP.fontFamily || "sans-serif",
+                color: refP.color,
+                strokeColor: refP.strokeColor,
+                strokeWidth: refP.strokeWidth,
+                shadowBlur: refP.shadowBlur,
+                shadowColor: refP.shadowColor,
+                isBold: true,
+              },
+            ],
+            fonts,
+            1
+          )
+        );
+      }
+    } else if (measureCtx && options.layoutStyle === 'columns') {
+      for (const item of options.items) {
+        const rowLayers = prepareLayersForRow(visibleLayers, item.values || {});
+        const rowSegs: TextSegment[] = orderedFieldLayers.map(bf => {
+          const r = rowLayers.find(l => l.id === bf.id) || bf;
+          const { displayText } = resolveLayerText(r, rowLayers, false);
+          return {
+            text: displayText || r.name || "මප",
+            fontSize: Math.max(8, r.fontSize * userFontScale),
+            fontFamily: r.fontFamily || "sans-serif",
+            color: r.color,
+            strokeColor: r.strokeColor,
+            strokeWidth: r.strokeWidth,
+            shadowBlur: r.shadowBlur,
+            shadowColor: r.shadowColor,
+            isBold: r.isBold,
+            isItalic: r.isItalic,
+          };
+        });
+        lineMetrics.push(measureSegmentsVerticalBounds(measureCtx, rowSegs, fonts, 1));
+      }
     }
 
-    const textBlockHeight = topVisualHalf + centerSpan + bottomVisualHalf;
+    const line1Ascent = lineMetrics.length > 0 ? lineMetrics[0].ascent : baseFS * 0.42;
+    const lastLineDescent = lineMetrics.length > 0 ? lineMetrics[lineMetrics.length - 1].descent : baseFS * 0.38;
+
+    let sumPairInk = 0;
+    let pairCount = 0;
+    for (let i = 0; i < lineMetrics.length - 1; i++) {
+      sumPairInk += lineMetrics[i].descent + lineMetrics[i + 1].ascent;
+      pairCount++;
+    }
+    const avgPairInk = pairCount > 0 ? sumPairInk / pairCount : baseFS * 0.78;
+    const totalStepCount = sublineStepsCount + itemStepsCount;
+
+    const G = detectedGap.origHeight;
+    const allowAutoCenter = options.autoCenterInAvailableSpace !== false;
+    const minComfortPad = Math.max(6, Math.round(bgH * 0.008));
+    const minComfortRowStep = baseFS * 1.22;
+    const minComfortSubGap = baseFS * 1.05;
+    const minFitCenterSpan = sublineStepsCount * minComfortSubGap + itemStepsCount * minComfortRowStep;
+    const minFitHeight = line1Ascent + minFitCenterSpan + lastLineDescent + minComfortPad * 2;
+
+    // --- FAST SYMMETRIC AUTO-CENTER PATH (when fixed-height template already has enough blank space) ---
+    if (isFixedHeightMode && allowAutoCenter && minFitHeight <= G) {
+      let chosenFontScale = userFontScale;
+      let chosenRowStep = userRowStep;
+      let chosenSublineGap = userSublineGap;
+
+      if (totalStepCount > 0) {
+        const sumInkTotal = line1Ascent + lastLineDescent + totalStepCount * avgPairInk;
+        const totalWhiteSpace = Math.max(0, G - sumInkTotal);
+        // Reserve ~55% of visual line gap for wrapped sublines of the same record vs separate rows
+        const effectiveGapWeight = itemStepsCount + 0.55 * sublineStepsCount;
+        // Frame the block symmetrically so top/bottom outer margins are ~1.5x the gap between rows
+        const idealOuterPad = totalWhiteSpace / Math.max(2, 2 + 0.65 * effectiveGapWeight);
+        const idealVisualRowGap = 0.65 * idealOuterPad;
+
+        const minVisualRowGap = Math.max(3, baseFS * 0.22);
+        const maxVisualRowGap = Math.max(minVisualRowGap, baseFS * 1.15);
+        const clampedVisualRowGap = Math.max(minVisualRowGap, Math.min(maxVisualRowGap, idealVisualRowGap));
+
+        chosenRowStep = Math.max(
+          baseFS * 1.18,
+          Math.min(baseFS * 2.25, avgPairInk + clampedVisualRowGap)
+        );
+        chosenSublineGap = Math.max(
+          baseFS * 1.05,
+          avgPairInk + 0.55 * Math.max(0, chosenRowStep - avgPairInk)
+        );
+
+        const rawSpan = sublineStepsCount * chosenSublineGap + itemStepsCount * chosenRowStep;
+        const maxAllowedSpan = Math.max(4, G - minComfortPad * 2 - line1Ascent - lastLineDescent);
+        if (rawSpan > maxAllowedSpan && rawSpan > 0) {
+          const shrink = maxAllowedSpan / rawSpan;
+          chosenRowStep *= shrink;
+          chosenSublineGap *= shrink;
+        }
+      }
+
+      const finalCenterSpan = sublineStepsCount * chosenSublineGap + itemStepsCount * chosenRowStep;
+      const finalTextHeight = line1Ascent + finalCenterSpan + lastLineDescent;
+      const equalPadPx = Math.max(minComfortPad, (G - finalTextHeight) / 2);
+
+      canvas.width = bgW;
+      canvas.height = bgH;
+      const ctx = canvas.getContext("2d", { alpha: false });
+      if (!ctx) throw new Error("Could not create 2D canvas context");
+      ctx.drawImage(img, 0, 0);
+
+      const row1CenterY = detectedGap.topY + equalPadPx + line1Ascent;
+      finalOptions = {
+        ...options,
+        _layoutOverride: {
+          origHeight: bgH,
+          gapTopY: detectedGap.topY,
+          deltaHeight: 0,
+          startYPx: row1CenterY,
+          maxBottomPx: detectedGap.topY + G - Math.max(2, equalPadPx * 0.5),
+          fontScaleOverride: chosenFontScale,
+          rowStepOverride: chosenRowStep,
+          sublineGapOverride: chosenSublineGap,
+        },
+      };
+
+      await renderGroupedLayersOnCanvas(ctx, bgW, bgH, baseLayers, fonts, finalOptions);
+      return {
+        width: bgW,
+        height: bgH,
+        originalHeight: bgH,
+        detectedGap,
+        spaceAdjusted: true,
+        deltaHeight: 0,
+        adjustedGapCount: multiGap ? multiGap.lowerGaps.length : 0,
+        reclaimedSpacePx: 0,
+        heightPreserved: true,
+        autoCentered: true,
+        appliedPaddingPercent: Number(((equalPadPx / bgH) * 100).toFixed(1)),
+        appliedLineGapScale: Number((chosenRowStep / Math.max(1, baseFS)).toFixed(2)),
+      };
+    }
+
+    const userCenterSpan = sublineStepsCount * userSublineGap + itemStepsCount * userRowStep;
+    const textBlockHeight = line1Ascent + userCenterSpan + lastLineDescent;
 
     // --- MODE 1: Fixed Image Height Mode (Adjust Inter-line Spaces without changing canvas height) ---
     if (isFixedHeightMode) {
@@ -1796,7 +1999,7 @@ export async function renderGroupedCardToCanvas(
       const ctx = canvas.getContext("2d", { alpha: false });
       if (!ctx) throw new Error("Could not create 2D canvas context");
 
-      const desiredMainHeight = Math.round(textBlockHeight + padPx * 2);
+      const desiredMainHeight = Math.round(textBlockHeight + userPadPx * 2);
       const neededExtraHeight = Math.max(0, desiredMainHeight - detectedGap.origHeight);
 
       // Reclaim space from lower inter-line spaces (the exact gaps between blessing paragraphs)
@@ -1902,14 +2105,49 @@ export async function renderGroupedCardToCanvas(
         return origY;
       };
 
-      // If reclaimed space is slightly shy of full desiredMainHeight, tighten top/bottom margin gently first
+      // Pre-compute final compressed spacing/scale so top & bottom margins remain strictly equal even when compressed
+      let finalFontScale = userFontScale;
+      let finalRowStep = userRowStep;
+      let finalSublineGap = userSublineGap;
       const minEffectivePad = Math.max(4, Math.round(bgH * 0.006));
-      const effectivePadPx =
-        textBlockHeight + padPx * 2 > newMainHeight
-          ? Math.max(minEffectivePad, Math.floor((newMainHeight - textBlockHeight) / 2))
-          : padPx;
+      const maxAllowedSpan = Math.max(8, newMainHeight - minEffectivePad * 2 - line1Ascent - lastLineDescent);
 
-      const row1CenterY = detectedGap.topY + effectivePadPx + topVisualHalf;
+      if (userCenterSpan > maxAllowedSpan) {
+        if (options.layoutStyle === 'columns') {
+          const fitRatio = Math.max(0.35, maxAllowedSpan / Math.max(1, userCenterSpan));
+          finalFontScale = userFontScale * fitRatio;
+          finalRowStep = userRowStep * fitRatio;
+        } else {
+          const minRowStep = baseFS * Math.min(userLineGap, 1.12);
+          const minSublineStep = baseFS * 1.02;
+          const minSpacingSpan = sublineStepsCount * minSublineStep + itemStepsCount * minRowStep;
+
+          if (minSpacingSpan <= maxAllowedSpan && userCenterSpan > minSpacingSpan) {
+            const t = (maxAllowedSpan - minSpacingSpan) / Math.max(1, userCenterSpan - minSpacingSpan);
+            finalRowStep = minRowStep + t * (userRowStep - minRowStep);
+            finalSublineGap = minSublineStep + t * (userSublineGap - minSublineStep);
+          } else {
+            const fitRatio = Math.max(0.45, maxAllowedSpan / Math.max(1, minSpacingSpan));
+            finalFontScale = userFontScale * fitRatio;
+            finalRowStep = minRowStep * fitRatio;
+            finalSublineGap = minSublineStep * fitRatio;
+          }
+        }
+      }
+
+      const scaleFactor = finalFontScale / Math.max(0.01, userFontScale);
+      const scaledLine1Ascent = line1Ascent * scaleFactor;
+      const scaledLastLineDescent = lastLineDescent * scaleFactor;
+      const finalCenterSpan = sublineStepsCount * finalSublineGap + itemStepsCount * finalRowStep;
+      const finalTextHeight = scaledLine1Ascent + finalCenterSpan + scaledLastLineDescent;
+
+      const effectivePadPx = allowAutoCenter
+        ? Math.max(minEffectivePad, (newMainHeight - finalTextHeight) / 2)
+        : (finalTextHeight + userPadPx * 2 > newMainHeight
+            ? Math.max(minEffectivePad, Math.floor((newMainHeight - finalTextHeight) / 2))
+            : userPadPx);
+
+      const row1CenterY = detectedGap.topY + effectivePadPx + scaledLine1Ascent;
       finalOptions = {
         ...options,
         _layoutOverride: {
@@ -1918,6 +2156,9 @@ export async function renderGroupedCardToCanvas(
           deltaHeight: 0,
           startYPx: row1CenterY,
           maxBottomPx: detectedGap.topY + newMainHeight - Math.max(2, effectivePadPx * 0.6),
+          fontScaleOverride: finalFontScale,
+          rowStepOverride: finalRowStep,
+          sublineGapOverride: finalSublineGap,
           getShiftedY,
         },
       };
@@ -1933,13 +2174,16 @@ export async function renderGroupedCardToCanvas(
         adjustedGapCount: lowerGaps.length,
         reclaimedSpacePx: deltaReclaimed,
         heightPreserved: true,
+        autoCentered: allowAutoCenter,
+        appliedPaddingPercent: Number(((effectivePadPx / bgH) * 100).toFixed(1)),
+        appliedLineGapScale: Number((finalRowStep / Math.max(1, maxFieldFontSize * finalFontScale)).toFixed(2)),
       };
     }
 
     // --- MODE 2: Expand Canvas Height Mode (Canvas Slicing) ---
     const targetGapHeight = Math.max(
       Math.round(bgH * 0.03),
-      Math.round(textBlockHeight + padPx * 2)
+      Math.round(textBlockHeight + userPadPx * 2)
     );
 
     deltaHeight = targetGapHeight - detectedGap.origHeight;
@@ -1982,7 +2226,8 @@ export async function renderGroupedCardToCanvas(
       );
     }
 
-    const row1CenterY = detectedGap.topY + padPx + (0.55 * maxFieldFontSize * userFontScale);
+    const equalPadPx = Math.max(6, (targetGapHeight - textBlockHeight) / 2);
+    const row1CenterY = detectedGap.topY + equalPadPx + line1Ascent;
     finalOptions = {
       ...options,
       _layoutOverride: {
@@ -1990,7 +2235,10 @@ export async function renderGroupedCardToCanvas(
         gapTopY: detectedGap.topY,
         deltaHeight,
         startYPx: row1CenterY,
-        maxBottomPx: detectedGap.topY + targetGapHeight - padPx * 0.5,
+        maxBottomPx: detectedGap.topY + targetGapHeight - Math.max(2, equalPadPx * 0.5),
+        fontScaleOverride: userFontScale,
+        rowStepOverride: userRowStep,
+        sublineGapOverride: userSublineGap,
       },
     };
 
@@ -2003,6 +2251,9 @@ export async function renderGroupedCardToCanvas(
       spaceAdjusted: true,
       deltaHeight,
       heightPreserved: false,
+      autoCentered: allowAutoCenter,
+      appliedPaddingPercent: Number(((equalPadPx / bgH) * 100).toFixed(1)),
+      appliedLineGapScale: Number(userLineGap.toFixed(2)),
     };
   }
 

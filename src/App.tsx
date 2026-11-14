@@ -8324,6 +8324,12 @@ export default function App() {
             }
           }}
           onNotification={setNotification}
+          onDefaultImageUpdated={(projId, newImageUrl) => {
+            if (currentProjectId === projId) {
+              setImage(newImageUrl);
+            }
+            setProjects(prev => prev.map(p => (p.id === projId ? { ...p, imageUrl: newImageUrl } : p)));
+          }}
         />
       )}
     </div>

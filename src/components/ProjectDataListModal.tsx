@@ -47,6 +47,7 @@ interface ProjectDataListModalProps {
   onOpenInBulkCreator: (rows: Array<{ id: string; name: string; values: Record<string, string> }>) => void;
   onRecordCreationEvents: (count: number, type?: 'copy' | 'download' | 'share') => Promise<void>;
   onNotification: (notif: { message: string; type: 'success' | 'error' | 'info' }) => void;
+  onDefaultImageUpdated?: (projectId: string, newImageUrl: string) => void;
 }
 
 /**
@@ -394,6 +395,7 @@ type GroupConfigState = {
   totalLabel: string;
   includeStaticLabels: boolean;
   autoAdjustSpace: boolean;
+  autoCenterSpacing: boolean;
   spacePaddingPercent: number;
   breakLongLines: boolean;
   imageRules?: ImageSelectionRules;
@@ -415,6 +417,7 @@ const DEFAULT_GROUP_CONFIG: GroupConfigState = {
   totalLabel: "Total",
   includeStaticLabels: true,
   autoAdjustSpace: true,
+  autoCenterSpacing: true,
   spacePaddingPercent: 2.0,
   breakLongLines: true,
   imageRules: { ...DEFAULT_IMAGE_RULES },
@@ -711,6 +714,7 @@ export function ProjectDataListModal({
   onOpenInBulkCreator,
   onRecordCreationEvents,
   onNotification,
+  onDefaultImageUpdated,
 }: ProjectDataListModalProps) {
   const activeLayers = useMemo(() => {
     return (project.layers || []).filter(l => l.visible !== false);
@@ -795,14 +799,19 @@ export function ProjectDataListModal({
   const [projectTemplates, setProjectTemplates] = useState<ProjectTemplateImage[]>([]);
   const [isLoadingTemplates, setIsLoadingTemplates] = useState(false);
   const [isUploadingTemplate, setIsUploadingTemplate] = useState(false);
+  const [replacingTargetId, setReplacingTargetId] = useState<string | null>(null);
+  const [customDefaultImageUrl, setCustomDefaultImageUrl] = useState<string | null>(null);
   const [showTemplateManagerModal, setShowTemplateManagerModal] = useState(false);
   const [showRulesInPreview, setShowRulesInPreview] = useState(false);
   const [previewSingleItemId, setPreviewSingleItemId] = useState<string | null>(null);
   const singlePreviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [isRenderingSinglePreview, setIsRenderingSinglePreview] = useState(false);
   const templateUploadInputRef = useRef<HTMLInputElement | null>(null);
-  const pendingUploadRoleRef = useRef<"male" | "female" | "multiple" | "fallback" | "manualGroup" | "manualSingle" | null>(null);
+  const pendingUploadRoleRef = useRef<"male" | "female" | "multiple" | "fallback" | "manualGroup" | "manualSingle" | "replaceDefault" | "replaceTemplate" | null>(null);
+  const pendingReplaceTemplateRef = useRef<ProjectTemplateImage | null>(null);
   const loadedImagesMapRef = useRef<Map<string, HTMLImageElement>>(new Map());
+
+  const effectiveDefaultImageUrl = customDefaultImageUrl || image;
 
   const setGroupConfig: React.Dispatch<React.SetStateAction<GroupConfigState>> = updater => {
     hasUserEditedPrefsRef.current = true;
@@ -811,7 +820,7 @@ export function ProjectDataListModal({
 
   // Helper to load and cache any template or default background URL
   const getLoadedImageForUrl = async (targetUrl: string): Promise<HTMLImageElement> => {
-    const effectiveUrl = targetUrl || image;
+    const effectiveUrl = targetUrl || effectiveDefaultImageUrl;
     const cached = loadedImagesMapRef.current.get(effectiveUrl);
     if (cached) return cached;
     try {
@@ -819,9 +828,9 @@ export function ProjectDataListModal({
       loadedImagesMapRef.current.set(effectiveUrl, img);
       return img;
     } catch (err) {
-      if (effectiveUrl !== image && image) {
-        const defImg = loadedImagesMapRef.current.get(image) || (await loadImage(image));
-        loadedImagesMapRef.current.set(image, defImg);
+      if (effectiveUrl !== effectiveDefaultImageUrl && effectiveDefaultImageUrl) {
+        const defImg = loadedImagesMapRef.current.get(effectiveDefaultImageUrl) || (await loadImage(effectiveDefaultImageUrl));
+        loadedImagesMapRef.current.set(effectiveDefaultImageUrl, defImg);
         return defImg;
       }
       throw err;
@@ -874,20 +883,20 @@ export function ProjectDataListModal({
 
   // Load default background image for quick reuse
   useEffect(() => {
-    if (!isOpen || !image) return;
+    if (!isOpen || !effectiveDefaultImageUrl) return;
     let active = true;
-    loadImage(image)
+    loadImage(effectiveDefaultImageUrl)
       .then(img => {
         if (active) {
           bgImageRef.current = img;
-          loadedImagesMapRef.current.set(image, img);
+          loadedImagesMapRef.current.set(effectiveDefaultImageUrl, img);
         }
       })
       .catch(() => {});
     return () => {
       active = false;
     };
-  }, [isOpen, image]);
+  }, [isOpen, effectiveDefaultImageUrl]);
 
   // Fetch saved project data list from DB (loads 5-day window by default when project has a Date field)
   const fetchProjectDataList = async (opts?: boolean | { loadAll?: boolean; month?: string }) => {
@@ -983,6 +992,7 @@ export function ProjectDataListModal({
       showItemNumbers: typeof rawCfg.showItemNumbers === "boolean" ? rawCfg.showItemNumbers : DEFAULT_GROUP_CONFIG.showItemNumbers,
       showGroupTotal: typeof rawCfg.showGroupTotal === "boolean" ? rawCfg.showGroupTotal : DEFAULT_GROUP_CONFIG.showGroupTotal,
       autoAdjustSpace: typeof rawCfg.autoAdjustSpace === "boolean" ? rawCfg.autoAdjustSpace : DEFAULT_GROUP_CONFIG.autoAdjustSpace,
+      autoCenterSpacing: typeof rawCfg.autoCenterSpacing === "boolean" ? rawCfg.autoCenterSpacing : DEFAULT_GROUP_CONFIG.autoCenterSpacing,
       includeStaticLabels: typeof rawCfg.includeStaticLabels === "boolean" ? rawCfg.includeStaticLabels : DEFAULT_GROUP_CONFIG.includeStaticLabels,
       breakLongLines: typeof rawCfg.breakLongLines === "boolean" ? rawCfg.breakLongLines : DEFAULT_GROUP_CONFIG.breakLongLines,
       imageRules: {
@@ -1042,6 +1052,8 @@ export function ProjectDataListModal({
     setMultiRowPreviewTarget(null);
     setPreviewSingleItemId(null);
     setShowTemplateManagerModal(false);
+    setCustomDefaultImageUrl(null);
+    setReplacingTargetId(null);
 
     let cancelled = false;
     hasUserEditedPrefsRef.current = false;
@@ -1305,9 +1317,9 @@ export function ProjectDataListModal({
       activeLayers,
       groupByLayerId: activePreviewGroup.groupByLayerId || groupByLayerId || "",
       templates: projectTemplates,
-      defaultImageUrl: image,
+      defaultImageUrl: effectiveDefaultImageUrl,
     });
-  }, [activePreviewGroup, groupConfig, activeLayers, groupByLayerId, projectTemplates, image]);
+  }, [activePreviewGroup, groupConfig, activeLayers, groupByLayerId, projectTemplates, effectiveDefaultImageUrl]);
 
   const activeSinglePreviewSelection = useMemo(() => {
     if (!activeSinglePreviewItem) return null;
@@ -1318,9 +1330,9 @@ export function ProjectDataListModal({
       activeLayers,
       groupByLayerId: "",
       templates: projectTemplates,
-      defaultImageUrl: image,
+      defaultImageUrl: effectiveDefaultImageUrl,
     });
-  }, [activeSinglePreviewItem, groupConfig, activeLayers, projectTemplates, image]);
+  }, [activeSinglePreviewItem, groupConfig, activeLayers, projectTemplates, effectiveDefaultImageUrl]);
 
   // Live render canvas for Group Image Preview Modal (using resolved or manually selected image)
   useEffect(() => {
@@ -1360,6 +1372,7 @@ export function ProjectDataListModal({
           totalLabel: groupConfig.totalLabel,
           includeStaticLabels: groupConfig.includeStaticLabels,
           autoAdjustSpace: groupConfig.autoAdjustSpace,
+          autoCenterInAvailableSpace: groupConfig.autoCenterSpacing,
           spacePaddingPercent: groupConfig.spacePaddingPercent,
           breakLongLines: groupConfig.breakLongLines,
         };
@@ -1378,7 +1391,7 @@ export function ProjectDataListModal({
     return () => {
       cancelled = true;
     };
-  }, [isOpen, activePreviewGroup, activePreviewGroupSelection, groupByLayerId, groupConfig, activeLayers, fonts, image]);
+  }, [isOpen, activePreviewGroup, activePreviewGroupSelection, groupByLayerId, groupConfig, activeLayers, fonts, effectiveDefaultImageUrl]);
 
   // Live render canvas for Single-Row Preview Modal
   useEffect(() => {
@@ -1418,7 +1431,7 @@ export function ProjectDataListModal({
     return () => {
       cancelled = true;
     };
-  }, [isOpen, activeSinglePreviewItem, activeSinglePreviewSelection, activeLayers, fonts, image]);
+  }, [isOpen, activeSinglePreviewItem, activeSinglePreviewSelection, activeLayers, fonts, effectiveDefaultImageUrl]);
 
   if (!isOpen) return null;
 
@@ -1867,7 +1880,7 @@ export function ProjectDataListModal({
         activeLayers,
         groupByLayerId: "",
         templates: projectTemplates,
-        defaultImageUrl: image,
+        defaultImageUrl: effectiveDefaultImageUrl,
       });
       const img = await getLoadedImageForUrl(selection.url);
       const cardTitle = item.rowName?.trim() || `${project.name}_${idx + 1}`;
@@ -1996,7 +2009,7 @@ export function ProjectDataListModal({
         activeLayers,
         groupByLayerId: effectiveGroupBy,
         templates: projectTemplates,
-        defaultImageUrl: image,
+        defaultImageUrl: effectiveDefaultImageUrl,
       });
       const img = await getLoadedImageForUrl(selection.url);
 
@@ -2030,6 +2043,7 @@ export function ProjectDataListModal({
         totalLabel: groupConfig.totalLabel,
         includeStaticLabels: groupConfig.includeStaticLabels,
         autoAdjustSpace: groupConfig.autoAdjustSpace,
+        autoCenterInAvailableSpace: groupConfig.autoCenterSpacing,
         spacePaddingPercent: groupConfig.spacePaddingPercent,
         breakLongLines: groupConfig.breakLongLines,
       };
@@ -2102,13 +2116,15 @@ export function ProjectDataListModal({
   };
 
   const triggerTemplateUpload = (
-    role: "male" | "female" | "multiple" | "fallback" | "manualGroup" | "manualSingle" | null = null
+    role: "male" | "female" | "multiple" | "fallback" | "manualGroup" | "manualSingle" | "replaceDefault" | "replaceTemplate" | null = null,
+    replaceTpl: ProjectTemplateImage | null = null
   ) => {
     if (!project.id || project.id === "temp") {
-      onNotification({ message: "Save this project first before uploading extra template images", type: "info" });
+      onNotification({ message: "Save this project first before modifying template images", type: "info" });
       return;
     }
     pendingUploadRoleRef.current = role;
+    pendingReplaceTemplateRef.current = replaceTpl;
     if (templateUploadInputRef.current) {
       templateUploadInputRef.current.value = "";
       templateUploadInputRef.current.click();
@@ -2124,7 +2140,10 @@ export function ProjectDataListModal({
     }
 
     const role = pendingUploadRoleRef.current;
+    const replaceTarget = pendingReplaceTemplateRef.current;
     pendingUploadRoleRef.current = null;
+    pendingReplaceTemplateRef.current = null;
+
     const roleLabelMap: Record<string, string> = {
       male: "Male Template",
       female: "Female Template",
@@ -2145,7 +2164,64 @@ export function ProjectDataListModal({
         return;
       }
       setIsUploadingTemplate(true);
+      if (role === "replaceDefault") {
+        setReplacingTargetId("__default__");
+      } else if (role === "replaceTemplate" && replaceTarget) {
+        setReplacingTargetId(replaceTarget.id);
+      }
+
       try {
+        if (role === "replaceDefault") {
+          const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}/default-image`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ imageData: dataUrl }),
+          });
+          if (!res.ok) throw new Error("Failed to update default image");
+          const data = await res.json();
+          const newUrl: string = data.imageUrl;
+          if (newUrl) {
+            if (effectiveDefaultImageUrl) loadedImagesMapRef.current.delete(effectiveDefaultImageUrl);
+            if (image) loadedImagesMapRef.current.delete(image);
+            bgImageRef.current = null;
+            setCustomDefaultImageUrl(newUrl);
+            onDefaultImageUpdated?.(project.id, newUrl);
+            loadImage(newUrl)
+              .then(loaded => {
+                bgImageRef.current = loaded;
+                loadedImagesMapRef.current.set(newUrl, loaded);
+              })
+              .catch(() => {});
+            onNotification({ message: "Default project image updated!", type: "success" });
+          }
+          return;
+        }
+
+        if (role === "replaceTemplate" && replaceTarget) {
+          const res = await fetch(
+            `/api/projects/${encodeURIComponent(project.id)}/templates/${encodeURIComponent(replaceTarget.id)}`,
+            {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ imageData: dataUrl }),
+            }
+          );
+          if (!res.ok) throw new Error("Failed to update template image");
+          const data = await res.json();
+          const updated: ProjectTemplateImage | undefined = data.template;
+          if (updated) {
+            loadedImagesMapRef.current.delete(replaceTarget.url);
+            setProjectTemplates(prev => prev.map(t => (t.id === updated.id ? updated : t)));
+            loadImage(updated.url)
+              .then(loaded => {
+                loadedImagesMapRef.current.set(updated.url, loaded);
+              })
+              .catch(() => {});
+            onNotification({ message: `Updated template image "${updated.name}"`, type: "success" });
+          }
+          return;
+        }
+
         const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}/templates`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2172,10 +2248,18 @@ export function ProjectDataListModal({
           onNotification({ message: `Saved template image "${created.name}"`, type: "success" });
         }
       } catch (err) {
-        console.error("Failed to upload project template:", err);
-        onNotification({ message: "Failed to upload template image", type: "error" });
+        console.error("Failed to save project template:", err);
+        onNotification({
+          message: role === "replaceDefault"
+            ? "Failed to update default project image"
+            : role === "replaceTemplate"
+              ? "Failed to update template image"
+              : "Failed to upload template image",
+          type: "error",
+        });
       } finally {
         setIsUploadingTemplate(false);
+        setReplacingTargetId(null);
       }
     };
     reader.readAsDataURL(file);
@@ -2361,7 +2445,7 @@ export function ProjectDataListModal({
           title="Use Project Default Image"
         >
           <div className="aspect-[4/3] w-full bg-slate-950 overflow-hidden">
-            <img src={image} alt="Default Image" className="w-full h-full object-cover" />
+            <img src={effectiveDefaultImageUrl} alt="Default Image" className="w-full h-full object-cover" />
           </div>
           <div className="px-1.5 py-1 text-[10px] font-medium text-slate-200 truncate">
             Default
@@ -3156,7 +3240,7 @@ export function ProjectDataListModal({
                     activeLayers,
                     groupByLayerId,
                     templates: projectTemplates,
-                    defaultImageUrl: image,
+                    defaultImageUrl: effectiveDefaultImageUrl,
                   });
 
                   return (
@@ -4465,13 +4549,37 @@ export function ProjectDataListModal({
                           className="rounded bg-slate-900 border-slate-700 text-emerald-500 focus:ring-0 w-4 h-4 shrink-0"
                         />
                       </label>
+                      {groupConfig.autoAdjustSpace && (
+                        <label className="flex items-center justify-between gap-2 pt-1.5 border-t border-slate-800/80 cursor-pointer">
+                          <div>
+                            <div className="text-[11px] font-medium text-sky-200">
+                              Auto-Center Padding &amp; Line Spacing
+                            </div>
+                            <div className="text-[10px] text-slate-400">
+                              Balances top/bottom space &amp; row gaps automatically when space allows
+                            </div>
+                          </div>
+                          <input
+                            type="checkbox"
+                            checked={groupConfig.autoCenterSpacing}
+                            onChange={e =>
+                              setGroupConfig(p => ({ ...p, autoCenterSpacing: e.target.checked }))
+                            }
+                            className="rounded bg-slate-900 border-slate-700 text-sky-500 focus:ring-0 w-4 h-4 shrink-0"
+                          />
+                        </label>
+                      )}
                       {groupPreviewInfo && (
                         <div className="text-[10px] font-mono px-2 py-1 rounded bg-slate-900 border border-slate-800/80 text-slate-300 flex items-center justify-between">
                           {groupPreviewInfo.spaceAdjusted ? (
                             <>
                               <span className="text-emerald-400 font-semibold">
                                 {groupPreviewInfo.heightPreserved
-                                  ? `Line Spacing ${groupPreviewInfo.reclaimedSpacePx ? `+${groupPreviewInfo.reclaimedSpacePx}px` : "Fit"}`
+                                  ? groupPreviewInfo.reclaimedSpacePx
+                                    ? `Line Spacing +${groupPreviewInfo.reclaimedSpacePx}px`
+                                    : groupPreviewInfo.autoCentered
+                                      ? "Auto-Centered Fit"
+                                      : "Line Spacing Fit"
                                   : `Space ${groupPreviewInfo.deltaHeight >= 0 ? `+${groupPreviewInfo.deltaHeight}` : groupPreviewInfo.deltaHeight}px`}
                               </span>
                               <span className="text-slate-400">
@@ -4497,18 +4605,29 @@ export function ProjectDataListModal({
                         <div className="flex justify-between text-[11px]">
                           <span className="text-slate-400">Top / Bottom Space Padding</span>
                           <span className="font-mono text-emerald-300">
-                            {groupConfig.spacePaddingPercent.toFixed(1)}%
+                            {groupPreviewInfo.autoCentered && groupPreviewInfo.appliedPaddingPercent !== undefined
+                              ? `Auto ${groupPreviewInfo.appliedPaddingPercent.toFixed(1)}%`
+                              : `${groupConfig.spacePaddingPercent.toFixed(1)}%`}
                           </span>
                         </div>
                         <input
                           type="range"
                           min={0.5}
-                          max={6.0}
-                          step={0.25}
-                          value={groupConfig.spacePaddingPercent}
+                          max={15.0}
+                          step={0.1}
+                          value={Math.min(
+                            15.0,
+                            Math.max(
+                              0.5,
+                              groupPreviewInfo.autoCentered && groupPreviewInfo.appliedPaddingPercent !== undefined
+                                ? groupPreviewInfo.appliedPaddingPercent
+                                : groupConfig.spacePaddingPercent
+                            )
+                          )}
                           onChange={e =>
                             setGroupConfig(p => ({
                               ...p,
+                              autoCenterSpacing: false,
                               spacePaddingPercent: Number(e.target.value),
                             }))
                           }
@@ -4589,7 +4708,9 @@ export function ProjectDataListModal({
                       <div className="flex justify-between text-[11px]">
                         <span className="text-slate-400">Line Spacing</span>
                         <span className="font-mono text-violet-300">
-                          {groupConfig.lineGapScale.toFixed(2)}x
+                          {groupPreviewInfo?.autoCentered && groupPreviewInfo.appliedLineGapScale !== undefined
+                            ? `Auto ${groupPreviewInfo.appliedLineGapScale.toFixed(2)}x`
+                            : `${groupConfig.lineGapScale.toFixed(2)}x`}
                         </span>
                       </div>
                       <input
@@ -4597,9 +4718,21 @@ export function ProjectDataListModal({
                         min={1.1}
                         max={2.4}
                         step={0.05}
-                        value={groupConfig.lineGapScale}
+                        value={Math.min(
+                          2.4,
+                          Math.max(
+                            1.1,
+                            groupPreviewInfo?.autoCentered && groupPreviewInfo.appliedLineGapScale !== undefined
+                              ? groupPreviewInfo.appliedLineGapScale
+                              : groupConfig.lineGapScale
+                          )
+                        )}
                         onChange={e =>
-                          setGroupConfig(p => ({ ...p, lineGapScale: Number(e.target.value) }))
+                          setGroupConfig(p => ({
+                            ...p,
+                            autoCenterSpacing: false,
+                            lineGapScale: Number(e.target.value),
+                          }))
                         }
                         className="w-full accent-violet-500"
                       />
@@ -4855,17 +4988,37 @@ export function ProjectDataListModal({
                       <div className="rounded-xl border border-slate-700 bg-slate-950 overflow-hidden flex flex-col justify-between">
                         <div>
                           <div className="aspect-[4/3] w-full bg-black overflow-hidden relative">
-                            <img src={image} alt="Default Image" className="w-full h-full object-cover" />
+                            <img src={effectiveDefaultImageUrl} alt="Default Image" className="w-full h-full object-cover" />
                             <span className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-emerald-600/90 text-white text-[9px] font-bold shadow">
                               Default Canvas
                             </span>
+                            {replacingTargetId === "__default__" && (
+                              <div className="absolute inset-0 bg-black/70 flex items-center justify-center gap-1.5 text-sky-300 text-[11px] font-semibold">
+                                <RefreshCw size={14} className="animate-spin" />
+                                <span>Updating...</span>
+                              </div>
+                            )}
                           </div>
                           <div className="p-2">
                             <div className="font-semibold text-white truncate text-xs">Default Image</div>
                             <div className="text-[10px] text-slate-400">Primary project canvas</div>
                           </div>
                         </div>
-                        <div className="px-2 pb-2">
+                        <div className="px-2 pb-2 space-y-1.5">
+                          <button
+                            type="button"
+                            disabled={isUploadingTemplate}
+                            onClick={() => triggerTemplateUpload("replaceDefault")}
+                            className="w-full py-1 text-[10px] font-semibold rounded bg-sky-600/20 hover:bg-sky-600/35 text-sky-300 border border-sky-500/35 flex items-center justify-center gap-1 disabled:opacity-50"
+                            title="Replace the primary project default background image"
+                          >
+                            {replacingTargetId === "__default__" ? (
+                              <RefreshCw size={11} className="animate-spin" />
+                            ) : (
+                              <Upload size={11} />
+                            )}
+                            <span>Replace Image</span>
+                          </button>
                           <button
                             type="button"
                             onClick={() => {
@@ -4884,6 +5037,7 @@ export function ProjectDataListModal({
                         const isMale = activeRules.maleTemplateId === tpl.id;
                         const isFemale = activeRules.femaleTemplateId === tpl.id;
                         const isMulti = activeRules.multipleTemplateId === tpl.id;
+                        const isReplacingThis = replacingTargetId === tpl.id;
 
                         return (
                           <div
@@ -4910,6 +5064,12 @@ export function ProjectDataListModal({
                                     </span>
                                   )}
                                 </div>
+                                {isReplacingThis && (
+                                  <div className="absolute inset-0 bg-black/70 flex items-center justify-center gap-1.5 text-sky-300 text-[11px] font-semibold">
+                                    <RefreshCw size={14} className="animate-spin" />
+                                    <span>Updating...</span>
+                                  </div>
+                                )}
                                 <button
                                   type="button"
                                   onClick={() => handleDeleteTemplate(tpl)}
@@ -4938,49 +5098,65 @@ export function ProjectDataListModal({
                                 />
                               </div>
                             </div>
-                            <div className="px-2 pb-2 grid grid-cols-3 gap-1">
+                            <div className="px-2 pb-2 space-y-1.5">
                               <button
                                 type="button"
-                                onClick={() => {
-                                  updateImageRules({ enabled: true, maleTemplateId: tpl.id });
-                                  onNotification({ message: `Set "${tpl.name}" as Male template`, type: "success" });
-                                }}
-                                className={cn(
-                                  "py-0.5 text-[9px] font-bold rounded border transition-colors text-center",
-                                  isMale ? "bg-sky-500/25 text-sky-200 border-sky-500/50" : "bg-slate-900 text-slate-400 border-slate-800 hover:text-sky-300"
-                                )}
-                                title="Auto-use for 1 record ending with male suffix (මයා, මහතා...)"
+                                disabled={isUploadingTemplate}
+                                onClick={() => triggerTemplateUpload("replaceTemplate", tpl)}
+                                className="w-full py-1 text-[10px] font-semibold rounded bg-sky-600/20 hover:bg-sky-600/35 text-sky-300 border border-sky-500/35 flex items-center justify-center gap-1 disabled:opacity-50"
+                                title={`Replace "${tpl.name}" image while keeping all auto-selection rules`}
                               >
-                                Male
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  updateImageRules({ enabled: true, femaleTemplateId: tpl.id });
-                                  onNotification({ message: `Set "${tpl.name}" as Female template`, type: "success" });
-                                }}
-                                className={cn(
-                                  "py-0.5 text-[9px] font-bold rounded border transition-colors text-center",
-                                  isFemale ? "bg-pink-500/25 text-pink-200 border-pink-500/50" : "bg-slate-900 text-slate-400 border-slate-800 hover:text-pink-300"
+                                {isReplacingThis ? (
+                                  <RefreshCw size={11} className="animate-spin" />
+                                ) : (
+                                  <Upload size={11} />
                                 )}
-                                title="Auto-use for 1 record ending with female suffix (මිය, මහත්මිය...)"
-                              >
-                                Female
+                                <span>Replace Image</span>
                               </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  updateImageRules({ enabled: true, multipleTemplateId: tpl.id });
-                                  onNotification({ message: `Set "${tpl.name}" as Multi-Row template`, type: "success" });
-                                }}
-                                className={cn(
-                                  "py-0.5 text-[9px] font-bold rounded border transition-colors text-center",
-                                  isMulti ? "bg-violet-500/25 text-violet-200 border-violet-500/50" : "bg-slate-900 text-slate-400 border-slate-800 hover:text-violet-300"
-                                )}
-                                title="Auto-use when printing multiple records together"
-                              >
-                                Multi
-                              </button>
+                              <div className="grid grid-cols-3 gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    updateImageRules({ enabled: true, maleTemplateId: tpl.id });
+                                    onNotification({ message: `Set "${tpl.name}" as Male template`, type: "success" });
+                                  }}
+                                  className={cn(
+                                    "py-0.5 text-[9px] font-bold rounded border transition-colors text-center",
+                                    isMale ? "bg-sky-500/25 text-sky-200 border-sky-500/50" : "bg-slate-900 text-slate-400 border-slate-800 hover:text-sky-300"
+                                  )}
+                                  title="Auto-use for 1 record ending with male suffix (මයා, මහතා...)"
+                                >
+                                  Male
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    updateImageRules({ enabled: true, femaleTemplateId: tpl.id });
+                                    onNotification({ message: `Set "${tpl.name}" as Female template`, type: "success" });
+                                  }}
+                                  className={cn(
+                                    "py-0.5 text-[9px] font-bold rounded border transition-colors text-center",
+                                    isFemale ? "bg-pink-500/25 text-pink-200 border-pink-500/50" : "bg-slate-900 text-slate-400 border-slate-800 hover:text-pink-300"
+                                  )}
+                                  title="Auto-use for 1 record ending with female suffix (මිය, මහත්මිය...)"
+                                >
+                                  Female
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    updateImageRules({ enabled: true, multipleTemplateId: tpl.id });
+                                    onNotification({ message: `Set "${tpl.name}" as Multi-Row template`, type: "success" });
+                                  }}
+                                  className={cn(
+                                    "py-0.5 text-[9px] font-bold rounded border transition-colors text-center",
+                                    isMulti ? "bg-violet-500/25 text-violet-200 border-violet-500/50" : "bg-slate-900 text-slate-400 border-slate-800 hover:text-violet-300"
+                                  )}
+                                  title="Auto-use when printing multiple records together"
+                                >
+                                  Multi
+                                </button>
+                              </div>
                             </div>
                           </div>
                         );
