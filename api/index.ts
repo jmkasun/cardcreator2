@@ -1578,11 +1578,190 @@ app.delete("/api/bulk-history/:id", async (req, res) => {
   }
 });
 
+function parseDateSortInfo(raw: unknown): { monthDay: string; timestamp: number } | null {
+  const s = String(raw ?? "").trim();
+  if (!s) return null;
+  let m = s.match(/^\s*(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:$|T|\s)/);
+  if (m) {
+    const yy = Number(m[1]);
+    const mm = Number(m[2]);
+    const dd = Number(m[3]);
+    if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+      return {
+        monthDay: `${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`,
+        timestamp: Date.UTC(yy, mm - 1, dd),
+      };
+    }
+  }
+  m = s.match(/^\s*(\d{1,2})[-/](\d{1,2})[-/](\d{4})\s*$/);
+  if (m) {
+    const a = Number(m[1]);
+    const b = Number(m[2]);
+    const yy = Number(m[3]);
+    if (a > 12 && b >= 1 && b <= 12 && a <= 31) {
+      return {
+        monthDay: `${String(b).padStart(2, "0")}-${String(a).padStart(2, "0")}`,
+        timestamp: Date.UTC(yy, b - 1, a),
+      };
+    }
+    if (a >= 1 && a <= 12 && b >= 1 && b <= 31) {
+      return {
+        monthDay: `${String(a).padStart(2, "0")}-${String(b).padStart(2, "0")}`,
+        timestamp: Date.UTC(yy, a - 1, b),
+      };
+    }
+  }
+  const d = new Date(s);
+  if (!isNaN(d.getTime())) {
+    return {
+      monthDay: `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`,
+      timestamp: d.getTime(),
+    };
+  }
+  return null;
+}
+
+function parseMonthDayFromDateValue(raw: unknown): string | null {
+  return parseDateSortInfo(raw)?.monthDay ?? null;
+}
+
+function sortItemsByDateAscending<T extends { rowValues?: Record<string, any> }>(
+  list: T[],
+  dateLayerIds: string[],
+  monthDaysOrder: string[] | null
+): T[] {
+  if (!dateLayerIds.length || list.length <= 1) return list;
+  const mdRank = monthDaysOrder
+    ? new Map(monthDaysOrder.map((md, idx) => [md, idx]))
+    : null;
+
+  const getInfo = (item: T) => {
+    for (const lid of dateLayerIds) {
+      const info = parseDateSortInfo(item.rowValues?.[lid]);
+      if (info) return info;
+    }
+    return null;
+  };
+
+  return list
+    .map((item, idx) => ({ item, idx, info: getInfo(item) }))
+    .sort((a, b) => {
+      if (!a.info && !b.info) return a.idx - b.idx;
+      if (!a.info) return 1;
+      if (!b.info) return -1;
+      if (mdRank) {
+        const rankA = mdRank.get(a.info.monthDay) ?? 999;
+        const rankB = mdRank.get(b.info.monthDay) ?? 999;
+        if (rankA !== rankB) return rankA - rankB;
+      }
+      if (a.info.timestamp !== b.info.timestamp) {
+        return a.info.timestamp - b.info.timestamp;
+      }
+      return a.idx - b.idx;
+    })
+    .map(entry => entry.item);
+}
+
 // Project Saved Data List Endpoints
 app.get("/api/projects/:projectId/data-list", async (req, res) => {
   try {
     const { projectId } = req.params;
+    const mode = String(req.query.mode || "all");
+    const rawDateLayerIds = typeof req.query.dateLayerIds === "string" ? req.query.dateLayerIds : "";
+    const rawMonthDays = typeof req.query.monthDays === "string" ? req.query.monthDays : "";
+    const rawMonth = typeof req.query.month === "string" ? req.query.month.trim().padStart(2, "0") : "";
+    const targetMonth = /^(0[1-9]|1[0-2])$/.test(rawMonth) ? rawMonth : "";
+
+    let dateLayerIds = rawDateLayerIds
+      .split(",")
+      .map(s => s.trim())
+      .filter(Boolean);
+    const monthDays = rawMonthDays
+      .split(",")
+      .map(s => s.trim())
+      .filter(s => /^\d{2}-\d{2}$/.test(s));
+
+    if (dateLayerIds.length === 0) {
+      if (HAS_POSTGRES) {
+        const pRes = await safeQuery("SELECT layers FROM font_app_images WHERE id = $1", [projectId]);
+        const pLayers = Array.isArray(pRes.rows[0]?.layers) ? pRes.rows[0].layers : [];
+        dateLayerIds = pLayers.filter((l: any) => l?.type === "date" && l?.id).map((l: any) => String(l.id));
+      } else {
+        const d = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
+        const proj = (d.images || []).find((p: any) => p.id === projectId);
+        const pLayers = Array.isArray(proj?.layers) ? proj.layers : [];
+        dateLayerIds = pLayers.filter((l: any) => l?.type === "date" && l?.id).map((l: any) => String(l.id));
+      }
+    }
+
+    const useFiveDayFilter = mode === "5days" && dateLayerIds.length > 0 && monthDays.length > 0;
+    const useMonthFilter = mode === "month" && dateLayerIds.length > 0 && targetMonth !== "";
+    const activeFilterMonthDays = useFiveDayFilter
+      ? monthDays
+      : useMonthFilter
+      ? Array.from({ length: 31 }, (_, i) => `${targetMonth}-${String(i + 1).padStart(2, "0")}`)
+      : [];
+    const useDateFilter = activeFilterMonthDays.length > 0;
+
     if (HAS_POSTGRES) {
+      if (useDateFilter) {
+        const params: any[] = [projectId, activeFilterMonthDays];
+        const layerPredicates = dateLayerIds.map((lid) => {
+          params.push(lid);
+          const pIdx = params.length;
+          return `(
+            (
+              COALESCE(row_values->>$${pIdx}, '') ~ '^\\s*\\d{4}[-/]\\d{1,2}[-/]\\d{1,2}'
+              AND (
+                LPAD((regexp_match(row_values->>$${pIdx}, '^\\s*\\d{4}[-/](\\d{1,2})[-/](\\d{1,2})'))[1], 2, '0')
+                || '-' ||
+                LPAD((regexp_match(row_values->>$${pIdx}, '^\\s*\\d{4}[-/](\\d{1,2})[-/](\\d{1,2})'))[2], 2, '0')
+              ) = ANY($2::text[])
+            )
+            OR
+            (
+              COALESCE(row_values->>$${pIdx}, '') ~ '^\\s*\\d{1,2}[-/]\\d{1,2}[-/]\\d{4}'
+              AND (
+                (
+                  LPAD((regexp_match(row_values->>$${pIdx}, '^\\s*(\\d{1,2})[-/](\\d{1,2})[-/]\\d{4}'))[1], 2, '0')
+                  || '-' ||
+                  LPAD((regexp_match(row_values->>$${pIdx}, '^\\s*(\\d{1,2})[-/](\\d{1,2})[-/]\\d{4}'))[2], 2, '0')
+                ) = ANY($2::text[])
+                OR
+                (
+                  LPAD((regexp_match(row_values->>$${pIdx}, '^\\s*(\\d{1,2})[-/](\\d{1,2})[-/]\\d{4}'))[2], 2, '0')
+                  || '-' ||
+                  LPAD((regexp_match(row_values->>$${pIdx}, '^\\s*(\\d{1,2})[-/](\\d{1,2})[-/]\\d{4}'))[1], 2, '0')
+                ) = ANY($2::text[])
+              )
+            )
+          )`;
+        });
+
+        const [rowsRes, countRes] = await Promise.all([
+          safeQuery(
+            `SELECT id, project_id as "projectId", username, row_name as "rowName",
+                    row_values as "rowValues", sort_order as "sortOrder",
+                    created_at as "createdAt", updated_at as "updatedAt"
+             FROM font_app_project_data
+             WHERE project_id = $1 AND (${layerPredicates.join(" OR ")})
+             ORDER BY sort_order ASC, created_at ASC`,
+            params
+          ),
+          safeQuery(
+            `SELECT COUNT(*)::int as total FROM font_app_project_data WHERE project_id = $1`,
+            [projectId]
+          ),
+        ]);
+        const sortedRows = sortItemsByDateAscending(rowsRes.rows, dateLayerIds, activeFilterMonthDays);
+        return res.json({
+          success: true,
+          items: sortedRows,
+          totalCount: Number(countRes.rows[0]?.total ?? sortedRows.length),
+          filteredByDate: true,
+        });
+      }
+
       const result = await safeQuery(
         `SELECT id, project_id as "projectId", username, row_name as "rowName",
                 row_values as "rowValues", sort_order as "sortOrder",
@@ -1592,13 +1771,43 @@ app.get("/api/projects/:projectId/data-list", async (req, res) => {
          ORDER BY sort_order ASC, created_at ASC`,
         [projectId]
       );
-      return res.json({ success: true, items: result.rows });
+      const sortedRows = sortItemsByDateAscending(result.rows, dateLayerIds, null);
+      return res.json({
+        success: true,
+        items: sortedRows,
+        totalCount: sortedRows.length,
+        filteredByDate: false,
+      });
     } else {
       const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
-      const items = (data.projectData || [])
+      const allItems = (data.projectData || [])
         .filter((item: any) => item.projectId === projectId)
         .sort((a: any, b: any) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
-      return res.json({ success: true, items });
+
+      if (useDateFilter) {
+        const mdSet = new Set(activeFilterMonthDays);
+        const filtered = allItems.filter((item: any) =>
+          dateLayerIds.some((lid) => {
+            const md = parseMonthDayFromDateValue(item.rowValues?.[lid]);
+            return md !== null && mdSet.has(md);
+          })
+        );
+        const sortedFiltered = sortItemsByDateAscending(filtered, dateLayerIds, activeFilterMonthDays);
+        return res.json({
+          success: true,
+          items: sortedFiltered,
+          totalCount: allItems.length,
+          filteredByDate: true,
+        });
+      }
+
+      const sortedAll = sortItemsByDateAscending(allItems, dateLayerIds, null);
+      return res.json({
+        success: true,
+        items: sortedAll,
+        totalCount: sortedAll.length,
+        filteredByDate: false,
+      });
     }
   } catch (err) {
     console.error("Error fetching project data list in api/index.ts:", err);

@@ -5,7 +5,7 @@ import {
   RefreshCw, Layers, Share2, CheckCircle2, Save,
   Wand2, Copy, ChevronRight, LayoutList, SlidersHorizontal,
   Eye, AlignLeft, AlignCenter, AlignRight, ArrowUp, ArrowDown,
-  Image as ImageIcon, Check, ChevronDown, ChevronUp, Sparkles, Printer
+  Image as ImageIcon, Check, ChevronDown, ChevronUp, Sparkles, Printer, Calendar
 } from "lucide-react";
 import {
   TextLayer, Font, prepareLayersForRow, generateCardBlob, loadImage,
@@ -58,6 +58,119 @@ function normalizeFieldName(str: string): string {
     .replace(/[\s_\-\.]+/g, "")
     .trim();
 }
+
+/**
+ * Computes the 5 calendar month-days (`MM-DD`) starting from today (`today .. today + 4 days`),
+ * ignoring year so recurring yearly entries are included.
+ */
+function getUpcomingFiveMonthDays(baseDate = new Date()): {
+  monthDays: string[];
+  labelRange: string;
+} {
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  const start = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate());
+
+  for (let offset = 0; offset < 5; offset++) {
+    const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + offset);
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    const key = `${mm}-${dd}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      ordered.push(key);
+    }
+  }
+
+  // If 5-day span crosses Feb 28 -> Mar 1 in a non-leap year, include Feb 29 too
+  if (seen.has("02-28") && seen.has("03-01") && !seen.has("02-29")) {
+    const marIdx = ordered.indexOf("03-01");
+    ordered.splice(marIdx, 0, "02-29");
+  }
+
+  const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 4);
+  const fmt = (d: Date) =>
+    d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+
+  return {
+    monthDays: ordered,
+    labelRange: `${fmt(start)} – ${fmt(end)}`,
+  };
+}
+
+function parseDateSortInfo(raw: unknown): { monthDay: string; timestamp: number } | null {
+  const s = String(raw ?? "").trim();
+  if (!s) return null;
+  let m = s.match(/^\s*(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:$|T|\s)/);
+  if (m) {
+    const yy = Number(m[1]);
+    const mm = Number(m[2]);
+    const dd = Number(m[3]);
+    if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+      return {
+        monthDay: `${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`,
+        timestamp: Date.UTC(yy, mm - 1, dd),
+      };
+    }
+  }
+  m = s.match(/^\s*(\d{1,2})[-/](\d{1,2})[-/](\d{4})\s*$/);
+  if (m) {
+    const a = Number(m[1]);
+    const b = Number(m[2]);
+    const yy = Number(m[3]);
+    if (a > 12 && b >= 1 && b <= 12 && a <= 31) {
+      return {
+        monthDay: `${String(b).padStart(2, "0")}-${String(a).padStart(2, "0")}`,
+        timestamp: Date.UTC(yy, b - 1, a),
+      };
+    }
+    if (a >= 1 && a <= 12 && b >= 1 && b <= 31) {
+      return {
+        monthDay: `${String(a).padStart(2, "0")}-${String(b).padStart(2, "0")}`,
+        timestamp: Date.UTC(yy, a - 1, b),
+      };
+    }
+  }
+  const d = new Date(s);
+  if (!isNaN(d.getTime())) {
+    return {
+      monthDay: `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`,
+      timestamp: d.getTime(),
+    };
+  }
+  return null;
+}
+
+function compareDateInfosAscending(
+  a: { monthDay: string; timestamp: number } | null,
+  b: { monthDay: string; timestamp: number } | null,
+  mdRank: Map<string, number> | null
+): number {
+  if (!a && !b) return 0;
+  if (!a) return 1;
+  if (!b) return -1;
+  if (mdRank) {
+    const rankA = mdRank.get(a.monthDay) ?? 999;
+    const rankB = mdRank.get(b.monthDay) ?? 999;
+    if (rankA !== rankB) return rankA - rankB;
+  }
+  return a.timestamp - b.timestamp;
+}
+
+const MONTH_OPTIONS = [
+  { value: "01", label: "January" },
+  { value: "02", label: "February" },
+  { value: "03", label: "March" },
+  { value: "04", label: "April" },
+  { value: "05", label: "May" },
+  { value: "06", label: "June" },
+  { value: "07", label: "July" },
+  { value: "08", label: "August" },
+  { value: "09", label: "September" },
+  { value: "10", label: "October" },
+  { value: "11", label: "November" },
+  { value: "12", label: "December" },
+];
 
 /**
  * Flattens a nested object into single-level dot-notation keys for JSON import
@@ -603,11 +716,25 @@ export function ProjectDataListModal({
     return (project.layers || []).filter(l => l.visible !== false);
   }, [project.layers]);
 
+  const dateLayerIds = useMemo(() => {
+    return (project.layers || []).filter(l => l.type === "date").map(l => l.id);
+  }, [project.layers]);
+  const hasDateField = dateLayerIds.length > 0;
+  const upcomingFiveWindow = useMemo(() => getUpcomingFiveMonthDays(), [isOpen]);
+
   const [items, setItems] = useState<ProjectDataItem[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [showAllRecords, setShowAllRecords] = useState(false);
+  const [selectedMonth, setSelectedMonth] = useState<string>("");
+  const [totalRecordCount, setTotalRecordCount] = useState(0);
+  const [isDateFiltered, setIsDateFiltered] = useState(false);
+  const selectedMonthLabel = useMemo(
+    () => MONTH_OPTIONS.find(m => m.value === selectedMonth)?.label || "",
+    [selectedMonth]
+  );
 
   // Add / Edit modal state
   const [editingItem, setEditingItem] = useState<{
@@ -762,15 +889,51 @@ export function ProjectDataListModal({
     };
   }, [isOpen, image]);
 
-  // Fetch saved project data list from DB
-  const fetchProjectDataList = async () => {
+  // Fetch saved project data list from DB (loads 5-day window by default when project has a Date field)
+  const fetchProjectDataList = async (opts?: boolean | { loadAll?: boolean; month?: string }) => {
     if (!project.id || project.id === "temp") return;
+    const shouldLoadAll =
+      typeof opts === "boolean"
+        ? opts
+        : opts?.loadAll !== undefined
+        ? opts.loadAll
+        : showAllRecords;
+    const targetMonth =
+      typeof opts === "object" && opts.month !== undefined
+        ? opts.month
+        : shouldLoadAll
+        ? ""
+        : selectedMonth;
+
     setIsLoading(true);
     try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}/data-list`);
+      let url = `/api/projects/${encodeURIComponent(project.id)}/data-list?mode=all${
+        dateLayerIds.length > 0 ? `&dateLayerIds=${encodeURIComponent(dateLayerIds.join(","))}` : ""
+      }`;
+      if (targetMonth && dateLayerIds.length > 0) {
+        const params = new URLSearchParams({
+          mode: "month",
+          month: targetMonth,
+          dateLayerIds: dateLayerIds.join(","),
+        });
+        url = `/api/projects/${encodeURIComponent(project.id)}/data-list?${params.toString()}`;
+      } else if (!shouldLoadAll && dateLayerIds.length > 0) {
+        const { monthDays } = getUpcomingFiveMonthDays();
+        const params = new URLSearchParams({
+          mode: "5days",
+          dateLayerIds: dateLayerIds.join(","),
+          monthDays: monthDays.join(","),
+        });
+        url = `/api/projects/${encodeURIComponent(project.id)}/data-list?${params.toString()}`;
+      }
+
+      const res = await fetch(url);
       if (res.ok) {
         const data = await res.json();
-        setItems(Array.isArray(data.items) ? data.items : []);
+        const loaded = Array.isArray(data.items) ? data.items : [];
+        setItems(loaded);
+        setTotalRecordCount(typeof data.totalCount === "number" ? data.totalCount : loaded.length);
+        setIsDateFiltered(Boolean(data.filteredByDate));
       } else {
         onNotification({ message: "Failed to load project saved data list", type: "error" });
       }
@@ -866,7 +1029,11 @@ export function ProjectDataListModal({
 
   useEffect(() => {
     if (!isOpen) return;
-    fetchProjectDataList();
+    setShowAllRecords(false);
+    setSelectedMonth("");
+    setIsDateFiltered(false);
+    setTotalRecordCount(0);
+    fetchProjectDataList({ loadAll: false, month: "" });
     fetchProjectTemplates();
     setSelectedIds(new Set());
     setShowImportWizard(false);
@@ -976,15 +1143,49 @@ export function ProjectDataListModal({
     }).catch(() => {});
   }, [isOpen]);
 
-  // Filtered items
+  const activeMonthDaysRank = useMemo(() => {
+    if (!isDateFiltered) return null;
+    if (selectedMonth) {
+      return new Map<string, number>(
+        Array.from({ length: 31 }, (_, i) => [`${selectedMonth}-${String(i + 1).padStart(2, "0")}`, i])
+      );
+    }
+    return new Map<string, number>(upcomingFiveWindow.monthDays.map((md, idx) => [md, idx]));
+  }, [isDateFiltered, selectedMonth, upcomingFiveWindow]);
+
+  // Filtered & date-ascending sorted items
   const filteredItems = useMemo(() => {
-    if (!searchQuery.trim()) return items;
-    const q = searchQuery.toLowerCase();
-    return items.filter(item => {
-      if (item.rowName?.toLowerCase().includes(q)) return true;
-      return Object.values(item.rowValues || {}).some(v => String(v).toLowerCase().includes(q));
-    });
-  }, [items, searchQuery]);
+    const q = searchQuery.trim().toLowerCase();
+    const matched = !q
+      ? items
+      : items.filter(item => {
+          if (item.rowName?.toLowerCase().includes(q)) return true;
+          return Object.values(item.rowValues || {}).some(v => String(v).toLowerCase().includes(q));
+        });
+
+    if (dateLayerIds.length === 0 || matched.length <= 1) return matched;
+
+    const orderedDateLayerIds =
+      groupByLayerId && dateLayerIds.includes(groupByLayerId)
+        ? [groupByLayerId, ...dateLayerIds.filter(id => id !== groupByLayerId)]
+        : dateLayerIds;
+
+    const getDateInfo = (item: ProjectDataItem) => {
+      for (const lid of orderedDateLayerIds) {
+        const info = parseDateSortInfo(item.rowValues?.[lid]);
+        if (info) return info;
+      }
+      return null;
+    };
+
+    return matched
+      .map((item, idx) => ({ item, idx, info: getDateInfo(item) }))
+      .sort((a, b) => {
+        const cmp = compareDateInfosAscending(a.info, b.info, activeMonthDaysRank);
+        return cmp !== 0 ? cmp : a.idx - b.idx;
+      })
+      .map(entry => entry.item);
+  }, [items, searchQuery, dateLayerIds, groupByLayerId, activeMonthDaysRank]);
 
   // Price column totals
   const priceTotals = useMemo(() => {
@@ -1043,14 +1244,19 @@ export function ProjectDataListModal({
 
     if (groupLayer?.type === "date") {
       list.sort((a, b) => {
+        if (a.key === "__empty__" && b.key === "__empty__") return 0;
         if (a.key === "__empty__") return 1;
         if (b.key === "__empty__") return -1;
-        return b.displayValue.localeCompare(a.displayValue);
+        const infoA = parseDateSortInfo(a.rawValue);
+        const infoB = parseDateSortInfo(b.rawValue);
+        const cmp = compareDateInfosAscending(infoA, infoB, activeMonthDaysRank);
+        if (cmp !== 0) return cmp;
+        return a.displayValue.localeCompare(b.displayValue);
       });
     }
 
     return list;
-  }, [filteredItems, groupByLayerId, activeLayers]);
+  }, [filteredItems, groupByLayerId, activeLayers, activeMonthDaysRank]);
 
   const activePreviewGroup = useMemo(() => {
     if (multiRowPreviewTarget) {
@@ -1281,6 +1487,7 @@ export function ProjectDataListModal({
         const data = await res.json();
         if (Array.isArray(data.items) && data.items.length > 0) {
           setItems(prev => [...prev, ...data.items]);
+          setTotalRecordCount(c => c + data.items.length);
         } else {
           await fetchProjectDataList();
         }
@@ -1367,6 +1574,7 @@ export function ProjectDataListModal({
       );
       if (!res.ok) throw new Error("Failed to delete");
       setItems(prev => prev.filter(it => it.id !== id));
+      setTotalRecordCount(c => Math.max(0, c - 1));
       setSelectedIds(prev => {
         const next = new Set(prev);
         next.delete(id);
@@ -1400,14 +1608,17 @@ export function ProjectDataListModal({
       if (!res.ok) throw new Error("Bulk delete failed");
 
       if (deleteAll) {
+        const deletedTotal = Math.max(idsToDelete.length, totalRecordCount);
         setItems([]);
+        setTotalRecordCount(0);
         setSelectedIds(new Set());
         setEditingCell(null);
         setPreviewGroupKey(null);
-        onNotification({ message: `Cleared all ${idsToDelete.length} saved record(s)`, type: "info" });
+        onNotification({ message: `Cleared all ${deletedTotal} saved record(s)`, type: "info" });
       } else {
         const removeSet = new Set(idsToDelete);
         setItems(prev => prev.filter(it => !removeSet.has(it.id)));
+        setTotalRecordCount(c => Math.max(0, c - idsToDelete.length));
         setSelectedIds(new Set());
         onNotification({ message: `Deleted ${idsToDelete.length} record(s)`, type: "info" });
       }
@@ -1420,14 +1631,15 @@ export function ProjectDataListModal({
   // Delete selected rows or clear all
   const handleBulkDelete = (deleteAll = false) => {
     const idsToDelete = deleteAll ? items.map(i => i.id) : Array.from(selectedIds);
-    if (idsToDelete.length === 0) return;
+    const effectiveTotal = Math.max(items.length, totalRecordCount);
+    if (deleteAll ? effectiveTotal === 0 : idsToDelete.length === 0) return;
 
     setConfirmDialog({
       title: deleteAll ? "Clear All Saved Records" : "Delete Selected Records",
       message: deleteAll
-        ? `Delete ALL ${items.length} saved records for "${project.name}" from the database? This cannot be undone.`
+        ? `Delete ALL ${effectiveTotal} saved records for "${project.name}" from the database? This cannot be undone.`
         : `Delete ${idsToDelete.length} selected record(s) from the database?`,
-      confirmLabel: deleteAll ? "Clear All" : `Delete (${idsToDelete.length})`,
+      confirmLabel: deleteAll ? `Clear All (${effectiveTotal})` : `Delete (${idsToDelete.length})`,
       onConfirm: () => executeBulkDelete(deleteAll, idsToDelete),
     });
   };
@@ -2548,7 +2760,7 @@ export function ProjectDataListModal({
               </button>
             )}
 
-            {items.length > 0 && selectedIds.size === 0 && (
+            {(items.length > 0 || totalRecordCount > 0) && selectedIds.size === 0 && (
               <button
                 type="button"
                 onClick={() => handleBulkDelete(true)}
@@ -2556,7 +2768,11 @@ export function ProjectDataListModal({
                 title="Clear all saved records for this project"
               >
                 <Trash2 size={13} />
-                <span>Clear All</span>
+                <span>
+                  {isDateFiltered && totalRecordCount > items.length
+                    ? `Clear All (${totalRecordCount})`
+                    : "Clear All"}
+                </span>
               </button>
             )}
           </div>
@@ -2655,12 +2871,184 @@ export function ProjectDataListModal({
           </div>
         </div>
 
+        {/* Date Window Status, Month Filter & Load All Toggle Bar (when project has a Date field) */}
+        {hasDateField && (isDateFiltered || showAllRecords || selectedMonth !== "" || isLoading) && (
+          <div className="px-4 sm:px-6 py-2 border-b border-slate-800/80 bg-slate-900/95 flex flex-wrap items-center justify-between gap-2 text-xs shrink-0">
+            <div className="flex items-center gap-2 text-slate-300">
+              <Calendar size={14} className={isDateFiltered ? "text-amber-400 shrink-0" : "text-emerald-400 shrink-0"} />
+              {selectedMonth ? (
+                <span>
+                  Showing <strong className="text-amber-300">{selectedMonthLabel}</strong> (any year)
+                  {" • "}
+                  <strong className="text-white">{items.length}</strong> of{" "}
+                  <strong className="text-white">{totalRecordCount}</strong> total records
+                </span>
+              ) : isDateFiltered ? (
+                <span>
+                  Showing <strong className="text-amber-300">5-day schedule</strong> ({upcomingFiveWindow.labelRange}, any year)
+                  {" • "}
+                  <strong className="text-white">{items.length}</strong> of{" "}
+                  <strong className="text-white">{totalRecordCount}</strong> total records
+                </span>
+              ) : (
+                <span>
+                  Showing <strong className="text-emerald-300">All {items.length}</strong> saved records
+                </span>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex items-center gap-1.5">
+                <select
+                  value={selectedMonth ? selectedMonth : showAllRecords ? "all" : "5days"}
+                  disabled={isLoading}
+                  onChange={e => {
+                    const val = e.target.value;
+                    if (val === "all") {
+                      setSelectedMonth("");
+                      setShowAllRecords(true);
+                      fetchProjectDataList({ loadAll: true, month: "" });
+                    } else if (val === "5days") {
+                      setSelectedMonth("");
+                      setShowAllRecords(false);
+                      fetchProjectDataList({ loadAll: false, month: "" });
+                    } else {
+                      setSelectedMonth(val);
+                      setShowAllRecords(false);
+                      fetchProjectDataList({ loadAll: false, month: val });
+                    }
+                  }}
+                  aria-label="Filter records by month"
+                  className="bg-slate-800 hover:bg-slate-700/80 text-slate-200 border border-slate-700 rounded-lg px-2.5 py-1 text-xs font-medium outline-none focus:border-amber-500/60 cursor-pointer disabled:opacity-50"
+                >
+                  <option value="5days">5-Day Schedule ({upcomingFiveWindow.labelRange})</option>
+                  <option value="all">All Months</option>
+                  {MONTH_OPTIONS.map(m => (
+                    <option key={m.value} value={m.value}>
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {selectedMonth ? (
+                <>
+                  <button
+                    type="button"
+                    disabled={isLoading}
+                    onClick={() => {
+                      setSelectedMonth("");
+                      setShowAllRecords(false);
+                      fetchProjectDataList({ loadAll: false, month: "" });
+                    }}
+                    className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-medium transition-colors disabled:opacity-50"
+                  >
+                    <Calendar size={12} className="text-amber-400" />
+                    <span>5-Day View ({upcomingFiveWindow.labelRange})</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isLoading}
+                    onClick={() => {
+                      setSelectedMonth("");
+                      setShowAllRecords(true);
+                      fetchProjectDataList({ loadAll: true, month: "" });
+                    }}
+                    className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 font-semibold transition-colors disabled:opacity-50"
+                  >
+                    <Database size={12} />
+                    <span>Load All ({totalRecordCount})</span>
+                  </button>
+                </>
+              ) : isDateFiltered ? (
+                <button
+                  type="button"
+                  disabled={isLoading}
+                  onClick={() => {
+                    setSelectedMonth("");
+                    setShowAllRecords(true);
+                    fetchProjectDataList({ loadAll: true, month: "" });
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 font-semibold transition-colors disabled:opacity-50"
+                >
+                  <Database size={12} />
+                  <span>Load All Records ({totalRecordCount})</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={isLoading}
+                  onClick={() => {
+                    setSelectedMonth("");
+                    setShowAllRecords(false);
+                    fetchProjectDataList({ loadAll: false, month: "" });
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-medium transition-colors disabled:opacity-50"
+                >
+                  <Calendar size={12} className="text-amber-400" />
+                  <span>5-Day View ({upcomingFiveWindow.labelRange})</span>
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Main Table / Grouped Cards Area */}
         <div className="flex-1 overflow-auto bg-slate-900 relative">
           {isLoading ? (
             <div className="flex flex-col items-center justify-center h-full gap-3 text-slate-400">
               <RefreshCw size={26} className="animate-spin text-emerald-400" />
-              <p className="text-sm font-medium">Loading saved database records...</p>
+              <p className="text-sm font-medium">
+                {selectedMonth
+                  ? `Loading ${selectedMonthLabel} records...`
+                  : !showAllRecords && hasDateField
+                  ? `Loading 5-day schedule (${upcomingFiveWindow.labelRange})...`
+                  : "Loading saved database records..."}
+              </p>
+            </div>
+          ) : items.length === 0 && isDateFiltered && totalRecordCount > 0 ? (
+            <div className="flex flex-col items-center justify-center h-full p-8 text-center max-w-md mx-auto">
+              <div className="w-16 h-16 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 mb-4">
+                <Calendar size={30} />
+              </div>
+              <h3 className="text-base font-bold text-white mb-1.5">
+                {selectedMonth
+                  ? `No Records for ${selectedMonthLabel}`
+                  : `No Records for ${upcomingFiveWindow.labelRange}`}
+              </h3>
+              <p className="text-xs text-slate-400 mb-5 leading-relaxed">
+                {selectedMonth ? (
+                  <>
+                    None of the <strong className="text-slate-200">{totalRecordCount}</strong> saved records fall in{" "}
+                    <strong className="text-slate-200">{selectedMonthLabel}</strong> (ignoring year). Choose another month or load all records.
+                  </>
+                ) : (
+                  <>
+                    None of the <strong className="text-slate-200">{totalRecordCount}</strong> saved records match the 5-day window (month &amp; day, ignoring year). Load all records to browse or search older dates.
+                  </>
+                )}
+              </p>
+              <div className="flex flex-wrap items-center justify-center gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedMonth("");
+                    setShowAllRecords(true);
+                    fetchProjectDataList({ loadAll: true, month: "" });
+                  }}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold shadow"
+                >
+                  <Database size={15} />
+                  <span>Load All {totalRecordCount} Records</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={openAddDialog}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 text-xs font-semibold"
+                >
+                  <Plus size={15} />
+                  <span>Add Record</span>
+                </button>
+              </div>
             </div>
           ) : items.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full p-8 text-center max-w-md mx-auto">
@@ -2727,8 +3115,28 @@ export function ProjectDataListModal({
               </div>
 
               {groupedEntries.length === 0 ? (
-                <div className="text-center py-12 text-slate-500 text-xs">
-                  No records match your search.
+                <div className="flex flex-col items-center justify-center gap-2.5 py-12 text-slate-400 text-xs">
+                  <span>
+                    {isDateFiltered && totalRecordCount > items.length
+                      ? selectedMonth
+                        ? `No matching records in ${selectedMonthLabel}.`
+                        : `No matching records in the 5-day schedule (${upcomingFiveWindow.labelRange}).`
+                      : "No records match your search."}
+                  </span>
+                  {isDateFiltered && totalRecordCount > items.length && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedMonth("");
+                        setShowAllRecords(true);
+                        fetchProjectDataList({ loadAll: true, month: "" });
+                      }}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 font-semibold transition-colors"
+                    >
+                      <Database size={12} />
+                      <span>Load All {totalRecordCount} Records to Search</span>
+                    </button>
+                  )}
                 </div>
               ) : (
                 groupedEntries.map(group => {
@@ -3150,6 +3558,35 @@ export function ProjectDataListModal({
                     </tr>
                   );
                 })}
+                {filteredItems.length === 0 && (
+                  <tr>
+                    <td colSpan={activeLayers.length + 4} className="px-4 py-12 text-center text-xs text-slate-400">
+                      <div className="flex flex-col items-center justify-center gap-2.5">
+                        <span>
+                          {isDateFiltered && totalRecordCount > items.length
+                            ? selectedMonth
+                              ? `No matching records in ${selectedMonthLabel}.`
+                              : `No matching records in the 5-day schedule (${upcomingFiveWindow.labelRange}).`
+                            : "No records match your search."}
+                        </span>
+                        {isDateFiltered && totalRecordCount > items.length && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedMonth("");
+                              setShowAllRecords(true);
+                              fetchProjectDataList({ loadAll: true, month: "" });
+                            }}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 font-semibold transition-colors"
+                          >
+                            <Database size={12} />
+                            <span>Load All {totalRecordCount} Records to Search</span>
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           )}
@@ -3160,7 +3597,12 @@ export function ProjectDataListModal({
           <div className="flex items-center gap-3">
             <span>
               Showing <strong className="text-slate-200">{filteredItems.length}</strong> of{" "}
-              <strong className="text-slate-200">{items.length}</strong> database records
+              <strong className="text-slate-200">
+                {isDateFiltered && totalRecordCount > items.length
+                  ? `${items.length} (${selectedMonth ? selectedMonthLabel : "5-day"}) / ${totalRecordCount} total`
+                  : items.length}
+              </strong>{" "}
+              database records
             </span>
             <span className="hidden sm:inline text-slate-600">•</span>
             <span className="hidden sm:inline text-slate-500">
@@ -3168,7 +3610,7 @@ export function ProjectDataListModal({
             </span>
           </div>
           <button
-            onClick={fetchProjectDataList}
+            onClick={() => fetchProjectDataList()}
             className="flex items-center gap-1 text-slate-400 hover:text-white transition-colors"
             title="Refresh from database"
           >
