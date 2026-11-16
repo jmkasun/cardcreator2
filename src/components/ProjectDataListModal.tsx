@@ -986,7 +986,7 @@ export function ProjectDataListModal({
     };
   }, [isOpen, effectiveDefaultImageUrl]);
 
-  const getSavedApiConfig = (): {
+  type SavedApiConfig = {
     url?: string;
     method?: "GET" | "POST";
     dataPath?: string;
@@ -998,7 +998,10 @@ export function ProjectDataListModal({
     useProxy?: boolean;
     fieldMapping?: Record<string, string>;
     autoLoadOnOpen?: boolean;
-  } | null => {
+    updatedAt?: number;
+  };
+
+  const getSavedApiConfig = (): SavedApiConfig | null => {
     try {
       const raw = localStorage.getItem(`datalist_api_config_${project.id}`);
       if (!raw) return null;
@@ -1009,7 +1012,59 @@ export function ProjectDataListModal({
     }
   };
 
-  const hasValidApiAutoLoadConfig = (cfg: ReturnType<typeof getSavedApiConfig>): boolean => {
+  const persistApiConfigToDb = (cfg: SavedApiConfig) => {
+    if (!project.id || project.id === "temp") return;
+    fetch(`/api/projects/${encodeURIComponent(project.id)}/data-list/api-config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apiConfig: cfg }),
+    }).catch(() => {});
+  };
+
+  const saveProjectApiConfig = (patch: Partial<SavedApiConfig>): SavedApiConfig => {
+    const prev = getSavedApiConfig() || {};
+    const next: SavedApiConfig = {
+      ...prev,
+      ...patch,
+      updatedAt: Date.now(),
+    };
+    delete (next as Record<string, unknown>).loginPassword;
+
+    try {
+      localStorage.setItem(`datalist_api_config_${project.id}`, JSON.stringify(next));
+    } catch {
+      // ignore storage errors
+    }
+
+    persistApiConfigToDb(next);
+    return next;
+  };
+
+  const applyHydratedApiConfigToState = (cfg: SavedApiConfig | null) => {
+    if (cfg) {
+      setApiUrl(typeof cfg.url === "string" ? cfg.url : "");
+      setApiMethod(cfg.method === "POST" ? "POST" : "GET");
+      setApiDataPath(typeof cfg.dataPath === "string" ? cfg.dataPath : "");
+      setApiHeaders(Array.isArray(cfg.headers) ? cfg.headers : []);
+      setApiBody(typeof cfg.body === "string" ? cfg.body : "");
+      setApiLoginEnabled(Boolean(cfg.loginEnabled));
+      setApiLoginUrl(typeof cfg.loginUrl === "string" ? cfg.loginUrl : "");
+      setApiLoginUsername(typeof cfg.loginUsername === "string" ? cfg.loginUsername : "");
+      setApiLoginPassword("");
+    } else {
+      setApiUrl("");
+      setApiMethod("GET");
+      setApiDataPath("");
+      setApiHeaders([]);
+      setApiBody("");
+      setApiLoginEnabled(false);
+      setApiLoginUrl("");
+      setApiLoginUsername("");
+      setApiLoginPassword("");
+    }
+  };
+
+  const hasValidApiAutoLoadConfig = (cfg: SavedApiConfig | null): boolean => {
     if (!cfg || !cfg.url || !String(cfg.url).trim()) return false;
     if (cfg.autoLoadOnOpen === false) return false;
     if (!cfg.fieldMapping || typeof cfg.fieldMapping !== "object") return false;
@@ -1262,19 +1317,11 @@ export function ProjectDataListModal({
 
       if (result.capturedCookie) {
         upsertCookieHeader(result.capturedCookie);
-        try {
-          const prevSaved = getSavedApiConfig() || {};
-          const nextHdrs = Array.isArray(cfg.headers) ? [...cfg.headers] : [];
-          const cIdx = nextHdrs.findIndex(h => h.key.trim().toLowerCase() === "cookie");
-          if (cIdx >= 0) nextHdrs[cIdx] = { key: "Cookie", value: result.capturedCookie };
-          else nextHdrs.push({ key: "Cookie", value: result.capturedCookie });
-          localStorage.setItem(
-            `datalist_api_config_${project.id}`,
-            JSON.stringify({ ...prevSaved, headers: nextHdrs })
-          );
-        } catch {
-          // ignore storage errors
-        }
+        const nextHdrs = Array.isArray(cfg.headers) ? [...cfg.headers] : [];
+        const cIdx = nextHdrs.findIndex(h => h.key.trim().toLowerCase() === "cookie");
+        if (cIdx >= 0) nextHdrs[cIdx] = { key: "Cookie", value: result.capturedCookie };
+        else nextHdrs.push({ key: "Cookie", value: result.capturedCookie });
+        saveProjectApiConfig({ headers: nextHdrs });
       }
 
       if (!result.rawText.trim()) {
@@ -1290,15 +1337,7 @@ export function ProjectDataListModal({
       const liveItems = toLiveProjectDataItems(mappedRows);
 
       if (shouldUseProxy && !cfg.useProxy) {
-        try {
-          const prevSaved = getSavedApiConfig() || {};
-          localStorage.setItem(
-            `datalist_api_config_${project.id}`,
-            JSON.stringify({ ...prevSaved, useProxy: true })
-          );
-        } catch {
-          // ignore storage errors
-        }
+        saveProjectApiConfig({ useProxy: true });
       }
 
       setLiveApiSourceItems(liveItems);
@@ -1331,16 +1370,8 @@ export function ProjectDataListModal({
   // Switch back to PostgreSQL saved list and disable auto-load on open
   const handleExitLiveApiMode = () => {
     liveFetchIdRef.current++;
-    try {
-      const prevSaved = getSavedApiConfig();
-      if (prevSaved) {
-        localStorage.setItem(
-          `datalist_api_config_${project.id}`,
-          JSON.stringify({ ...prevSaved, autoLoadOnOpen: false })
-        );
-      }
-    } catch {
-      // ignore storage errors
+    if (getSavedApiConfig()) {
+      saveProjectApiConfig({ autoLoadOnOpen: false });
     }
     setLiveApiSourceItems(null);
     setLiveApiLastSyncedAt(null);
@@ -1544,30 +1575,15 @@ export function ProjectDataListModal({
     setReplacingTargetId(null);
 
     const savedApi = getSavedApiConfig();
-    if (savedApi) {
-      setApiUrl(typeof savedApi.url === "string" ? savedApi.url : "");
-      setApiMethod(savedApi.method === "POST" ? "POST" : "GET");
-      setApiDataPath(typeof savedApi.dataPath === "string" ? savedApi.dataPath : "");
-      setApiHeaders(Array.isArray(savedApi.headers) ? savedApi.headers : []);
-      setApiBody(typeof savedApi.body === "string" ? savedApi.body : "");
-      setApiLoginEnabled(Boolean(savedApi.loginEnabled));
-      setApiLoginUrl(typeof savedApi.loginUrl === "string" ? savedApi.loginUrl : "");
-      setApiLoginUsername(typeof savedApi.loginUsername === "string" ? savedApi.loginUsername : "");
-      setApiLoginPassword("");
-    } else {
-      setApiUrl("");
-      setApiMethod("GET");
-      setApiDataPath("");
-      setApiHeaders([]);
-      setApiBody("");
-      setApiLoginEnabled(false);
-      setApiLoginUrl("");
-      setApiLoginUsername("");
-      setApiLoginPassword("");
-    }
+    applyHydratedApiConfigToState(savedApi);
 
-    if (hasValidApiAutoLoadConfig(savedApi)) {
+    const hasLocalAutoLoad = hasValidApiAutoLoadConfig(savedApi);
+    if (hasLocalAutoLoad && savedApi) {
       loadLiveDataFromApi(savedApi, { loadAll: false, month: "" });
+    } else if (!savedApi && project.id && project.id !== "temp") {
+      // Wait for DB settings check when opening on a fresh browser (no localStorage cache yet)
+      setIsLoading(true);
+      setIsLiveApiLoading(false);
     } else {
       fetchProjectDataList({ loadAll: false, month: "", bypassLiveCheck: true });
     }
@@ -1596,8 +1612,8 @@ export function ProjectDataListModal({
       fetch(`/api/projects/${encodeURIComponent(project.id)}/data-list/settings`)
         .then(res => (res.ok ? res.json() : null))
         .then(data => {
-          if (cancelled || hasUserEditedPrefsRef.current) return;
-          if (data?.settings) {
+          if (cancelled) return;
+          if (data?.settings && !hasUserEditedPrefsRef.current) {
             applyRestoredSettings(data.settings);
             try {
               localStorage.setItem(storageKey, JSON.stringify({
@@ -1608,8 +1624,53 @@ export function ProjectDataListModal({
               // ignore storage quota errors
             }
           }
+
+          const dbApi: SavedApiConfig | null =
+            data?.settings?.apiConfig && typeof data.settings.apiConfig === "object"
+              ? data.settings.apiConfig
+              : null;
+
+          if (!savedApi) {
+            // Fresh browser: use DB API config if available, otherwise fall back to DB rows
+            if (dbApi) {
+              try {
+                localStorage.setItem(`datalist_api_config_${project.id}`, JSON.stringify(dbApi));
+              } catch {
+                // ignore storage errors
+              }
+              applyHydratedApiConfigToState(dbApi);
+              if (hasValidApiAutoLoadConfig(dbApi)) {
+                loadLiveDataFromApi(dbApi, { loadAll: false, month: "" });
+              } else {
+                fetchProjectDataList({ loadAll: false, month: "", bypassLiveCheck: true });
+              }
+            } else {
+              fetchProjectDataList({ loadAll: false, month: "", bypassLiveCheck: true });
+            }
+          } else if (!dbApi) {
+            // Backfill DB once with existing local API settings so other browsers receive it
+            persistApiConfigToDb({ ...savedApi, updatedAt: savedApi.updatedAt || Date.now() });
+          } else if (Number(dbApi.updatedAt || 0) > Number(savedApi.updatedAt || 0)) {
+            // Newer API settings saved on DB from another session/browser
+            try {
+              localStorage.setItem(`datalist_api_config_${project.id}`, JSON.stringify(dbApi));
+            } catch {
+              // ignore storage errors
+            }
+            applyHydratedApiConfigToState(dbApi);
+            if (hasValidApiAutoLoadConfig(dbApi)) {
+              loadLiveDataFromApi(dbApi, { loadAll: false, month: "" });
+            } else if (hasLocalAutoLoad) {
+              setLiveApiSourceItems(null);
+              fetchProjectDataList({ loadAll: false, month: "", bypassLiveCheck: true });
+            }
+          }
         })
-        .catch(() => {})
+        .catch(() => {
+          if (!cancelled && !savedApi) {
+            fetchProjectDataList({ loadAll: false, month: "", bypassLiveCheck: true });
+          }
+        })
         .finally(() => {
           if (!cancelled) setIsPrefsHydrated(true);
         });
@@ -2421,14 +2482,53 @@ export function ProjectDataListModal({
         throw new Error("Login succeeded, but the server did not return a Set-Cookie header.");
       }
 
-      upsertCookieHeader(cookieStr);
-      setApiLoginStatus(`Cookie captured (${cookieStr.split("=")[0]}) and added to Request Headers.`);
-      onNotification({ message: "Login successful! Auth cookie added to request headers.", type: "success" });
+      const nextHdrs = [...apiHeaders];
+      const cIdxHdr = nextHdrs.findIndex(h => h.key.trim().toLowerCase() === "cookie");
+      if (cIdxHdr >= 0) nextHdrs[cIdxHdr] = { key: "Cookie", value: cookieStr };
+      else nextHdrs.push({ key: "Cookie", value: cookieStr });
+      setApiHeaders(nextHdrs);
+      saveProjectApiConfig({
+        headers: nextHdrs,
+        loginEnabled: true,
+        loginUrl: trimmedLoginUrl,
+        loginUsername: apiLoginUsername,
+        useProxy: true,
+      });
+
+      setApiLoginStatus(`Cookie captured (${cookieStr.split("=")[0]}) and saved to project headers.`);
+      onNotification({ message: "Login successful! Auth cookie saved to project headers.", type: "success" });
     } catch (err) {
       setApiFetchError(err instanceof Error ? err.message : String(err));
     } finally {
       setIsLoggingInApi(false);
     }
+  };
+
+  const handleSaveApiConfigOnly = () => {
+    const trimmedUrl = apiUrl.trim();
+    if (!trimmedUrl) {
+      setApiFetchError("Please enter an API URL");
+      return;
+    }
+    if (!/^https?:\/\//i.test(trimmedUrl) && !trimmedUrl.startsWith("/")) {
+      setApiFetchError("API URL must start with https://, http://, or /");
+      return;
+    }
+    setApiFetchError(null);
+    saveProjectApiConfig({
+      url: trimmedUrl,
+      method: apiMethod,
+      dataPath: apiDataPath.trim(),
+      headers: apiHeaders,
+      body: apiBody,
+      loginEnabled: apiLoginEnabled,
+      loginUrl: apiLoginUrl.trim(),
+      loginUsername: apiLoginUsername,
+    });
+    onNotification({
+      message: "API endpoint, login details & headers saved to project database!",
+      type: "success",
+    });
   };
 
   // Submit username/password login prompt when API data failed to load, save returned Cookie, and retry loading
@@ -2505,25 +2605,19 @@ export function ProjectDataListModal({
       setApiLoginPassword("");
       setApiLoginStatus(`Logged in • Cookie (${cookieStr.split("=")[0]}) applied as Request Header.`);
 
-      const nextSaved = {
-        ...prevSaved,
+      const nextSaved = saveProjectApiConfig({
         headers: baseHeaders,
         loginEnabled: true,
         loginUrl: trimmedLoginUrl,
         loginUsername: apiReauthUsername.trim(),
         useProxy: true,
-      };
-      try {
-        localStorage.setItem(`datalist_api_config_${project.id}`, JSON.stringify(nextSaved));
-      } catch {
-        // ignore storage errors
-      }
+      });
 
       setShowApiReauthPrompt(false);
       setApiReauthError(null);
       setApiReauthPassword("");
       onNotification({
-        message: "Cookie captured! Reloading API data...",
+        message: "Cookie captured and saved to project! Reloading API data...",
         type: "success",
       });
 
@@ -2599,27 +2693,19 @@ export function ProjectDataListModal({
     setApiFetchCanRetryProxy(false);
 
     try {
-      // Persist API settings per project (never persist password)
-      try {
-        const prevSaved = getSavedApiConfig() || {};
-        localStorage.setItem(
-          `datalist_api_config_${project.id}`,
-          JSON.stringify({
-            ...prevSaved,
-            url: trimmedUrl,
-            method: apiMethod,
-            dataPath: apiDataPath.trim(),
-            headers: activeHdrs,
-            body: apiBody,
-            loginEnabled: apiLoginEnabled,
-            loginUrl: apiLoginUrl.trim(),
-            loginUsername: apiLoginUsername,
-            useProxy: useServerProxy ? true : prevSaved.useProxy,
-          })
-        );
-      } catch {
-        // ignore storage errors
-      }
+      // Persist API settings to DB + localStorage (never persist password)
+      const prevSavedForProxy = getSavedApiConfig() || {};
+      saveProjectApiConfig({
+        url: trimmedUrl,
+        method: apiMethod,
+        dataPath: apiDataPath.trim(),
+        headers: activeHdrs,
+        body: apiBody,
+        loginEnabled: apiLoginEnabled,
+        loginUrl: apiLoginUrl.trim(),
+        loginUsername: apiLoginUsername,
+        useProxy: useServerProxy ? true : prevSavedForProxy.useProxy,
+      });
 
       const result = await executeExternalApiRequest(
         {
@@ -2646,15 +2732,7 @@ export function ProjectDataListModal({
         setApiLoginStatus(
           `Logged in • Cookie (${captured.split("=")[0]}) applied as Request Header.`
         );
-        try {
-          const prevSaved = getSavedApiConfig() || {};
-          localStorage.setItem(
-            `datalist_api_config_${project.id}`,
-            JSON.stringify({ ...prevSaved, headers: mergedHdrs })
-          );
-        } catch {
-          // ignore storage errors
-        }
+        saveProjectApiConfig({ headers: mergedHdrs });
       }
 
       const rawText = result.rawText;
@@ -2732,29 +2810,20 @@ export function ProjectDataListModal({
       return;
     }
 
-    // Live API Mode: keep records in memory & enable auto-load on open (no DB writes)
+    // Live API Mode: keep records in memory & save API config to DB (no data rows in DB)
     if (importFileInfo.format === "api") {
-      try {
-        const prevSaved = getSavedApiConfig() || {};
-        localStorage.setItem(
-          `datalist_api_config_${project.id}`,
-          JSON.stringify({
-            ...prevSaved,
-            url: apiUrl.trim() || importFileInfo.fileName,
-            method: apiMethod,
-            dataPath: apiDataPath.trim(),
-            headers: apiHeaders,
-            body: apiBody,
-            loginEnabled: apiLoginEnabled,
-            loginUrl: apiLoginUrl.trim(),
-            loginUsername: apiLoginUsername,
-            fieldMapping,
-            autoLoadOnOpen: true,
-          })
-        );
-      } catch {
-        // ignore storage errors
-      }
+      saveProjectApiConfig({
+        url: apiUrl.trim() || importFileInfo.fileName,
+        method: apiMethod,
+        dataPath: apiDataPath.trim(),
+        headers: apiHeaders,
+        body: apiBody,
+        loginEnabled: apiLoginEnabled,
+        loginUrl: apiLoginUrl.trim(),
+        loginUsername: apiLoginUsername,
+        fieldMapping,
+        autoLoadOnOpen: true,
+      });
 
       const liveItems = toLiveProjectDataItems(mappedImportPreviewRows);
       setLiveApiSourceItems(liveItems);
@@ -5258,7 +5327,7 @@ export function ProjectDataListModal({
               </div>
 
               {/* Footer */}
-              <div className="flex items-center justify-between px-5 py-3.5 border-t border-slate-800 bg-slate-950">
+              <div className="flex items-center justify-between gap-2 px-5 py-3.5 border-t border-slate-800 bg-slate-950">
                 <button
                   type="button"
                   onClick={() => setShowApiImportModal(false)}
@@ -5266,23 +5335,35 @@ export function ProjectDataListModal({
                 >
                   Cancel
                 </button>
-                <button
-                  type="submit"
-                  disabled={isFetchingApi || !apiUrl.trim()}
-                  className="flex items-center gap-2 px-5 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold shadow-lg disabled:opacity-40 transition-all"
-                >
-                  {isFetchingApi ? (
-                    <>
-                      <RefreshCw size={14} className="animate-spin" />
-                      <span>Calling API...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Globe size={14} />
-                      <span>Fetch Data & Map Fields</span>
-                    </>
-                  )}
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={isFetchingApi || !apiUrl.trim()}
+                    onClick={handleSaveApiConfigOnly}
+                    className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold disabled:opacity-40 transition-colors"
+                    title="Save API endpoint, login details & headers to project database so any browser can use them"
+                  >
+                    <Save size={13} />
+                    <span>Save Settings</span>
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isFetchingApi || !apiUrl.trim()}
+                    className="flex items-center gap-2 px-5 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold shadow-lg disabled:opacity-40 transition-all"
+                  >
+                    {isFetchingApi ? (
+                      <>
+                        <RefreshCw size={14} className="animate-spin" />
+                        <span>Calling API...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Globe size={14} />
+                        <span>Fetch Data &amp; Map Fields</span>
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
             </form>
           </div>

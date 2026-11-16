@@ -357,8 +357,12 @@ async function initDb() {
             project_id TEXT PRIMARY KEY,
             group_by_layer_id TEXT NOT NULL DEFAULT '',
             group_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+            api_config JSONB DEFAULT NULL,
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
           );
+        `);
+        await safeQuery(`
+          ALTER TABLE font_app_project_data_settings ADD COLUMN IF NOT EXISTS api_config JSONB DEFAULT NULL;
         `);
 
         await safeQuery(`
@@ -2067,7 +2071,8 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
       if (HAS_POSTGRES) {
         const result = await safeQuery(
           `SELECT project_id as "projectId", group_by_layer_id as "groupByLayerId",
-                  group_config as "groupConfig", updated_at as "updatedAt"
+                  group_config as "groupConfig", api_config as "apiConfig",
+                  updated_at as "updatedAt"
            FROM font_app_project_data_settings
            WHERE project_id = $1`,
           [projectId]
@@ -2103,7 +2108,8 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
                group_config = EXCLUDED.group_config,
                updated_at = EXCLUDED.updated_at
            RETURNING project_id as "projectId", group_by_layer_id as "groupByLayerId",
-                     group_config as "groupConfig", updated_at as "updatedAt"`,
+                     group_config as "groupConfig", api_config as "apiConfig",
+                     updated_at as "updatedAt"`,
           [projectId, String(groupByLayerId || ""), JSON.stringify(groupConfig || {}), now]
         );
         return res.json({ success: true, settings: result.rows[0] });
@@ -2111,7 +2117,9 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
         ensureFallbackDataFile();
         const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
         if (!data.projectDataSettings) data.projectDataSettings = {};
+        const existing = data.projectDataSettings[projectId] || {};
         const saved = {
+          ...existing,
           projectId,
           groupByLayerId: String(groupByLayerId || ""),
           groupConfig: groupConfig || {},
@@ -2123,6 +2131,54 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
       }
     } catch (err) {
       console.error("Error saving project data list settings:", err);
+      res.status(500).json({ success: false, message: "Internal server error" });
+    }
+  });
+
+  app.put("/api/projects/:projectId/data-list/api-config", async (req, res) => {
+    try {
+      const { projectId } = req.params;
+      const { apiConfig = null } = req.body as {
+        apiConfig?: Record<string, any> | null;
+      };
+      const now = new Date().toISOString();
+
+      if (apiConfig && typeof apiConfig === "object") {
+        delete (apiConfig as Record<string, any>).loginPassword;
+      }
+
+      if (HAS_POSTGRES) {
+        const result = await safeQuery(
+          `INSERT INTO font_app_project_data_settings (project_id, group_by_layer_id, group_config, api_config, updated_at)
+           VALUES ($1, '', '{}'::jsonb, $2::jsonb, $3)
+           ON CONFLICT (project_id) DO UPDATE
+           SET api_config = EXCLUDED.api_config,
+               updated_at = EXCLUDED.updated_at
+           RETURNING project_id as "projectId", api_config as "apiConfig", updated_at as "updatedAt"`,
+          [projectId, apiConfig ? JSON.stringify(apiConfig) : null, now]
+        );
+        return res.json({ success: true, apiConfig: result.rows[0]?.apiConfig || null });
+      } else {
+        ensureFallbackDataFile();
+        const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
+        if (!data.projectDataSettings) data.projectDataSettings = {};
+        const existing = data.projectDataSettings[projectId] || {
+          projectId,
+          groupByLayerId: "",
+          groupConfig: {},
+        };
+        const saved = {
+          ...existing,
+          projectId,
+          apiConfig: apiConfig || null,
+          updatedAt: now,
+        };
+        data.projectDataSettings[projectId] = saved;
+        fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+        return res.json({ success: true, apiConfig: saved.apiConfig });
+      }
+    } catch (err) {
+      console.error("Error saving project API config:", err);
       res.status(500).json({ success: false, message: "Internal server error" });
     }
   });
@@ -2948,7 +3004,7 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
         const settingsRow = includeDataSettings
           ? (
               await safeQuery(
-                `SELECT group_by_layer_id, group_config
+                `SELECT group_by_layer_id, group_config, api_config
                  FROM font_app_project_data_settings
                  WHERE project_id = $1`,
                 [projectId]
@@ -3045,16 +3101,18 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
               }
             }
             await safeQuery(
-              `INSERT INTO font_app_project_data_settings (project_id, group_by_layer_id, group_config)
-               VALUES ($1, $2, $3::jsonb)
+              `INSERT INTO font_app_project_data_settings (project_id, group_by_layer_id, group_config, api_config)
+               VALUES ($1, $2, $3::jsonb, $4::jsonb)
                ON CONFLICT (project_id) DO UPDATE SET
                  group_by_layer_id = EXCLUDED.group_by_layer_id,
                  group_config = EXCLUDED.group_config,
+                 api_config = EXCLUDED.api_config,
                  updated_at = CURRENT_TIMESTAMP`,
               [
                 newProjectId,
                 settingsRow.group_by_layer_id || "",
                 JSON.stringify(copiedConfig),
+                settingsRow.api_config ? JSON.stringify(settingsRow.api_config) : null,
               ]
             );
           }
