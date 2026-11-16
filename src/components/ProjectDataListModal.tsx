@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   X, Plus, Trash2, Edit2, Upload, Download, FileSpreadsheet, FileJson,
-  Database, Search, ArrowRight, ArrowLeftRight,
+  Database, Search, ArrowRight, ArrowLeft, ArrowLeftRight,
   RefreshCw, Layers, Share2, CheckCircle2, Save,
   Wand2, Copy, ChevronRight, LayoutList, SlidersHorizontal,
   Eye, AlignLeft, AlignCenter, AlignRight, ArrowUp, ArrowDown,
-  Image as ImageIcon, Check, ChevronDown, ChevronUp, Sparkles, Printer, Calendar
+  Image as ImageIcon, Check, ChevronDown, ChevronUp, Sparkles, Printer, Calendar, Globe, Lock
 } from "lucide-react";
 import {
   TextLayer, Font, prepareLayersForRow, generateCardBlob, loadImage,
@@ -282,10 +282,42 @@ function parseCsvContent(rawText: string): { fields: string[]; records: Array<Re
 }
 
 /**
- * Parses JSON text supporting array of objects, wrapped array properties, or 2D arrays.
+ * Resolves a dot-notation path inside a JSON value (e.g. "data.items").
  */
-function parseJsonContent(rawText: string): { fields: string[]; records: Array<Record<string, string>> } {
-  const parsed = JSON.parse(rawText.replace(/^\uFEFF/, "").trim());
+function resolveJsonPath(root: any, pathStr: string): any {
+  const parts = pathStr
+    .split(".")
+    .map(p => p.trim())
+    .filter(Boolean);
+  let cur = root;
+  for (const part of parts) {
+    if (cur === null || cur === undefined) return undefined;
+    if (Array.isArray(cur) && /^\d+$/.test(part)) {
+      cur = cur[Number(part)];
+    } else if (typeof cur === "object") {
+      cur = cur[part];
+    } else {
+      return undefined;
+    }
+  }
+  return cur;
+}
+
+/**
+ * Parses JSON text supporting array of objects, wrapped array properties, optional dot path, or 2D arrays.
+ */
+function parseJsonContent(
+  rawText: string,
+  dataPath?: string
+): { fields: string[]; records: Array<Record<string, string>> } {
+  const parsedRoot = JSON.parse(rawText.replace(/^\uFEFF/, "").trim());
+  const parsed =
+    dataPath && dataPath.trim() ? resolveJsonPath(parsedRoot, dataPath.trim()) : parsedRoot;
+
+  if (parsed === undefined || parsed === null) {
+    return { fields: [], records: [] };
+  }
+
   let arrayData: any[] | null = null;
 
   if (Array.isArray(parsed)) {
@@ -303,6 +335,28 @@ function parseJsonContent(rawText: string): { fields: string[]; records: Array<R
         if (Array.isArray(parsed[k])) {
           arrayData = parsed[k];
           break;
+        }
+      }
+    }
+    // Check one level deeper (e.g. { data: { items: [...] } })
+    if (!arrayData) {
+      for (const k of [...preferredKeys, ...Object.keys(parsed)]) {
+        const sub = parsed[k];
+        if (sub && typeof sub === "object" && !Array.isArray(sub)) {
+          for (const subKey of preferredKeys) {
+            if (Array.isArray(sub[subKey])) {
+              arrayData = sub[subKey];
+              break;
+            }
+          }
+          if (arrayData) break;
+          for (const subKey of Object.keys(sub)) {
+            if (Array.isArray(sub[subKey])) {
+              arrayData = sub[subKey];
+              break;
+            }
+          }
+          if (arrayData) break;
         }
       }
     }
@@ -756,15 +810,48 @@ export function ProjectDataListModal({
   const [showImportWizard, setShowImportWizard] = useState(false);
   const [importFileInfo, setImportFileInfo] = useState<{
     fileName: string;
-    format: "csv" | "json";
+    format: "csv" | "json" | "api";
     fields: string[];
     records: Array<Record<string, string>>;
   } | null>(null);
-  // Maps project field key ('__rowName' or layer.id) -> uploaded field name (or '' if skipped)
+  // Maps project field key ('__rowName' or layer.id) -> uploaded/API field name (or '' if skipped)
   const [fieldMapping, setFieldMapping] = useState<Record<string, string>>({});
   const [importMode, setImportMode] = useState<"append" | "replace">("append");
   const [isImporting, setIsImporting] = useState(false);
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Load from API modal state (frontend/proxy fetch -> field mapping wizard -> live auto-load without DB storage)
+  const [showApiImportModal, setShowApiImportModal] = useState(false);
+  const [apiUrl, setApiUrl] = useState("");
+  const [apiMethod, setApiMethod] = useState<"GET" | "POST">("GET");
+  const [apiDataPath, setApiDataPath] = useState("");
+  const [apiHeaders, setApiHeaders] = useState<Array<{ key: string; value: string }>>([]);
+  const [apiBody, setApiBody] = useState("");
+  const [isFetchingApi, setIsFetchingApi] = useState(false);
+  const [apiFetchError, setApiFetchError] = useState<string | null>(null);
+  const [apiFetchCanRetryProxy, setApiFetchCanRetryProxy] = useState(false);
+  const [apiLoginEnabled, setApiLoginEnabled] = useState(false);
+  const [apiLoginUrl, setApiLoginUrl] = useState("");
+  const [apiLoginUsername, setApiLoginUsername] = useState("");
+  const [apiLoginPassword, setApiLoginPassword] = useState("");
+  const [isLoggingInApi, setIsLoggingInApi] = useState(false);
+  const [apiLoginStatus, setApiLoginStatus] = useState<string | null>(null);
+  const [liveApiSourceItems, setLiveApiSourceItems] = useState<ProjectDataItem[] | null>(null);
+  const [liveApiLastSyncedAt, setLiveApiLastSyncedAt] = useState<string | null>(null);
+  const [liveApiLoadError, setLiveApiLoadError] = useState<string | null>(null);
+  const [liveApiUrlLabel, setLiveApiUrlLabel] = useState<string>("");
+  const [isLiveApiLoading, setIsLiveApiLoading] = useState(false);
+  const liveFetchIdRef = useRef(0);
+
+  // Prompt modal when API data load fails and user needs to login to obtain a fresh Cookie
+  const [showApiReauthPrompt, setShowApiReauthPrompt] = useState(false);
+  const [apiReauthSource, setApiReauthSource] = useState<"live" | "setup">("live");
+  const [apiReauthReason, setApiReauthReason] = useState("");
+  const [apiReauthLoginUrl, setApiReauthLoginUrl] = useState("");
+  const [apiReauthUsername, setApiReauthUsername] = useState("");
+  const [apiReauthPassword, setApiReauthPassword] = useState("");
+  const [apiReauthError, setApiReauthError] = useState<string | null>(null);
+  const [isReauthingApi, setIsReauthingApi] = useState(false);
 
   // Row image generation / share state
   const [processingRowId, setProcessingRowId] = useState<string | null>(null);
@@ -899,9 +986,375 @@ export function ProjectDataListModal({
     };
   }, [isOpen, effectiveDefaultImageUrl]);
 
-  // Fetch saved project data list from DB (loads 5-day window by default when project has a Date field)
-  const fetchProjectDataList = async (opts?: boolean | { loadAll?: boolean; month?: string }) => {
-    if (!project.id || project.id === "temp") return;
+  const getSavedApiConfig = (): {
+    url?: string;
+    method?: "GET" | "POST";
+    dataPath?: string;
+    headers?: Array<{ key: string; value: string }>;
+    body?: string;
+    loginEnabled?: boolean;
+    loginUrl?: string;
+    loginUsername?: string;
+    useProxy?: boolean;
+    fieldMapping?: Record<string, string>;
+    autoLoadOnOpen?: boolean;
+  } | null => {
+    try {
+      const raw = localStorage.getItem(`datalist_api_config_${project.id}`);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" ? parsed : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const hasValidApiAutoLoadConfig = (cfg: ReturnType<typeof getSavedApiConfig>): boolean => {
+    if (!cfg || !cfg.url || !String(cfg.url).trim()) return false;
+    if (cfg.autoLoadOnOpen === false) return false;
+    if (!cfg.fieldMapping || typeof cfg.fieldMapping !== "object") return false;
+    return activeLayers.some(l => Boolean(cfg.fieldMapping?.[l.id]));
+  };
+
+  const mapSourceRecordsToProjectRows = (
+    records: Array<Record<string, string>>,
+    mapping: Record<string, string>
+  ): Array<{ rowName: string; rowValues: Record<string, string> }> => {
+    return records.map((rec, idx) => {
+      const rowValues: Record<string, string> = {};
+      activeLayers.forEach(layer => {
+        const mappedSourceField = mapping[layer.id];
+        if (mappedSourceField && rec[mappedSourceField] !== undefined) {
+          rowValues[layer.id] = String(rec[mappedSourceField]);
+        } else {
+          rowValues[layer.id] = "";
+        }
+        if (layer.hasSuffixList && layer.suffixList && layer.suffixList.length > 0) {
+          rowValues[`${layer.id}__suffix`] = layer.selectedSuffix || layer.suffixList[0];
+        }
+      });
+
+      // Auto-populate linked Sinhala number words if the number label itself wasn't mapped
+      activeLayers.forEach(layer => {
+        if (layer.isNumberLabel && layer.linkedNumberId && !mapping[layer.id]) {
+          const parent = activeLayers.find(l => l.id === layer.linkedNumberId);
+          if (parent && rowValues[parent.id]) {
+            const mode = parent.numberFontMode || layer.numberFontMode || "fm";
+            rowValues[layer.id] = convertNumberToSinhala(rowValues[parent.id], mode) || "";
+          }
+        }
+      });
+
+      const mappedNameCol = mapping.__rowName;
+      const rowName =
+        mappedNameCol && rec[mappedNameCol]
+          ? String(rec[mappedNameCol])
+          : rowValues[activeLayers[0]?.id] || `${project.name} ${idx + 1}`;
+
+      return { rowName, rowValues };
+    });
+  };
+
+  const toLiveProjectDataItems = (
+    rows: Array<{ rowName: string; rowValues: Record<string, string> }>
+  ): ProjectDataItem[] => {
+    const stamp = Date.now();
+    return rows.map((r, idx) => ({
+      id: `api_${stamp}_${idx}`,
+      projectId: project.id,
+      username: user?.username || "api",
+      rowName: r.rowName,
+      rowValues: r.rowValues,
+      sortOrder: idx,
+    }));
+  };
+
+  const applyLiveApiDateFilter = (
+    sourceItems: ProjectDataItem[],
+    opts?: { loadAll?: boolean; month?: string }
+  ) => {
+    const shouldLoadAll = opts?.loadAll !== undefined ? opts.loadAll : showAllRecords;
+    const targetMonth =
+      opts?.month !== undefined ? opts.month : shouldLoadAll ? "" : selectedMonth;
+
+    setTotalRecordCount(sourceItems.length);
+
+    if (dateLayerIds.length === 0 || shouldLoadAll) {
+      setItems(sourceItems);
+      setIsDateFiltered(false);
+      return;
+    }
+
+    if (targetMonth) {
+      const filtered = sourceItems.filter(item =>
+        dateLayerIds.some(lid => {
+          const info = parseDateSortInfo(item.rowValues?.[lid]);
+          return info ? info.monthDay.startsWith(`${targetMonth}-`) : false;
+        })
+      );
+      setItems(filtered);
+      setIsDateFiltered(true);
+      return;
+    }
+
+    const upcomingSet = new Set(getUpcomingFiveMonthDays().monthDays);
+    const filtered = sourceItems.filter(item =>
+      dateLayerIds.some(lid => {
+        const info = parseDateSortInfo(item.rowValues?.[lid]);
+        return info ? upcomingSet.has(info.monthDay) : false;
+      })
+    );
+    setItems(filtered);
+    setIsDateFiltered(true);
+  };
+
+  const executeExternalApiRequest = async (
+    cfg: {
+      url: string;
+      method: "GET" | "POST";
+      headers: Array<{ key: string; value: string }>;
+      body: string;
+      loginEnabled?: boolean;
+      loginUrl?: string;
+      loginUsername?: string;
+      loginPassword?: string;
+    },
+    useServerProxy = false
+  ): Promise<{ rawText: string; usedProxy: boolean; capturedCookie?: string }> => {
+    const trimmedUrl = cfg.url.trim();
+    const headersObj: Record<string, string> = {};
+    (cfg.headers || []).forEach(h => {
+      const k = h.key.trim();
+      if (k) headersObj[k] = h.value;
+    });
+    const hasCookieHeader = Object.keys(headersObj).some(k => k.toLowerCase() === "cookie");
+    const shouldLoginFirst =
+      Boolean(cfg.loginEnabled) &&
+      Boolean(cfg.loginUrl?.trim()) &&
+      Boolean(cfg.loginUsername?.trim() || cfg.loginPassword);
+
+    // Browsers disallow setting Cookie headers and reading HttpOnly Set-Cookie in window.fetch(),
+    // so route through /api/proxy-fetch whenever login-cookie capture or a Cookie header is used.
+    const effectiveUseProxy = useServerProxy || shouldLoginFirst || hasCookieHeader;
+
+    if (effectiveUseProxy) {
+      const proxyRes = await fetch("/api/proxy-fetch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: trimmedUrl,
+          method: cfg.method,
+          headers: headersObj,
+          body: cfg.method === "POST" ? (cfg.body || "").trim() : undefined,
+          login: shouldLoginFirst
+            ? {
+                url: cfg.loginUrl!.trim(),
+                username: cfg.loginUsername || "",
+                password: cfg.loginPassword || "",
+              }
+            : undefined,
+        }),
+      });
+      const proxyPayload = await proxyRes.json().catch(() => null);
+      if (!proxyRes.ok) {
+        throw new Error(proxyPayload?.error || `Proxy error (${proxyRes.status})`);
+      }
+      if (!proxyPayload?.ok) {
+        const prefix = proxyPayload?.loginFailed ? "Login failed: " : "";
+        throw new Error(
+          `${prefix}HTTP ${proxyPayload?.status || 500} ${proxyPayload?.statusText || ""}${
+            proxyPayload?.body ? `: ${String(proxyPayload.body).slice(0, 180)}` : ""
+          }`
+        );
+      }
+      return {
+        rawText: String(proxyPayload.body || ""),
+        usedProxy: true,
+        capturedCookie: proxyPayload.capturedCookie ? String(proxyPayload.capturedCookie) : undefined,
+      };
+    }
+
+    const fetchInit: RequestInit = { method: cfg.method };
+    if (Object.keys(headersObj).length > 0) {
+      fetchInit.headers = headersObj;
+    }
+    if (cfg.method === "POST") {
+      const trimmedBody = (cfg.body || "").trim();
+      if (trimmedBody) {
+        fetchInit.body = trimmedBody;
+        if (!Object.keys(headersObj).some(k => k.toLowerCase() === "content-type")) {
+          headersObj["Content-Type"] = "application/json";
+          fetchInit.headers = headersObj;
+        }
+      }
+    }
+
+    const response = await fetch(trimmedUrl, fetchInit);
+    const rawText = await response.text();
+    if (!response.ok) {
+      throw new Error(
+        `HTTP ${response.status} ${response.statusText}${rawText ? `: ${rawText.slice(0, 180)}` : ""}`
+      );
+    }
+    return { rawText, usedProxy: false };
+  };
+
+  const openApiReauthPrompt = (
+    source: "live" | "setup",
+    reasonMsg: string,
+    cfgOverride?: ReturnType<typeof getSavedApiConfig>
+  ) => {
+    const saved = cfgOverride || getSavedApiConfig();
+    const targetDataUrl = (cfgOverride?.url || apiUrl || saved?.url || "").trim();
+    let defaultLoginUrl = (apiLoginUrl || saved?.loginUrl || "").trim();
+    if (!defaultLoginUrl && /^https?:\/\//i.test(targetDataUrl)) {
+      try {
+        defaultLoginUrl = `${new URL(targetDataUrl).origin}/api/auth/login`;
+      } catch {
+        defaultLoginUrl = "";
+      }
+    }
+    setApiReauthSource(source);
+    setApiReauthReason(reasonMsg);
+    setApiReauthLoginUrl(defaultLoginUrl);
+    setApiReauthUsername((apiLoginUsername || saved?.loginUsername || "").trim());
+    setApiReauthPassword("");
+    setApiReauthError(null);
+    setShowApiReauthPrompt(true);
+  };
+
+  // Load fresh records from configured API into memory (no DB save)
+  const loadLiveDataFromApi = async (
+    cfgInput?: ReturnType<typeof getSavedApiConfig>,
+    dateOpts?: { loadAll?: boolean; month?: string; forceProxy?: boolean }
+  ) => {
+    const cfg = cfgInput || getSavedApiConfig();
+    if (!cfg?.url?.trim() || !cfg.fieldMapping) return;
+
+    const reqId = ++liveFetchIdRef.current;
+    const trimmedUrl = cfg.url.trim();
+    const shouldUseProxy = Boolean(dateOpts?.forceProxy ?? cfg.useProxy);
+    const hasInMemoryPassword = Boolean(apiLoginPassword);
+
+    setIsLoading(true);
+    setIsLiveApiLoading(true);
+    setLiveApiLoadError(null);
+    setLiveApiUrlLabel(trimmedUrl);
+
+    try {
+      const result = await executeExternalApiRequest(
+        {
+          url: trimmedUrl,
+          method: cfg.method === "POST" ? "POST" : "GET",
+          headers: Array.isArray(cfg.headers) ? cfg.headers : [],
+          body: typeof cfg.body === "string" ? cfg.body : "",
+          loginEnabled: Boolean(
+            cfg.loginEnabled && hasInMemoryPassword && (cfg.loginUsername?.trim() || apiLoginPassword)
+          ),
+          loginUrl: cfg.loginUrl || "",
+          loginUsername: cfg.loginUsername || "",
+          loginPassword: apiLoginPassword,
+        },
+        shouldUseProxy
+      );
+
+      if (reqId !== liveFetchIdRef.current) return;
+
+      if (result.capturedCookie) {
+        upsertCookieHeader(result.capturedCookie);
+        try {
+          const prevSaved = getSavedApiConfig() || {};
+          const nextHdrs = Array.isArray(cfg.headers) ? [...cfg.headers] : [];
+          const cIdx = nextHdrs.findIndex(h => h.key.trim().toLowerCase() === "cookie");
+          if (cIdx >= 0) nextHdrs[cIdx] = { key: "Cookie", value: result.capturedCookie };
+          else nextHdrs.push({ key: "Cookie", value: result.capturedCookie });
+          localStorage.setItem(
+            `datalist_api_config_${project.id}`,
+            JSON.stringify({ ...prevSaved, headers: nextHdrs })
+          );
+        } catch {
+          // ignore storage errors
+        }
+      }
+
+      if (!result.rawText.trim()) {
+        throw new Error("API returned an empty response body");
+      }
+
+      const parsed = parseJsonContent(result.rawText, cfg.dataPath || "");
+      if (parsed.fields.length === 0 || parsed.records.length === 0) {
+        throw new Error("No JSON records found in the API response.");
+      }
+
+      const mappedRows = mapSourceRecordsToProjectRows(parsed.records, cfg.fieldMapping);
+      const liveItems = toLiveProjectDataItems(mappedRows);
+
+      if (shouldUseProxy && !cfg.useProxy) {
+        try {
+          const prevSaved = getSavedApiConfig() || {};
+          localStorage.setItem(
+            `datalist_api_config_${project.id}`,
+            JSON.stringify({ ...prevSaved, useProxy: true })
+          );
+        } catch {
+          // ignore storage errors
+        }
+      }
+
+      setLiveApiSourceItems(liveItems);
+      setLiveApiLastSyncedAt(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+      applyLiveApiDateFilter(liveItems, dateOpts);
+    } catch (err) {
+      if (reqId !== liveFetchIdRef.current) return;
+      const msg = err instanceof Error ? err.message : String(err);
+      const isNetworkOrCors =
+        !shouldUseProxy &&
+        (msg.toLowerCase().includes("failed to fetch") ||
+          msg.toLowerCase().includes("networkerror") ||
+          msg.toLowerCase().includes("load failed"));
+      const friendlyMsg = isNetworkOrCors
+        ? "Browser could not reach this API directly (missing CORS headers or auth required). Login to capture cookie or retry via Proxy."
+        : msg;
+      setLiveApiLoadError(friendlyMsg);
+      setItems([]);
+      setTotalRecordCount(0);
+      setIsDateFiltered(false);
+      openApiReauthPrompt("live", friendlyMsg, cfg);
+    } finally {
+      if (reqId === liveFetchIdRef.current) {
+        setIsLoading(false);
+        setIsLiveApiLoading(false);
+      }
+    }
+  };
+
+  // Switch back to PostgreSQL saved list and disable auto-load on open
+  const handleExitLiveApiMode = () => {
+    liveFetchIdRef.current++;
+    try {
+      const prevSaved = getSavedApiConfig();
+      if (prevSaved) {
+        localStorage.setItem(
+          `datalist_api_config_${project.id}`,
+          JSON.stringify({ ...prevSaved, autoLoadOnOpen: false })
+        );
+      }
+    } catch {
+      // ignore storage errors
+    }
+    setLiveApiSourceItems(null);
+    setLiveApiLastSyncedAt(null);
+    setLiveApiLoadError(null);
+    setLiveApiUrlLabel("");
+    setShowAllRecords(false);
+    setSelectedMonth("");
+    fetchProjectDataList({ loadAll: false, month: "", bypassLiveCheck: true });
+  };
+
+  // Fetch project data list from DB OR handle filter / refresh in Live API mode
+  const fetchProjectDataList = async (
+    opts?: boolean | { loadAll?: boolean; month?: string; bypassLiveCheck?: boolean }
+  ) => {
     const shouldLoadAll =
       typeof opts === "boolean"
         ? opts
@@ -914,8 +1367,27 @@ export function ProjectDataListModal({
         : shouldLoadAll
         ? ""
         : selectedMonth;
+    const bypassLiveCheck = typeof opts === "object" && Boolean(opts.bypassLiveCheck);
+
+    // If Live API mode is active: filter in memory when switching dates, or re-fetch API on Sync (opts === undefined)
+    if (!bypassLiveCheck && liveApiSourceItems !== null) {
+      if (opts === undefined) {
+        await loadLiveDataFromApi(undefined, { loadAll: shouldLoadAll, month: targetMonth });
+      } else {
+        applyLiveApiDateFilter(liveApiSourceItems, { loadAll: shouldLoadAll, month: targetMonth });
+      }
+      return;
+    }
+
+    if (!bypassLiveCheck && liveApiLoadError) {
+      await loadLiveDataFromApi(undefined, { loadAll: shouldLoadAll, month: targetMonth });
+      return;
+    }
+
+    if (!project.id || project.id === "temp") return;
 
     setIsLoading(true);
+    setIsLiveApiLoading(false);
     try {
       let url = `/api/projects/${encodeURIComponent(project.id)}/data-list?mode=all${
         dateLayerIds.length > 0 ? `&dateLayerIds=${encodeURIComponent(dateLayerIds.join(","))}` : ""
@@ -1041,15 +1513,28 @@ export function ProjectDataListModal({
   };
 
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      liveFetchIdRef.current++;
+      return;
+    }
     setShowAllRecords(false);
     setSelectedMonth("");
     setIsDateFiltered(false);
     setTotalRecordCount(0);
-    fetchProjectDataList({ loadAll: false, month: "" });
+    setLiveApiSourceItems(null);
+    setLiveApiLastSyncedAt(null);
+    setLiveApiLoadError(null);
+    setLiveApiUrlLabel("");
     fetchProjectTemplates();
     setSelectedIds(new Set());
     setShowImportWizard(false);
+    setShowApiImportModal(false);
+    setShowApiReauthPrompt(false);
+    setApiReauthError(null);
+    setApiReauthPassword("");
+    setApiFetchError(null);
+    setApiFetchCanRetryProxy(false);
+    setApiLoginStatus(null);
     setEditingItem(null);
     setPreviewGroupKey(null);
     setMultiRowPreviewTarget(null);
@@ -1057,6 +1542,35 @@ export function ProjectDataListModal({
     setShowTemplateManagerModal(false);
     setCustomDefaultImageUrl(null);
     setReplacingTargetId(null);
+
+    const savedApi = getSavedApiConfig();
+    if (savedApi) {
+      setApiUrl(typeof savedApi.url === "string" ? savedApi.url : "");
+      setApiMethod(savedApi.method === "POST" ? "POST" : "GET");
+      setApiDataPath(typeof savedApi.dataPath === "string" ? savedApi.dataPath : "");
+      setApiHeaders(Array.isArray(savedApi.headers) ? savedApi.headers : []);
+      setApiBody(typeof savedApi.body === "string" ? savedApi.body : "");
+      setApiLoginEnabled(Boolean(savedApi.loginEnabled));
+      setApiLoginUrl(typeof savedApi.loginUrl === "string" ? savedApi.loginUrl : "");
+      setApiLoginUsername(typeof savedApi.loginUsername === "string" ? savedApi.loginUsername : "");
+      setApiLoginPassword("");
+    } else {
+      setApiUrl("");
+      setApiMethod("GET");
+      setApiDataPath("");
+      setApiHeaders([]);
+      setApiBody("");
+      setApiLoginEnabled(false);
+      setApiLoginUrl("");
+      setApiLoginUsername("");
+      setApiLoginPassword("");
+    }
+
+    if (hasValidApiAutoLoadConfig(savedApi)) {
+      loadLiveDataFromApi(savedApi, { loadAll: false, month: "" });
+    } else {
+      fetchProjectDataList({ loadAll: false, month: "", bypassLiveCheck: true });
+    }
 
     let cancelled = false;
     hasUserEditedPrefsRef.current = false;
@@ -1479,10 +1993,47 @@ export function ProjectDataListModal({
     });
   };
 
-  // Save Add / Edit entry to database
+  // Save Add / Edit entry (in memory for Live API mode, or PostgreSQL DB otherwise)
   const handleSaveEntry = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!editingItem) return;
+
+    if (liveApiSourceItems !== null || editingItem.id?.startsWith("api_")) {
+      if (editingItem.mode === "add") {
+        const newItem: ProjectDataItem = {
+          id: `api_${Date.now()}_add`,
+          projectId: project.id,
+          username: user?.username || "api",
+          rowName: editingItem.rowName,
+          rowValues: editingItem.rowValues,
+          sortOrder: liveApiSourceItems ? liveApiSourceItems.length : items.length,
+        };
+        setLiveApiSourceItems(prev => (prev ? [...prev, newItem] : [newItem]));
+        setItems(prev => [...prev, newItem]);
+        setTotalRecordCount(c => c + 1);
+        onNotification({ message: "Record added to live session (not saved to database)", type: "success" });
+      } else if (editingItem.mode === "edit" && editingItem.id) {
+        setLiveApiSourceItems(prev =>
+          prev
+            ? prev.map(it =>
+                it.id === editingItem.id
+                  ? { ...it, rowName: editingItem.rowName, rowValues: editingItem.rowValues }
+                  : it
+              )
+            : prev
+        );
+        setItems(prev =>
+          prev.map(it =>
+            it.id === editingItem.id
+              ? { ...it, rowName: editingItem.rowName, rowValues: editingItem.rowValues }
+              : it
+          )
+        );
+        onNotification({ message: "Record updated in live session", type: "success" });
+      }
+      setEditingItem(null);
+      return;
+    }
 
     setIsSaving(true);
     try {
@@ -1536,15 +2087,21 @@ export function ProjectDataListModal({
     }
   };
 
-  // Commit inline cell edit directly to DB
+  // Commit inline cell edit (in memory for Live API mode, or directly to DB)
   const commitInlineCellEdit = async (item: ProjectDataItem, layerId: string, newValue: string) => {
     setEditingCell(null);
     const oldVal = item.rowValues?.[layerId] ?? "";
     if (oldVal === newValue) return;
 
     const updatedValues = updateValueWithLinks(item.rowValues || {}, layerId, newValue);
-    // Optimistic update
     setItems(prev => prev.map(it => (it.id === item.id ? { ...it, rowValues: updatedValues } : it)));
+
+    if (liveApiSourceItems !== null || item.id.startsWith("api_")) {
+      setLiveApiSourceItems(prev =>
+        prev ? prev.map(it => (it.id === item.id ? { ...it, rowValues: updatedValues } : it)) : prev
+      );
+      return;
+    }
 
     try {
       const res = await fetch(
@@ -1567,6 +2124,14 @@ export function ProjectDataListModal({
   const handleInlineSuffixChange = async (item: ProjectDataItem, layerId: string, suffix: string) => {
     const updatedValues = { ...(item.rowValues || {}), [`${layerId}__suffix`]: suffix };
     setItems(prev => prev.map(it => (it.id === item.id ? { ...it, rowValues: updatedValues } : it)));
+
+    if (liveApiSourceItems !== null || item.id.startsWith("api_")) {
+      setLiveApiSourceItems(prev =>
+        prev ? prev.map(it => (it.id === item.id ? { ...it, rowValues: updatedValues } : it)) : prev
+      );
+      return;
+    }
+
     try {
       await fetch(
         `/api/projects/${encodeURIComponent(project.id)}/data-list/${encodeURIComponent(item.id)}`,
@@ -1583,6 +2148,19 @@ export function ProjectDataListModal({
 
   // Execute delete single row
   const executeDeleteItem = async (id: string) => {
+    if (liveApiSourceItems !== null || id.startsWith("api_")) {
+      setLiveApiSourceItems(prev => (prev ? prev.filter(it => it.id !== id) : prev));
+      setItems(prev => prev.filter(it => it.id !== id));
+      setTotalRecordCount(c => Math.max(0, c - 1));
+      setSelectedIds(prev => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+      onNotification({ message: "Record removed from live session", type: "info" });
+      return;
+    }
+
     try {
       const res = await fetch(
         `/api/projects/${encodeURIComponent(project.id)}/data-list/${encodeURIComponent(id)}`,
@@ -1607,7 +2185,10 @@ export function ProjectDataListModal({
   const handleDeleteItem = (id: string) => {
     setConfirmDialog({
       title: "Delete Record",
-      message: "Are you sure you want to delete this record from the saved list?",
+      message:
+        liveApiSourceItems !== null
+          ? "Remove this record from the current live API view? (Re-syncing from API will reload all records.)"
+          : "Are you sure you want to delete this record from the saved list?",
       confirmLabel: "Delete",
       onConfirm: () => executeDeleteItem(id),
     });
@@ -1615,6 +2196,27 @@ export function ProjectDataListModal({
 
   // Execute bulk delete or clear all
   const executeBulkDelete = async (deleteAll: boolean, idsToDelete: string[]) => {
+    if (liveApiSourceItems !== null) {
+      if (deleteAll) {
+        const deletedTotal = Math.max(idsToDelete.length, totalRecordCount);
+        setLiveApiSourceItems([]);
+        setItems([]);
+        setTotalRecordCount(0);
+        setSelectedIds(new Set());
+        setEditingCell(null);
+        setPreviewGroupKey(null);
+        onNotification({ message: `Cleared all ${deletedTotal} live record(s) from view`, type: "info" });
+      } else {
+        const removeSet = new Set(idsToDelete);
+        setLiveApiSourceItems(prev => (prev ? prev.filter(it => !removeSet.has(it.id)) : prev));
+        setItems(prev => prev.filter(it => !removeSet.has(it.id)));
+        setTotalRecordCount(c => Math.max(0, c - idsToDelete.length));
+        setSelectedIds(new Set());
+        onNotification({ message: `Removed ${idsToDelete.length} record(s) from live view`, type: "info" });
+      }
+      return;
+    }
+
     try {
       const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}/data-list/bulk-delete`, {
         method: "POST",
@@ -1651,9 +2253,17 @@ export function ProjectDataListModal({
     if (deleteAll ? effectiveTotal === 0 : idsToDelete.length === 0) return;
 
     setConfirmDialog({
-      title: deleteAll ? "Clear All Saved Records" : "Delete Selected Records",
+      title: deleteAll
+        ? liveApiSourceItems !== null
+          ? "Clear Live View"
+          : "Clear All Saved Records"
+        : "Delete Selected Records",
       message: deleteAll
-        ? `Delete ALL ${effectiveTotal} saved records for "${project.name}" from the database? This cannot be undone.`
+        ? liveApiSourceItems !== null
+          ? `Clear all ${effectiveTotal} loaded live API records from the current view? (No database data will be changed.)`
+          : `Delete ALL ${effectiveTotal} saved records for "${project.name}" from the database? This cannot be undone.`
+        : liveApiSourceItems !== null
+        ? `Remove ${idsToDelete.length} selected record(s) from the current live view?`
         : `Delete ${idsToDelete.length} selected record(s) from the database?`,
       confirmLabel: deleteAll ? `Clear All (${effectiveTotal})` : `Delete (${idsToDelete.length})`,
       onConfirm: () => executeBulkDelete(deleteAll, idsToDelete),
@@ -1745,51 +2355,419 @@ export function ProjectDataListModal({
     if (importFileInputRef.current) importFileInputRef.current.value = "";
   };
 
-  // Build mapped items from uploaded file + current fieldMapping
+  const openApiImportModal = () => {
+    setApiFetchError(null);
+    setApiFetchCanRetryProxy(false);
+    setApiLoginStatus(null);
+    setShowApiImportModal(true);
+  };
+
+  // Helper to insert or update a Cookie header row in apiHeaders
+  const upsertCookieHeader = (cookieValue: string) => {
+    setApiHeaders(prev => {
+      const idx = prev.findIndex(h => h.key.trim().toLowerCase() === "cookie");
+      if (idx >= 0) {
+        return prev.map((h, i) => (i === idx ? { key: "Cookie", value: cookieValue } : h));
+      }
+      return [...prev, { key: "Cookie", value: cookieValue }];
+    });
+  };
+
+  // Authenticate against loginUrl, extract Set-Cookie, and store it in the Cookie request header
+  const handleApiLoginOnly = async () => {
+    const trimmedLoginUrl = apiLoginUrl.trim();
+    if (!trimmedLoginUrl) {
+      setApiFetchError("Please enter the Login URL");
+      return;
+    }
+    try {
+      new URL(trimmedLoginUrl);
+    } catch {
+      setApiFetchError("Invalid Login URL format. Include https:// or http://");
+      return;
+    }
+
+    setIsLoggingInApi(true);
+    setApiFetchError(null);
+    setApiLoginStatus(null);
+
+    try {
+      const res = await fetch("/api/proxy-fetch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          loginOnly: true,
+          login: {
+            url: trimmedLoginUrl,
+            username: apiLoginUsername,
+            password: apiLoginPassword,
+          },
+        }),
+      });
+      const payload = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(payload?.error || `Login proxy error (${res.status})`);
+      }
+      if (!payload?.ok) {
+        throw new Error(
+          `Login failed (HTTP ${payload?.status || 401} ${payload?.statusText || ""})${
+            payload?.body ? `: ${String(payload.body).slice(0, 180)}` : ""
+          }`
+        );
+      }
+
+      const cookieStr = typeof payload.capturedCookie === "string" ? payload.capturedCookie.trim() : "";
+      if (!cookieStr) {
+        throw new Error("Login succeeded, but the server did not return a Set-Cookie header.");
+      }
+
+      upsertCookieHeader(cookieStr);
+      setApiLoginStatus(`Cookie captured (${cookieStr.split("=")[0]}) and added to Request Headers.`);
+      onNotification({ message: "Login successful! Auth cookie added to request headers.", type: "success" });
+    } catch (err) {
+      setApiFetchError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsLoggingInApi(false);
+    }
+  };
+
+  // Submit username/password login prompt when API data failed to load, save returned Cookie, and retry loading
+  const handleSubmitApiReauth = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const trimmedLoginUrl = apiReauthLoginUrl.trim();
+    if (!trimmedLoginUrl) {
+      setApiReauthError("Please enter the Login URL");
+      return;
+    }
+    try {
+      new URL(trimmedLoginUrl);
+    } catch {
+      setApiReauthError("Invalid Login URL format. Include https:// or http://");
+      return;
+    }
+    if (!apiReauthUsername.trim()) {
+      setApiReauthError("Please enter your username");
+      return;
+    }
+    if (!apiReauthPassword) {
+      setApiReauthError("Please enter your password");
+      return;
+    }
+
+    setIsReauthingApi(true);
+    setApiReauthError(null);
+
+    try {
+      const res = await fetch("/api/proxy-fetch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          loginOnly: true,
+          login: {
+            url: trimmedLoginUrl,
+            username: apiReauthUsername.trim(),
+            password: apiReauthPassword,
+          },
+        }),
+      });
+      const payload = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(payload?.error || `Login proxy error (${res.status})`);
+      }
+      if (!payload?.ok) {
+        throw new Error(
+          `Login failed (HTTP ${payload?.status || 401} ${payload?.statusText || ""})${
+            payload?.body ? `: ${String(payload.body).slice(0, 180)}` : ""
+          }`
+        );
+      }
+
+      const cookieStr = typeof payload.capturedCookie === "string" ? payload.capturedCookie.trim() : "";
+      if (!cookieStr) {
+        throw new Error("Login succeeded, but no Set-Cookie header was returned.");
+      }
+
+      const prevSaved = getSavedApiConfig() || {};
+      const baseHeaders =
+        apiHeaders.length > 0
+          ? [...apiHeaders]
+          : Array.isArray(prevSaved.headers)
+          ? [...prevSaved.headers]
+          : [];
+      const cIdx = baseHeaders.findIndex(h => h.key.trim().toLowerCase() === "cookie");
+      if (cIdx >= 0) baseHeaders[cIdx] = { key: "Cookie", value: cookieStr };
+      else baseHeaders.push({ key: "Cookie", value: cookieStr });
+
+      setApiHeaders(baseHeaders);
+      setApiLoginEnabled(true);
+      setApiLoginUrl(trimmedLoginUrl);
+      setApiLoginUsername(apiReauthUsername.trim());
+      setApiLoginPassword("");
+      setApiLoginStatus(`Logged in • Cookie (${cookieStr.split("=")[0]}) applied as Request Header.`);
+
+      const nextSaved = {
+        ...prevSaved,
+        headers: baseHeaders,
+        loginEnabled: true,
+        loginUrl: trimmedLoginUrl,
+        loginUsername: apiReauthUsername.trim(),
+        useProxy: true,
+      };
+      try {
+        localStorage.setItem(`datalist_api_config_${project.id}`, JSON.stringify(nextSaved));
+      } catch {
+        // ignore storage errors
+      }
+
+      setShowApiReauthPrompt(false);
+      setApiReauthError(null);
+      setApiReauthPassword("");
+      onNotification({
+        message: "Cookie captured! Reloading API data...",
+        type: "success",
+      });
+
+      if (apiReauthSource === "live") {
+        await loadLiveDataFromApi(nextSaved, {
+          loadAll: showAllRecords,
+          month: selectedMonth,
+          forceProxy: true,
+        });
+      } else {
+        await handleFetchApiData(undefined, true, baseHeaders, true);
+      }
+    } catch (err) {
+      setApiReauthError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsReauthingApi(false);
+    }
+  };
+
+  // Call external/configured JSON API from the front end (auto-using /api/proxy-fetch when login or Cookie header is needed)
+  const handleFetchApiData = async (
+    e?: React.FormEvent,
+    useServerProxy = false,
+    overrideHeaders?: Array<{ key: string; value: string }>,
+    skipLoginStep = false
+  ) => {
+    if (e) e.preventDefault();
+    const trimmedUrl = apiUrl.trim();
+    if (!trimmedUrl) {
+      setApiFetchError("Please enter an API URL");
+      setApiFetchCanRetryProxy(false);
+      return;
+    }
+
+    if (!/^https?:\/\//i.test(trimmedUrl) && !trimmedUrl.startsWith("/")) {
+      setApiFetchError("API URL must start with https://, http://, or /");
+      setApiFetchCanRetryProxy(false);
+      return;
+    }
+
+    if (!trimmedUrl.startsWith("/")) {
+      try {
+        new URL(trimmedUrl);
+      } catch {
+        setApiFetchError("Invalid API URL format. Please check the URL and try again.");
+        setApiFetchCanRetryProxy(false);
+        return;
+      }
+    }
+
+    const activeHdrs = overrideHeaders ?? apiHeaders;
+    const shouldLoginFirst =
+      !skipLoginStep &&
+      apiLoginEnabled &&
+      Boolean(apiLoginUrl.trim()) &&
+      Boolean(apiLoginUsername.trim() || apiLoginPassword);
+
+    if (shouldLoginFirst) {
+      try {
+        new URL(apiLoginUrl.trim());
+      } catch {
+        setApiFetchError("Invalid Login URL format. Include https:// or http://");
+        setApiFetchCanRetryProxy(false);
+        return;
+      }
+    }
+
+    const hasCookieHeader = activeHdrs.some(h => h.key.trim().toLowerCase() === "cookie");
+    const effectiveUseProxy = useServerProxy || shouldLoginFirst || hasCookieHeader;
+
+    setIsFetchingApi(true);
+    setApiFetchError(null);
+    setApiFetchCanRetryProxy(false);
+
+    try {
+      // Persist API settings per project (never persist password)
+      try {
+        const prevSaved = getSavedApiConfig() || {};
+        localStorage.setItem(
+          `datalist_api_config_${project.id}`,
+          JSON.stringify({
+            ...prevSaved,
+            url: trimmedUrl,
+            method: apiMethod,
+            dataPath: apiDataPath.trim(),
+            headers: activeHdrs,
+            body: apiBody,
+            loginEnabled: apiLoginEnabled,
+            loginUrl: apiLoginUrl.trim(),
+            loginUsername: apiLoginUsername,
+            useProxy: useServerProxy ? true : prevSaved.useProxy,
+          })
+        );
+      } catch {
+        // ignore storage errors
+      }
+
+      const result = await executeExternalApiRequest(
+        {
+          url: trimmedUrl,
+          method: apiMethod,
+          headers: activeHdrs,
+          body: apiBody,
+          loginEnabled: shouldLoginFirst,
+          loginUrl: apiLoginUrl.trim(),
+          loginUsername: apiLoginUsername,
+          loginPassword: apiLoginPassword,
+        },
+        effectiveUseProxy
+      );
+
+      let mergedHdrs = activeHdrs;
+      if (result.capturedCookie) {
+        const captured = result.capturedCookie;
+        upsertCookieHeader(captured);
+        mergedHdrs = [...activeHdrs];
+        const cIdx = mergedHdrs.findIndex(h => h.key.trim().toLowerCase() === "cookie");
+        if (cIdx >= 0) mergedHdrs[cIdx] = { key: "Cookie", value: captured };
+        else mergedHdrs.push({ key: "Cookie", value: captured });
+        setApiLoginStatus(
+          `Logged in • Cookie (${captured.split("=")[0]}) applied as Request Header.`
+        );
+        try {
+          const prevSaved = getSavedApiConfig() || {};
+          localStorage.setItem(
+            `datalist_api_config_${project.id}`,
+            JSON.stringify({ ...prevSaved, headers: mergedHdrs })
+          );
+        } catch {
+          // ignore storage errors
+        }
+      }
+
+      const rawText = result.rawText;
+      if (!rawText.trim()) {
+        throw new Error("API returned an empty response body");
+      }
+
+      const parsed = parseJsonContent(rawText, apiDataPath);
+      if (parsed.fields.length === 0 || parsed.records.length === 0) {
+        throw new Error(
+          apiDataPath.trim()
+            ? `No JSON records found at path "${apiDataPath.trim()}". Check the JSON path or leave it blank for auto-detection.`
+            : "No fields or JSON records found in the API response."
+        );
+      }
+
+      // Compute auto-mapping and overlay any previously saved API field mapping for matching fields
+      const autoMap = computeAutoMapping(parsed.fields);
+      const saved = getSavedApiConfig();
+      if (saved?.fieldMapping && typeof saved.fieldMapping === "object") {
+        const availableSet = new Set(parsed.fields);
+        Object.entries(saved.fieldMapping).forEach(([projKey, apiField]) => {
+          if (apiField && availableSet.has(apiField)) {
+            autoMap[projKey] = apiField;
+          }
+        });
+      }
+
+      setImportFileInfo({
+        fileName: trimmedUrl,
+        format: "api",
+        fields: parsed.fields,
+        records: parsed.records,
+      });
+      setFieldMapping(autoMap);
+      setShowApiImportModal(false);
+      setShowImportWizard(true);
+      onNotification({
+        message: `Fetched ${parsed.records.length} records (${parsed.fields.length} fields) from API`,
+        type: "success",
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const isNetworkOrCors =
+        !effectiveUseProxy &&
+        (msg.toLowerCase().includes("failed to fetch") ||
+          msg.toLowerCase().includes("networkerror") ||
+          msg.toLowerCase().includes("load failed"));
+      setApiFetchCanRetryProxy(isNetworkOrCors && /^https?:\/\//i.test(trimmedUrl));
+      const friendlyMsg = isNetworkOrCors
+        ? "Browser could not reach this API directly (usually due to missing CORS headers on the API server or HTTP vs HTTPS blocking). You can retry via Server Proxy or login to capture an auth cookie."
+        : msg;
+      setApiFetchError(friendlyMsg);
+      if (!isNetworkOrCors) {
+        openApiReauthPrompt("setup", msg);
+      }
+    } finally {
+      setIsFetchingApi(false);
+    }
+  };
+
+  // Build mapped items from uploaded file or API response + current fieldMapping
   const mappedImportPreviewRows = useMemo(() => {
     if (!importFileInfo) return [];
-    return importFileInfo.records.map((rec, idx) => {
-      const rowValues: Record<string, string> = {};
-      activeLayers.forEach(layer => {
-        const mappedSourceField = fieldMapping[layer.id];
-        if (mappedSourceField && rec[mappedSourceField] !== undefined) {
-          rowValues[layer.id] = String(rec[mappedSourceField]);
-        } else {
-          rowValues[layer.id] = "";
-        }
-        if (layer.hasSuffixList && layer.suffixList && layer.suffixList.length > 0) {
-          rowValues[`${layer.id}__suffix`] = layer.selectedSuffix || layer.suffixList[0];
-        }
-      });
-
-      // Auto-populate linked Sinhala number words if the number label itself wasn't mapped
-      activeLayers.forEach(layer => {
-        if (layer.isNumberLabel && layer.linkedNumberId && !fieldMapping[layer.id]) {
-          const parent = activeLayers.find(l => l.id === layer.linkedNumberId);
-          if (parent && rowValues[parent.id]) {
-            const mode = parent.numberFontMode || layer.numberFontMode || "fm";
-            rowValues[layer.id] = convertNumberToSinhala(rowValues[parent.id], mode) || "";
-          }
-        }
-      });
-
-      const mappedNameCol = fieldMapping.__rowName;
-      const rowName =
-        mappedNameCol && rec[mappedNameCol]
-          ? String(rec[mappedNameCol])
-          : rowValues[activeLayers[0]?.id] || `${project.name} ${idx + 1}`;
-
-      return { rowName, rowValues };
-    });
+    return mapSourceRecordsToProjectRows(importFileInfo.records, fieldMapping);
   }, [importFileInfo, fieldMapping, activeLayers, project.name]);
 
-  // Execute confirmed import to DB
+  // Execute confirmed import (Live API loads into memory without DB save; CSV/JSON saves to DB)
   const handleConfirmImport = async () => {
     if (!importFileInfo || mappedImportPreviewRows.length === 0) return;
 
     const hasAnyMappedField = activeLayers.some(l => Boolean(fieldMapping[l.id]));
     if (!hasAnyMappedField) {
-      onNotification({ message: "Please match at least one uploaded field to a project field", type: "error" });
+      onNotification({ message: "Please match at least one source field to a project field", type: "error" });
+      return;
+    }
+
+    // Live API Mode: keep records in memory & enable auto-load on open (no DB writes)
+    if (importFileInfo.format === "api") {
+      try {
+        const prevSaved = getSavedApiConfig() || {};
+        localStorage.setItem(
+          `datalist_api_config_${project.id}`,
+          JSON.stringify({
+            ...prevSaved,
+            url: apiUrl.trim() || importFileInfo.fileName,
+            method: apiMethod,
+            dataPath: apiDataPath.trim(),
+            headers: apiHeaders,
+            body: apiBody,
+            loginEnabled: apiLoginEnabled,
+            loginUrl: apiLoginUrl.trim(),
+            loginUsername: apiLoginUsername,
+            fieldMapping,
+            autoLoadOnOpen: true,
+          })
+        );
+      } catch {
+        // ignore storage errors
+      }
+
+      const liveItems = toLiveProjectDataItems(mappedImportPreviewRows);
+      setLiveApiSourceItems(liveItems);
+      setLiveApiLoadError(null);
+      setLiveApiUrlLabel(apiUrl.trim() || importFileInfo.fileName);
+      setLiveApiLastSyncedAt(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+      applyLiveApiDateFilter(liveItems, { loadAll: showAllRecords, month: selectedMonth });
+      onNotification({
+        message: `Loaded ${liveItems.length} live API records (auto-loads fresh on open • not saved to DB)`,
+        type: "success",
+      });
+      setShowImportWizard(false);
+      setImportFileInfo(null);
       return;
     }
 
@@ -1806,7 +2784,9 @@ export function ProjectDataListModal({
       });
       if (!res.ok) throw new Error("Failed to save imported records");
 
-      await fetchProjectDataList();
+      setLiveApiSourceItems(null);
+      setLiveApiLoadError(null);
+      await fetchProjectDataList({ bypassLiveCheck: true });
       onNotification({
         message: `Imported and saved ${mappedImportPreviewRows.length} records to the database!`,
         type: "success",
@@ -2759,23 +3739,43 @@ export function ProjectDataListModal({
         {/* Header */}
         <div className="flex items-center justify-between px-4 sm:px-6 py-3.5 border-b border-slate-800 bg-slate-900/95 shrink-0">
           <div className="flex items-center gap-3 min-w-0">
-            <div className="w-10 h-10 rounded-xl bg-emerald-600/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
-              <Database size={20} />
+            <div
+              className={cn(
+                "w-10 h-10 rounded-xl border flex items-center justify-center shrink-0",
+                liveApiSourceItems !== null || isLiveApiLoading || liveApiLoadError
+                  ? "bg-sky-600/20 border-sky-500/30 text-sky-400"
+                  : "bg-emerald-600/20 border-emerald-500/30 text-emerald-400"
+              )}
+            >
+              {liveApiSourceItems !== null || isLiveApiLoading || liveApiLoadError ? (
+                <Globe size={20} />
+              ) : (
+                <Database size={20} />
+              )}
             </div>
             <div className="min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
                 <h2 className="text-base sm:text-lg font-bold text-white truncate">
-                  Saved Project Data List
+                  {liveApiSourceItems !== null || isLiveApiLoading || liveApiLoadError
+                    ? "Live API Project Data List"
+                    : "Saved Project Data List"}
                 </h2>
                 <span className="text-xs px-2.5 py-0.5 rounded-full bg-slate-800 text-emerald-300 border border-slate-700 font-medium truncate max-w-[180px]">
                   {project.name}
                 </span>
+                {liveApiSourceItems !== null && (
+                  <span className="text-[11px] px-2 py-0.5 rounded-full bg-sky-500/15 text-sky-300 border border-sky-500/30 font-semibold">
+                    Live API • No DB
+                  </span>
+                )}
                 <span className="text-xs text-slate-400 font-mono">
                   ({items.length} {items.length === 1 ? "record" : "records"})
                 </span>
               </div>
               <p className="text-xs text-slate-400 hidden sm:block">
-                Persistent database list for this project • Add, edit, delete, or import JSON/CSV with field matching
+                {liveApiSourceItems !== null || isLiveApiLoading || liveApiLoadError
+                  ? "Auto-loads fresh data from API whenever opened • Not saved to database"
+                  : "Persistent database list for this project • Add, edit, delete, or import JSON/CSV/API with field matching"}
               </p>
             </div>
           </div>
@@ -2812,6 +3812,17 @@ export function ProjectDataListModal({
                 className="hidden"
               />
             </label>
+
+            {/* Load from API */}
+            <button
+              type="button"
+              onClick={openApiImportModal}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-600/20 hover:bg-sky-600/30 text-sky-300 border border-sky-500/30 font-semibold transition-colors"
+              title="Call a JSON API from your browser and map returned fields to project fields"
+            >
+              <Globe size={14} className="text-sky-400" />
+              <span>Load from API</span>
+            </button>
 
             {/* Export Dropdown Buttons */}
             <div className="flex items-center rounded-lg bg-slate-800 border border-slate-700 p-0.5">
@@ -2958,6 +3969,98 @@ export function ProjectDataListModal({
           </div>
         </div>
 
+        {/* Live API Auto-Load Status / Error Banner */}
+        {(liveApiSourceItems !== null || liveApiLoadError) && (
+          <div
+            className={cn(
+              "px-4 sm:px-6 py-2 border-b flex flex-wrap items-center justify-between gap-2 text-xs shrink-0",
+              liveApiLoadError
+                ? "border-rose-500/30 bg-rose-950/35 text-rose-200"
+                : "border-sky-500/25 bg-sky-950/30 text-sky-200"
+            )}
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              <Globe
+                size={14}
+                className={liveApiLoadError ? "text-rose-400 shrink-0" : "text-sky-400 shrink-0"}
+              />
+              {liveApiLoadError ? (
+                <span className="truncate sm:whitespace-normal">
+                  <strong className="text-rose-300">Auto-load from API failed:</strong>{" "}
+                  {liveApiLoadError}
+                </span>
+              ) : (
+                <span className="truncate">
+                  <strong className="text-sky-300">Live API Connected</strong>
+                  {liveApiUrlLabel ? ` (${liveApiUrlLabel})` : ""}
+                  {liveApiLastSyncedAt ? ` • Refreshed at ${liveApiLastSyncedAt}` : ""}
+                </span>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+              {liveApiLoadError && (
+                <>
+                  <button
+                    type="button"
+                    disabled={isLoading}
+                    onClick={() => openApiReauthPrompt("live", liveApiLoadError)}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-semibold transition-colors disabled:opacity-40"
+                  >
+                    <Lock size={11} />
+                    <span>Login &amp; Get Cookie</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isLoading}
+                    onClick={() =>
+                      loadLiveDataFromApi(undefined, {
+                        loadAll: showAllRecords,
+                        month: selectedMonth,
+                        forceProxy: true,
+                      })
+                    }
+                    className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold transition-colors disabled:opacity-40"
+                  >
+                    <RefreshCw size={11} className={isLoading ? "animate-spin" : ""} />
+                    <span>Retry via Proxy</span>
+                  </button>
+                </>
+              )}
+              <button
+                type="button"
+                disabled={isLoading}
+                onClick={() =>
+                  loadLiveDataFromApi(undefined, {
+                    loadAll: showAllRecords,
+                    month: selectedMonth,
+                  })
+                }
+                className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-sky-500/20 hover:bg-sky-500/30 text-sky-200 border border-sky-500/30 font-medium transition-colors disabled:opacity-40"
+              >
+                <RefreshCw size={11} className={isLoading ? "animate-spin" : ""} />
+                <span>Refresh API</span>
+              </button>
+              <button
+                type="button"
+                onClick={openApiImportModal}
+                className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-medium transition-colors"
+              >
+                <SlidersHorizontal size={11} />
+                <span>API Setup</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleExitLiveApiMode}
+                className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-300 border border-slate-700 font-medium transition-colors"
+                title="Stop auto-loading API on open and view saved database records instead"
+              >
+                <Database size={11} />
+                <span>Use Saved DB</span>
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Date Window Status, Month Filter & Load All Toggle Bar (when project has a Date field) */}
         {hasDateField && (isDateFiltered || showAllRecords || selectedMonth !== "" || isLoading) && (
           <div className="px-4 sm:px-6 py-2 border-b border-slate-800/80 bg-slate-900/95 flex flex-wrap items-center justify-between gap-2 text-xs shrink-0">
@@ -2979,7 +4082,8 @@ export function ProjectDataListModal({
                 </span>
               ) : (
                 <span>
-                  Showing <strong className="text-emerald-300">All {items.length}</strong> saved records
+                  Showing <strong className="text-emerald-300">All {items.length}</strong>{" "}
+                  {liveApiSourceItems !== null ? "live API records" : "saved records"}
                 </span>
               )}
             </div>
@@ -3083,9 +4187,17 @@ export function ProjectDataListModal({
         <div className="flex-1 overflow-auto bg-slate-900 relative">
           {isLoading ? (
             <div className="flex flex-col items-center justify-center h-full gap-3 text-slate-400">
-              <RefreshCw size={26} className="animate-spin text-emerald-400" />
+              <RefreshCw
+                size={26}
+                className={cn(
+                  "animate-spin",
+                  isLiveApiLoading ? "text-sky-400" : "text-emerald-400"
+                )}
+              />
               <p className="text-sm font-medium">
-                {selectedMonth
+                {isLiveApiLoading
+                  ? "Loading latest data from API..."
+                  : selectedMonth
                   ? `Loading ${selectedMonthLabel} records...`
                   : !showAllRecords && hasDateField
                   ? `Loading 5-day schedule (${upcomingFiveWindow.labelRange})...`
@@ -3162,6 +4274,14 @@ export function ProjectDataListModal({
                 >
                   <Upload size={15} />
                   <span>Import JSON / CSV</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={openApiImportModal}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-sky-600/20 hover:bg-sky-600/30 text-sky-300 border border-sky-500/30 text-xs font-semibold"
+                >
+                  <Globe size={15} />
+                  <span>Load from API</span>
                 </button>
               </div>
             </div>
@@ -3689,7 +4809,7 @@ export function ProjectDataListModal({
                   ? `${items.length} (${selectedMonth ? selectedMonthLabel : "5-day"}) / ${totalRecordCount} total`
                   : items.length}
               </strong>{" "}
-              database records
+              {liveApiSourceItems !== null ? "live API records" : "database records"}
             </span>
             <span className="hidden sm:inline text-slate-600">•</span>
             <span className="hidden sm:inline text-slate-500">
@@ -3699,10 +4819,10 @@ export function ProjectDataListModal({
           <button
             onClick={() => fetchProjectDataList()}
             className="flex items-center gap-1 text-slate-400 hover:text-white transition-colors"
-            title="Refresh from database"
+            title={liveApiSourceItems !== null ? "Fetch fresh data from API" : "Refresh from database"}
           >
             <RefreshCw size={12} className={isLoading ? "animate-spin" : ""} />
-            <span>Sync</span>
+            <span>{liveApiSourceItems !== null ? "Refresh API" : "Sync"}</span>
           </button>
         </div>
 
@@ -3872,29 +4992,455 @@ export function ProjectDataListModal({
           </div>
         )}
 
-        {/* SUB-MODAL 2: IMPORT JSON / CSV WITH FIELD MATCHING WIZARD */}
+        {/* SUB-MODAL 2A: LOAD JSON DATA FROM API (FRONTEND FETCH) */}
+        {showApiImportModal && (
+          <div className="fixed inset-0 z-[175] flex items-center justify-center bg-black/85 backdrop-blur-md p-2 sm:p-4">
+            <form
+              onSubmit={handleFetchApiData}
+              className="bg-slate-900 border border-slate-700/80 rounded-2xl shadow-2xl max-w-2xl w-full max-h-[92vh] flex flex-col overflow-hidden animate-in zoom-in-95 duration-150"
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-800 bg-slate-950/70">
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-xl bg-sky-600/20 border border-sky-500/30 flex items-center justify-center text-sky-400">
+                    <Globe size={18} />
+                  </div>
+                  <div>
+                    <h3 className="text-sm sm:text-base font-bold text-white">
+                      Load Data from API (JSON)
+                    </h3>
+                    <p className="text-xs text-slate-400">
+                      Calls the API directly from your browser, then lets you map JSON fields to project fields
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowApiImportModal(false)}
+                  className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              {/* Body */}
+              <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-4 text-xs">
+                {/* Method & URL */}
+                <div className="space-y-1.5">
+                  <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                    API Endpoint URL <span className="text-rose-400">*</span>
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={apiMethod}
+                      onChange={e => setApiMethod(e.target.value as "GET" | "POST")}
+                      className="bg-slate-950 border border-slate-700 focus:border-sky-500 rounded-xl px-3 py-2.5 text-xs font-bold text-sky-300 outline-none shrink-0"
+                    >
+                      <option value="GET">GET</option>
+                      <option value="POST">POST</option>
+                    </select>
+                    <input
+                      type="text"
+                      value={apiUrl}
+                      onChange={e => setApiUrl(e.target.value)}
+                      placeholder="https://api.example.com/donations"
+                      className="flex-1 bg-slate-950 border border-slate-700 focus:border-sky-500 rounded-xl px-3.5 py-2.5 text-xs text-white placeholder-slate-500 outline-none font-mono"
+                      autoFocus
+                    />
+                  </div>
+                </div>
+
+                {/* Optional Login First to Obtain Auth Cookie */}
+                <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3 space-y-3">
+                  <label className="flex items-center justify-between gap-2 cursor-pointer">
+                    <div className="flex items-center gap-2">
+                      <Lock size={14} className="text-amber-400 shrink-0" />
+                      <div>
+                        <div className="text-xs font-bold text-slate-200">
+                          Login First &amp; Use Returned Cookie
+                        </div>
+                        <div className="text-[10px] text-slate-400">
+                          POSTs credentials to login URL, captures Set-Cookie (e.g. pothmedura_token), and sends it as Cookie header
+                        </div>
+                      </div>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={apiLoginEnabled}
+                      onChange={e => setApiLoginEnabled(e.target.checked)}
+                      className="rounded border-slate-600 bg-slate-900 text-sky-500 focus:ring-0"
+                    />
+                  </label>
+
+                  {apiLoginEnabled && (
+                    <div className="space-y-2.5 pt-2 border-t border-slate-800/80">
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                          Login Endpoint URL (POST)
+                        </label>
+                        <input
+                          type="text"
+                          value={apiLoginUrl}
+                          onChange={e => setApiLoginUrl(e.target.value)}
+                          placeholder="https://galnewa.pothmadura.top/api/auth/login"
+                          className="w-full bg-slate-950 border border-slate-700 focus:border-amber-500 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-500 outline-none font-mono"
+                        />
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <div className="space-y-1">
+                          <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                            Username
+                          </label>
+                          <input
+                            type="text"
+                            value={apiLoginUsername}
+                            onChange={e => setApiLoginUsername(e.target.value)}
+                            placeholder="Username"
+                            className="w-full bg-slate-950 border border-slate-700 focus:border-amber-500 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-500 outline-none"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                            Password
+                          </label>
+                          <input
+                            type="password"
+                            value={apiLoginPassword}
+                            onChange={e => setApiLoginPassword(e.target.value)}
+                            placeholder="Password"
+                            className="w-full bg-slate-950 border border-slate-700 focus:border-amber-500 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-500 outline-none"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
+                        <button
+                          type="button"
+                          onClick={handleApiLoginOnly}
+                          disabled={isLoggingInApi || !apiLoginUrl.trim()}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-500/30 text-[11px] font-semibold transition-colors disabled:opacity-40"
+                        >
+                          {isLoggingInApi ? (
+                            <RefreshCw size={12} className="animate-spin" />
+                          ) : (
+                            <Lock size={12} />
+                          )}
+                          <span>{isLoggingInApi ? "Logging in..." : "Login & Capture Cookie"}</span>
+                        </button>
+                        {apiLoginStatus && (
+                          <span className="text-[11px] text-emerald-400 font-medium">
+                            {apiLoginStatus}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Optional JSON Array Path */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                      JSON Array Path (Optional)
+                    </label>
+                    <span className="text-[10px] text-slate-500">
+                      Leave blank for auto-detect (root array, data, items, rows, results)
+                    </span>
+                  </div>
+                  <input
+                    type="text"
+                    value={apiDataPath}
+                    onChange={e => setApiDataPath(e.target.value)}
+                    placeholder="e.g. data.items or results"
+                    className="w-full bg-slate-950 border border-slate-700 focus:border-sky-500 rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-500 outline-none font-mono"
+                  />
+                </div>
+
+                {/* Optional Request Headers */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                      Request Headers (Optional)
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setApiHeaders(prev => [...prev, { key: "", value: "" }])}
+                      className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 text-[11px] font-medium transition-colors"
+                    >
+                      <Plus size={12} />
+                      <span>Add Header</span>
+                    </button>
+                  </div>
+                  {apiHeaders.length > 0 && (
+                    <div className="space-y-2 bg-slate-950/60 border border-slate-800 rounded-xl p-2.5">
+                      {apiHeaders.map((hdr, idx) => (
+                        <div key={idx} className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            value={hdr.key}
+                            onChange={e =>
+                              setApiHeaders(prev =>
+                                prev.map((item, i) => (i === idx ? { ...item, key: e.target.value } : item))
+                              )
+                            }
+                            placeholder="Header name (e.g. Authorization)"
+                            className="w-2/5 bg-slate-950 border border-slate-700 focus:border-sky-500 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 font-mono outline-none"
+                          />
+                          <input
+                            type="text"
+                            value={hdr.value}
+                            onChange={e =>
+                              setApiHeaders(prev =>
+                                prev.map((item, i) => (i === idx ? { ...item, value: e.target.value } : item))
+                              )
+                            }
+                            placeholder="Header value (e.g. Bearer token)"
+                            className="flex-1 bg-slate-950 border border-slate-700 focus:border-sky-500 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 font-mono outline-none"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setApiHeaders(prev => prev.filter((_, i) => i !== idx))}
+                            className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10"
+                            title="Remove header"
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Optional POST JSON Body */}
+                {apiMethod === "POST" && (
+                  <div className="space-y-1.5">
+                    <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                      POST Request JSON Body (Optional)
+                    </label>
+                    <textarea
+                      rows={3}
+                      value={apiBody}
+                      onChange={e => setApiBody(e.target.value)}
+                      placeholder='{"month": "11"}'
+                      className="w-full bg-slate-950 border border-slate-700 focus:border-sky-500 rounded-xl px-3.5 py-2 text-xs text-slate-200 placeholder-slate-500 outline-none font-mono"
+                    />
+                  </div>
+                )}
+
+                {apiFetchError && (
+                  <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs leading-relaxed space-y-2.5">
+                    <div>{apiFetchError}</div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {apiFetchCanRetryProxy && (
+                        <button
+                          type="button"
+                          disabled={isFetchingApi}
+                          onClick={() => handleFetchApiData(undefined, true)}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-[11px] font-semibold shadow transition-colors disabled:opacity-50"
+                        >
+                          <RefreshCw size={12} className={isFetchingApi ? "animate-spin" : ""} />
+                          <span>Retry via Server Proxy (Bypass CORS)</span>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        disabled={isFetchingApi}
+                        onClick={() => openApiReauthPrompt("setup", apiFetchError)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-[11px] font-semibold shadow transition-colors disabled:opacity-50"
+                      >
+                        <Lock size={12} />
+                        <span>Login &amp; Get Cookie</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div className="flex items-center justify-between px-5 py-3.5 border-t border-slate-800 bg-slate-950">
+                <button
+                  type="button"
+                  onClick={() => setShowApiImportModal(false)}
+                  className="px-4 py-2 rounded-xl text-xs font-medium text-slate-400 hover:text-white hover:bg-slate-800"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isFetchingApi || !apiUrl.trim()}
+                  className="flex items-center gap-2 px-5 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold shadow-lg disabled:opacity-40 transition-all"
+                >
+                  {isFetchingApi ? (
+                    <>
+                      <RefreshCw size={14} className="animate-spin" />
+                      <span>Calling API...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Globe size={14} />
+                      <span>Fetch Data & Map Fields</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
+
+        {/* SUB-MODAL 2B: PROMPT USERNAME & PASSWORD TO GET AUTH COOKIE ON API FAILURE */}
+        {showApiReauthPrompt && (
+          <div className="fixed inset-0 z-[185] flex items-center justify-center bg-black/85 backdrop-blur-md p-3 sm:p-4">
+            <form
+              onSubmit={handleSubmitApiReauth}
+              className="bg-slate-900 border border-amber-500/40 rounded-2xl shadow-2xl max-w-md w-full overflow-hidden animate-in zoom-in-95 duration-150"
+            >
+              <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-800 bg-slate-950/80">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-9 h-9 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">
+                    <Lock size={17} />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-white">
+                      API Login Required
+                    </h3>
+                    <p className="text-[11px] text-slate-400">
+                      Sign in to capture a fresh cookie and reload API data
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowApiReauthPrompt(false)}
+                  className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg"
+                >
+                  <X size={17} />
+                </button>
+              </div>
+
+              <div className="p-4 sm:p-5 space-y-3.5 text-xs">
+                {apiReauthReason && (
+                  <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/25 text-rose-200 text-[11px] leading-relaxed break-words">
+                    <strong className="text-rose-300">Failed to load API data:</strong>{" "}
+                    {apiReauthReason}
+                  </div>
+                )}
+
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    Login URL (POST) <span className="text-rose-400">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={apiReauthLoginUrl}
+                    onChange={e => setApiReauthLoginUrl(e.target.value)}
+                    placeholder="https://galnewa.pothmadura.top/api/auth/login"
+                    className="w-full bg-slate-950 border border-slate-700 focus:border-amber-500 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 outline-none font-mono"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    Username <span className="text-rose-400">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={apiReauthUsername}
+                    onChange={e => setApiReauthUsername(e.target.value)}
+                    placeholder="Enter username"
+                    autoFocus={!apiReauthUsername}
+                    className="w-full bg-slate-950 border border-slate-700 focus:border-amber-500 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 outline-none"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    Password <span className="text-rose-400">*</span>
+                  </label>
+                  <input
+                    type="password"
+                    value={apiReauthPassword}
+                    onChange={e => setApiReauthPassword(e.target.value)}
+                    placeholder="Enter password"
+                    autoFocus={Boolean(apiReauthUsername)}
+                    className="w-full bg-slate-950 border border-slate-700 focus:border-amber-500 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 outline-none"
+                  />
+                </div>
+
+                {apiReauthError && (
+                  <div className="p-2.5 rounded-xl bg-rose-500/15 border border-rose-500/35 text-rose-200 text-[11px] leading-relaxed">
+                    {apiReauthError}
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center justify-between gap-2 px-5 py-3.5 border-t border-slate-800 bg-slate-950">
+                <button
+                  type="button"
+                  onClick={() => setShowApiReauthPrompt(false)}
+                  className="px-3.5 py-2 rounded-xl text-xs font-medium text-slate-400 hover:text-white hover:bg-slate-800"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isReauthingApi || !apiReauthLoginUrl.trim() || !apiReauthUsername.trim() || !apiReauthPassword}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold shadow-lg disabled:opacity-40 transition-all"
+                >
+                  {isReauthingApi ? (
+                    <>
+                      <RefreshCw size={13} className="animate-spin" />
+                      <span>Logging in...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Lock size={13} />
+                      <span>Login, Get Cookie &amp; Retry</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
+
+        {/* SUB-MODAL 2: IMPORT JSON / CSV / API WITH FIELD MATCHING WIZARD */}
         {showImportWizard && importFileInfo && (
           <div className="fixed inset-0 z-[175] flex items-center justify-center bg-black/85 backdrop-blur-md p-2 sm:p-4">
             <div className="bg-slate-900 border border-slate-700/80 rounded-2xl shadow-2xl max-w-4xl w-full max-h-[92vh] flex flex-col overflow-hidden animate-in zoom-in-95 duration-150">
               {/* Wizard Header */}
               <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-800 bg-slate-950/70">
-                <div className="flex items-center gap-3">
-                  <div className="w-9 h-9 rounded-xl bg-emerald-600/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
-                    <ArrowLeftRight size={18} />
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className={cn(
+                    "w-9 h-9 rounded-xl border flex items-center justify-center shrink-0",
+                    importFileInfo.format === "api"
+                      ? "bg-sky-600/20 border-sky-500/30 text-sky-400"
+                      : "bg-emerald-600/20 border-emerald-500/30 text-emerald-400"
+                  )}>
+                    {importFileInfo.format === "api" ? <Globe size={18} /> : <ArrowLeftRight size={18} />}
                   </div>
-                  <div>
+                  <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <h3 className="text-sm sm:text-base font-bold text-white">
-                        Match Uploaded Fields with Project Fields
+                        {importFileInfo.format === "api"
+                          ? "Map API JSON Fields with Project Fields"
+                          : "Match Uploaded Fields with Project Fields"}
                       </h3>
-                      <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                        {importFileInfo.format}
+                      <span className={cn(
+                        "text-[10px] font-mono uppercase px-2 py-0.5 rounded border",
+                        importFileInfo.format === "api"
+                          ? "bg-sky-500/20 text-sky-300 border-sky-500/30"
+                          : "bg-emerald-500/20 text-emerald-300 border-emerald-500/30"
+                      )}>
+                        {importFileInfo.format === "api" ? "API JSON" : importFileInfo.format}
                       </span>
                     </div>
-                    <p className="text-xs text-slate-400">
-                      File: <span className="text-slate-200">{importFileInfo.fileName}</span> •{" "}
+                    <p className="text-xs text-slate-400 truncate">
+                      {importFileInfo.format === "api" ? "API:" : "File:"}{" "}
+                      <span className="text-slate-200">{importFileInfo.fileName}</span> •{" "}
                       <strong className="text-emerald-300">{importFileInfo.records.length}</strong> records •{" "}
-                      <strong className="text-blue-300">{importFileInfo.fields.length}</strong> uploaded fields found
+                      <strong className="text-blue-300">{importFileInfo.fields.length}</strong>{" "}
+                      {importFileInfo.format === "api" ? "API fields found" : "uploaded fields found"}
                     </p>
                   </div>
                 </div>
@@ -3903,7 +5449,7 @@ export function ProjectDataListModal({
                     setShowImportWizard(false);
                     setImportFileInfo(null);
                   }}
-                  className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg"
+                  className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg shrink-0"
                 >
                   <X size={18} />
                 </button>
@@ -3943,38 +5489,49 @@ export function ProjectDataListModal({
                     </button>
                   </div>
 
-                  {/* Import Mode */}
-                  <div className="flex items-center gap-3">
-                    <span className="text-slate-400 font-medium">Save Mode:</span>
-                    <label className="flex items-center gap-1.5 cursor-pointer text-slate-200">
-                      <input
-                        type="radio"
-                        name="importMode"
-                        checked={importMode === "append"}
-                        onChange={() => setImportMode("append")}
-                        className="text-blue-600 focus:ring-0"
-                      />
-                      <span>Append to List</span>
-                    </label>
-                    <label className="flex items-center gap-1.5 cursor-pointer text-amber-300">
-                      <input
-                        type="radio"
-                        name="importMode"
-                        checked={importMode === "replace"}
-                        onChange={() => setImportMode("replace")}
-                        className="text-amber-500 focus:ring-0"
-                      />
-                      <span>Replace Existing List</span>
-                    </label>
-                  </div>
+                  {/* Import Mode (Files save to DB; API stays live & auto-loads on open) */}
+                  {importFileInfo.format === "api" ? (
+                    <div className="flex items-center gap-1.5 text-sky-300 font-medium">
+                      <Globe size={13} className="text-sky-400 shrink-0" />
+                      <span>Live Mode: Auto-loads from API on open (no DB save)</span>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-3">
+                      <span className="text-slate-400 font-medium">Save Mode:</span>
+                      <label className="flex items-center gap-1.5 cursor-pointer text-slate-200">
+                        <input
+                          type="radio"
+                          name="importMode"
+                          checked={importMode === "append"}
+                          onChange={() => setImportMode("append")}
+                          className="text-blue-600 focus:ring-0"
+                        />
+                        <span>Append to List</span>
+                      </label>
+                      <label className="flex items-center gap-1.5 cursor-pointer text-amber-300">
+                        <input
+                          type="radio"
+                          name="importMode"
+                          checked={importMode === "replace"}
+                          onChange={() => setImportMode("replace")}
+                          className="text-amber-500 focus:ring-0"
+                        />
+                        <span>Replace Existing List</span>
+                      </label>
+                    </div>
+                  )}
                 </div>
 
                 {/* Field Mapping Table */}
                 <div className="border border-slate-800 rounded-xl overflow-hidden bg-slate-950/40">
                   <div className="grid grid-cols-12 gap-2 px-4 py-2.5 bg-slate-950 border-b border-slate-800 text-[11px] font-bold uppercase tracking-wider text-slate-400">
                     <div className="col-span-4">Project Field</div>
-                    <div className="col-span-4">Uploaded File Field</div>
-                    <div className="col-span-4">Sample Uploaded Values</div>
+                    <div className="col-span-4">
+                      {importFileInfo.format === "api" ? "API Return Field (JSON)" : "Uploaded File Field"}
+                    </div>
+                    <div className="col-span-4">
+                      {importFileInfo.format === "api" ? "Sample API Values" : "Sample Uploaded Values"}
+                    </div>
                   </div>
 
                   <div className="divide-y divide-slate-800/70">
@@ -4138,27 +5695,56 @@ export function ProjectDataListModal({
               </div>
 
               {/* Wizard Footer */}
-              <div className="flex items-center justify-between px-5 py-3.5 border-t border-slate-800 bg-slate-950">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowImportWizard(false);
-                    setImportFileInfo(null);
-                  }}
-                  className="px-4 py-2 rounded-xl text-xs font-medium text-slate-400 hover:text-white hover:bg-slate-800"
-                >
-                  Cancel
-                </button>
+              <div className="flex items-center justify-between gap-2 px-5 py-3.5 border-t border-slate-800 bg-slate-950">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowImportWizard(false);
+                      setImportFileInfo(null);
+                    }}
+                    className="px-4 py-2 rounded-xl text-xs font-medium text-slate-400 hover:text-white hover:bg-slate-800"
+                  >
+                    Cancel
+                  </button>
+                  {importFileInfo.format === "api" && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowImportWizard(false);
+                        setShowApiImportModal(true);
+                      }}
+                      className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-medium text-sky-300 bg-sky-600/15 hover:bg-sky-600/25 border border-sky-500/30"
+                    >
+                      <ArrowLeft size={13} />
+                      <span>Back to API Setup</span>
+                    </button>
+                  )}
+                </div>
                 <button
                   type="button"
                   onClick={handleConfirmImport}
                   disabled={isImporting || matchedCount === 0}
-                  className="flex items-center gap-2 px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-lg disabled:opacity-40 transition-all"
+                  className={cn(
+                    "flex items-center gap-2 px-5 py-2 rounded-xl text-white text-xs font-bold shadow-lg disabled:opacity-40 transition-all",
+                    importFileInfo.format === "api"
+                      ? "bg-sky-600 hover:bg-sky-500"
+                      : "bg-emerald-600 hover:bg-emerald-500"
+                  )}
                 >
                   {isImporting ? (
                     <>
                       <RefreshCw size={14} className="animate-spin" />
-                      <span>Saving {mappedImportPreviewRows.length} Records...</span>
+                      <span>
+                        {importFileInfo.format === "api"
+                          ? `Loading ${mappedImportPreviewRows.length} Live Records...`
+                          : `Saving ${mappedImportPreviewRows.length} Records...`}
+                      </span>
+                    </>
+                  ) : importFileInfo.format === "api" ? (
+                    <>
+                      <Globe size={14} />
+                      <span>Load {mappedImportPreviewRows.length} Live Records (No DB Save)</span>
                     </>
                   ) : (
                     <>

@@ -449,6 +449,161 @@ async function startServer() {
     });
   });
 
+  // Optional CORS-bypass & Cookie-Auth proxy for user-initiated external JSON API import
+  app.post("/api/proxy-fetch", async (req, res) => {
+    const validateExternalUrl = (raw: unknown): { parsed?: URL; error?: string } => {
+      const target = typeof raw === "string" ? raw.trim() : "";
+      if (!target) return { error: "Missing url" };
+      let parsed: URL;
+      try {
+        parsed = new URL(target);
+      } catch {
+        return { error: "Invalid URL format" };
+      }
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return { error: "Only http and https URLs are allowed" };
+      }
+      const host = parsed.hostname.toLowerCase();
+      if (
+        host === "localhost" ||
+        host === "127.0.0.1" ||
+        host === "0.0.0.0" ||
+        host === "::1" ||
+        host.endsWith(".local") ||
+        /^10\./.test(host) ||
+        /^192\.168\./.test(host) ||
+        /^172\.(1[6-9]|2\d|3[0-1])\./.test(host) ||
+        /^169\.254\./.test(host)
+      ) {
+        return {
+          error: "Private/local network URLs cannot be proxied through the cloud server; call them directly from your browser.",
+        };
+      }
+      return { parsed };
+    };
+
+    const extractCookiePairs = (response: globalThis.Response): string[] => {
+      const hdrs = response.headers as any;
+      let rawCookies: string[] = [];
+      if (typeof hdrs.getSetCookie === "function") {
+        rawCookies = hdrs.getSetCookie();
+      } else {
+        const combined = response.headers.get("set-cookie");
+        if (combined) {
+          rawCookies = combined.split(/,(?=\s*[!#$%&'*+\-.^_`|~0-9A-Za-z]+=)/);
+        }
+      }
+      const pairs: string[] = [];
+      for (const c of rawCookies) {
+        const firstPart = String(c || "").split(";")[0]?.trim();
+        if (firstPart && firstPart.includes("=")) {
+          pairs.push(firstPart);
+        }
+      }
+      return pairs;
+    };
+
+    try {
+      const { url, method = "GET", headers = {}, body, login, loginOnly = false } = req.body || {};
+
+      let capturedCookie = "";
+      if (login && typeof login === "object" && typeof login.url === "string" && login.url.trim()) {
+        const loginCheck = validateExternalUrl(login.url);
+        if (!loginCheck.parsed) {
+          return res.status(400).json({ error: `Login URL: ${loginCheck.error || "Invalid URL"}` });
+        }
+
+        const loginRes = await fetch(loginCheck.parsed.toString(), {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify({
+            username: typeof login.username === "string" ? login.username : "",
+            password: typeof login.password === "string" ? login.password : "",
+          }),
+          signal: AbortSignal.timeout(15000),
+        });
+
+        const loginBodyText = await loginRes.text();
+        if (!loginRes.ok) {
+          return res.json({
+            ok: false,
+            loginFailed: true,
+            status: loginRes.status,
+            statusText: loginRes.statusText,
+            body: loginBodyText,
+          });
+        }
+
+        const pairs = extractCookiePairs(loginRes);
+        if (pairs.length > 0) {
+          capturedCookie = pairs.join("; ");
+        }
+
+        if (loginOnly) {
+          return res.json({
+            ok: true,
+            status: loginRes.status,
+            statusText: loginRes.statusText,
+            capturedCookie,
+            body: loginBodyText,
+          });
+        }
+      }
+
+      const urlCheck = validateExternalUrl(url);
+      if (!urlCheck.parsed) {
+        return res.status(400).json({ error: urlCheck.error || "Invalid URL" });
+      }
+
+      const upperMethod = String(method).toUpperCase() === "POST" ? "POST" : "GET";
+      const safeHeaders: Record<string, string> = {};
+      let manualCookie = "";
+      if (headers && typeof headers === "object") {
+        for (const [k, v] of Object.entries(headers)) {
+          const kl = k.trim().toLowerCase();
+          if (k.trim() && typeof v === "string" && kl !== "host" && kl !== "content-length") {
+            if (kl === "cookie") {
+              manualCookie = v.trim();
+            } else {
+              safeHeaders[k.trim()] = v;
+            }
+          }
+        }
+      }
+
+      const finalCookie = capturedCookie || manualCookie;
+      if (finalCookie) {
+        safeHeaders["Cookie"] = finalCookie;
+      }
+
+      const init: RequestInit = {
+        method: upperMethod,
+        headers: safeHeaders,
+        signal: AbortSignal.timeout(15000),
+      };
+      if (upperMethod === "POST" && typeof body === "string" && body.trim()) {
+        init.body = body;
+      }
+
+      const upstream = await fetch(urlCheck.parsed.toString(), init);
+      const rawText = await upstream.text();
+      return res.json({
+        ok: upstream.ok,
+        status: upstream.status,
+        statusText: upstream.statusText,
+        body: rawText,
+        capturedCookie: capturedCookie || undefined,
+      });
+    } catch (err) {
+      return res.status(502).json({
+        error: err instanceof Error ? err.message : "Proxy fetch failed",
+      });
+    }
+  });
+
 // Font cache to reduce DB load
 const fontCache = new Map<string, { buffer: Buffer; contentType: string }>();
 
