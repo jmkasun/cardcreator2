@@ -112,6 +112,49 @@ function resolveMappedFieldValue(
   return resolved.replace(/[ \t]{2,}/g, " ").trim();
 }
 
+function applyCurrentYearToDateValue(raw: string, targetYear = new Date().getFullYear()): string {
+  const s = String(raw ?? "");
+  if (!s.trim()) return raw;
+  const isLeap = (y: number) => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+  const yearStr = String(targetYear);
+
+  // YYYY-MM-DD or YYYY/MM/DD (with optional time suffix)
+  let m = s.match(/^(\s*)(\d{4})([-/.])(\d{1,2})\3(\d{1,2})(.*)$/);
+  if (m) {
+    const mm = Number(m[4]);
+    const dd = Number(m[5]);
+    if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+      const clampedDay = mm === 2 && dd === 29 && !isLeap(targetYear)
+        ? (m[5].length === 2 ? "28" : "28")
+        : m[5];
+      return `${m[1]}${yearStr}${m[3]}${m[4]}${m[3]}${clampedDay}${m[6]}`;
+    }
+  }
+
+  // DD-MM-YYYY or MM/DD/YYYY (with optional time suffix)
+  m = s.match(/^(\s*)(\d{1,2})([-/.])(\d{1,2})\3(\d{4})(.*)$/);
+  if (m) {
+    const a = Number(m[2]);
+    const b = Number(m[4]);
+    if (a >= 1 && a <= 31 && b >= 1 && b <= 31) {
+      let dayPart = m[2];
+      let monthPart = m[4];
+      if ((b === 2 && a === 29 || a === 2 && b === 29) && !isLeap(targetYear)) {
+        if (b === 2 && a === 29) dayPart = "28";
+        else if (a === 2 && b === 29) monthPart = "28";
+      }
+      return `${m[1]}${dayPart}${m[3]}${monthPart}${m[3]}${yearStr}${m[6]}`;
+    }
+  }
+
+  // Other parseable date formats containing a 4-digit year (e.g. "Nov 19, 2025")
+  const d = new Date(s);
+  if (!isNaN(d.getTime()) && /\b(19\d{2}|20\d{2})\b/.test(s)) {
+    return s.replace(/\b(19\d{2}|20\d{2})\b/, yearStr);
+  }
+  return raw;
+}
+
 /**
  * Computes the 5 calendar month-days (`MM-DD`) starting from today (`today .. today + 4 days`),
  * ignoring year so recurring yearly entries are included.
@@ -887,6 +930,7 @@ export function ProjectDataListModal({
   const [apiLoginUrl, setApiLoginUrl] = useState("");
   const [apiLoginUsername, setApiLoginUsername] = useState("");
   const [apiLoginPassword, setApiLoginPassword] = useState("");
+  const [apiUseCurrentYear, setApiUseCurrentYear] = useState(false);
   const [isLoggingInApi, setIsLoggingInApi] = useState(false);
   const [apiLoginStatus, setApiLoginStatus] = useState<string | null>(null);
   const [liveApiSourceItems, setLiveApiSourceItems] = useState<ProjectDataItem[] | null>(null);
@@ -1049,6 +1093,7 @@ export function ProjectDataListModal({
     loginUrl?: string;
     loginUsername?: string;
     useProxy?: boolean;
+    useCurrentYearForDates?: boolean;
     fieldMapping?: Record<string, string>;
     autoLoadOnOpen?: boolean;
     updatedAt?: number;
@@ -1104,6 +1149,7 @@ export function ProjectDataListModal({
       setApiLoginUrl(typeof cfg.loginUrl === "string" ? cfg.loginUrl : "");
       setApiLoginUsername(typeof cfg.loginUsername === "string" ? cfg.loginUsername : "");
       setApiLoginPassword("");
+      setApiUseCurrentYear(Boolean(cfg.useCurrentYearForDates));
     } else {
       setApiUrl("");
       setApiMethod("GET");
@@ -1114,6 +1160,7 @@ export function ProjectDataListModal({
       setApiLoginUrl("");
       setApiLoginUsername("");
       setApiLoginPassword("");
+      setApiUseCurrentYear(false);
     }
   };
 
@@ -1127,16 +1174,22 @@ export function ProjectDataListModal({
   const mapSourceRecordsToProjectRows = (
     records: Array<Record<string, string>>,
     mapping: Record<string, string>,
-    availableFields?: string[]
+    availableFields?: string[],
+    options?: { useCurrentYearForDates?: boolean }
   ): Array<{ rowName: string; rowValues: Record<string, string> }> => {
     const availableFieldsSet = availableFields ? new Set(availableFields) : undefined;
+    const replaceYear = Boolean(options?.useCurrentYearForDates);
     return records.map((rec, idx) => {
       const rowValues: Record<string, string> = {};
       activeLayers.forEach(layer => {
         const mappedSourceExpr = mapping[layer.id];
-        rowValues[layer.id] = mappedSourceExpr
+        let val = mappedSourceExpr
           ? resolveMappedFieldValue(mappedSourceExpr, rec, availableFieldsSet)
           : "";
+        if (replaceYear && layer.type === "date" && val) {
+          val = applyCurrentYearToDateValue(val);
+        }
+        rowValues[layer.id] = val;
         if (layer.hasSuffixList && layer.suffixList && layer.suffixList.length > 0) {
           rowValues[`${layer.id}__suffix`] = layer.selectedSuffix || layer.suffixList[0];
         }
@@ -1387,7 +1440,9 @@ export function ProjectDataListModal({
         throw new Error("No JSON records found in the API response.");
       }
 
-      const mappedRows = mapSourceRecordsToProjectRows(parsed.records, cfg.fieldMapping, parsed.fields);
+      const mappedRows = mapSourceRecordsToProjectRows(parsed.records, cfg.fieldMapping, parsed.fields, {
+        useCurrentYearForDates: Boolean(cfg.useCurrentYearForDates),
+      });
       const liveItems = toLiveProjectDataItems(mappedRows);
 
       if (shouldUseProxy && !cfg.useProxy) {
@@ -2570,7 +2625,7 @@ export function ProjectDataListModal({
       return;
     }
     setApiFetchError(null);
-    saveProjectApiConfig({
+    const nextSaved = saveProjectApiConfig({
       url: trimmedUrl,
       method: apiMethod,
       dataPath: apiDataPath.trim(),
@@ -2579,7 +2634,11 @@ export function ProjectDataListModal({
       loginEnabled: apiLoginEnabled,
       loginUrl: apiLoginUrl.trim(),
       loginUsername: apiLoginUsername,
+      useCurrentYearForDates: apiUseCurrentYear,
     });
+    if (hasValidApiAutoLoadConfig(nextSaved)) {
+      void loadLiveDataFromApi(nextSaved, { loadAll: showAllRecords, month: selectedMonth });
+    }
     onNotification({
       message: "API endpoint, login details & headers saved to project database!",
       type: "success",
@@ -2861,8 +2920,10 @@ export function ProjectDataListModal({
   // Build mapped items from uploaded file or API response + current fieldMapping
   const mappedImportPreviewRows = useMemo(() => {
     if (!importFileInfo) return [];
-    return mapSourceRecordsToProjectRows(importFileInfo.records, fieldMapping, importFileInfo.fields);
-  }, [importFileInfo, fieldMapping, activeLayers, project.name]);
+    return mapSourceRecordsToProjectRows(importFileInfo.records, fieldMapping, importFileInfo.fields, {
+      useCurrentYearForDates: importFileInfo.format === "api" && apiUseCurrentYear,
+    });
+  }, [importFileInfo, fieldMapping, activeLayers, project.name, apiUseCurrentYear]);
 
   // Execute confirmed import (Live API loads into memory without DB save; CSV/JSON saves to DB)
   const handleConfirmImport = async () => {
@@ -2885,6 +2946,7 @@ export function ProjectDataListModal({
         loginEnabled: apiLoginEnabled,
         loginUrl: apiLoginUrl.trim(),
         loginUsername: apiLoginUsername,
+        useCurrentYearForDates: apiUseCurrentYear,
         fieldMapping,
         autoLoadOnOpen: true,
       });
@@ -5361,6 +5423,27 @@ export function ProjectDataListModal({
                   </div>
                 )}
 
+                {/* Date Year Option */}
+                <label className="flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl bg-slate-950/70 border border-slate-800 cursor-pointer hover:border-slate-700 transition-colors">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <Calendar size={14} className="text-purple-400 shrink-0" />
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-slate-200">
+                        Use current year for date fields
+                      </div>
+                      <div className="text-[10px] text-slate-400">
+                        Replaces the API date year with {new Date().getFullYear()} while keeping the month and day
+                      </div>
+                    </div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={apiUseCurrentYear}
+                    onChange={e => setApiUseCurrentYear(e.target.checked)}
+                    className="rounded bg-slate-900 border-slate-700 text-purple-500 focus:ring-0 w-4 h-4 shrink-0"
+                  />
+                </label>
+
                 {apiFetchError && (
                   <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs leading-relaxed space-y-2.5">
                     <div>{apiFetchError}</div>
@@ -5640,9 +5723,20 @@ export function ProjectDataListModal({
 
                   {/* Import Mode (Files save to DB; API stays live & auto-loads on open) */}
                   {importFileInfo.format === "api" ? (
-                    <div className="flex items-center gap-1.5 text-sky-300 font-medium">
-                      <Globe size={13} className="text-sky-400 shrink-0" />
-                      <span>Live Mode: Auto-loads from API on open (no DB save)</span>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <label className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-purple-500/10 border border-purple-500/30 text-purple-200 text-[11px] font-medium cursor-pointer hover:bg-purple-500/15 transition-colors">
+                        <input
+                          type="checkbox"
+                          checked={apiUseCurrentYear}
+                          onChange={e => setApiUseCurrentYear(e.target.checked)}
+                          className="rounded bg-slate-900 border-slate-700 text-purple-500 focus:ring-0 w-3.5 h-3.5"
+                        />
+                        <span>Use current year for dates ({new Date().getFullYear()})</span>
+                      </label>
+                      <div className="flex items-center gap-1.5 text-sky-300 font-medium">
+                        <Globe size={13} className="text-sky-400 shrink-0" />
+                        <span>Live Mode: Auto-loads from API on open (no DB save)</span>
+                      </div>
                     </div>
                   ) : (
                     <div className="flex items-center gap-3">
@@ -5882,7 +5976,12 @@ export function ProjectDataListModal({
                           const sampleValues = selectedUploaded
                             ? importFileInfo.records
                                 .slice(0, 2)
-                                .map(r => resolveMappedFieldValue(selectedUploaded, r, availableFieldsSet))
+                                .map(r => {
+                                  const rawVal = resolveMappedFieldValue(selectedUploaded, r, availableFieldsSet);
+                                  return importFileInfo.format === "api" && apiUseCurrentYear && layer.type === "date" && rawVal
+                                    ? applyCurrentYearToDateValue(rawVal)
+                                    : rawVal;
+                                })
                                 .filter(v => v !== undefined && v !== "")
                                 .join(" | ")
                             : "";
