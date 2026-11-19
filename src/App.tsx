@@ -2769,7 +2769,7 @@ export default function App() {
               if (!isNaN(d.getTime())) {
                 yearStr = d.getFullYear().toString();
                 monthStr = layer.sinhalaMonths[d.getMonth()] || "";
-                dayStr = `${d.getDate().toString()}${dateSuffixAppend}`;
+                dayStr = `${d.getDate().toString().padStart(2, '0')}${dateSuffixAppend}`;
                 isSinhalaDate = true;
                 displayText = `${yearStr} ${monthStr} ${dayStr}`;
               }
@@ -3024,7 +3024,7 @@ export default function App() {
         if (!isNaN(d.getTime())) {
           const yStr = d.getFullYear().toString();
           const mStr = layer.sinhalaMonths[d.getMonth()] || "";
-          const dStr = `${d.getDate().toString()}${hitDateSuffixAppend}`;
+          const dStr = `${d.getDate().toString().padStart(2, '0')}${hitDateSuffixAppend}`;
           const monthFontSize = ((layer.sinhalaMonthFontSize || layer.fontSize) * (canvas.width / 1000));
           const monthFontStr = buildCanvasFontSpec(monthFontSize, layer.fontFamily, layer.isBold, layer.isItalic, true, hitFallback);
           const origFont = ctx.font;

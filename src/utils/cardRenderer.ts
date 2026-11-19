@@ -241,7 +241,7 @@ export function resolveLayerText(
       if (!isNaN(d.getTime())) {
         yearStr = d.getFullYear().toString();
         monthStr = layer.sinhalaMonths[d.getMonth()] || "";
-        dayStr = `${d.getDate().toString()}${dateSuffixAppend}`;
+        dayStr = `${d.getDate().toString().padStart(2, '0')}${dateSuffixAppend}`;
         isSinhalaDate = true;
         displayText = `${yearStr} ${monthStr} ${dayStr}`;
       }
