@@ -2364,10 +2364,13 @@ export function prepareLayersForRow(baseLayers: TextLayer[], rowData: Record<str
   // First clone layers
   const cloned: TextLayer[] = baseLayers.map(l => ({ ...l }));
 
-  // Apply row values
+  // Apply row values (preserve static template labels like "වන දින" when row value is empty/unmapped)
   for (const layer of cloned) {
     if (rowData[layer.id] !== undefined) {
-      layer.text = rowData[layer.id];
+      const isStaticLabel = layer.type === 'label' && !layer.isNumberLabel && !layer.isListLabel;
+      if (!isStaticLabel || String(rowData[layer.id]).trim() !== "") {
+        layer.text = rowData[layer.id];
+      }
     }
     // Check if suffix was provided specifically
     if (rowData[`${layer.id}__suffix`] !== undefined) {

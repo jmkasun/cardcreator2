@@ -190,6 +190,8 @@ if (!process.env.DATABASE_URL) {
 
 let isDbInitialized = false;
 let dbInitPromise: Promise<void> | null = null;
+let cachedLocalFontFiles: string[] | null = null;
+let lastLocalFontsScan = 0;
 
 function ensureFallbackDataFile() {
   if (!fs.existsSync(DATA_FILE)) {
@@ -221,193 +223,132 @@ async function initDb() {
 
   dbInitPromise = (async () => {
     if (HAS_POSTGRES) {
-      console.log("Initializing Postgres database...");
       try {
-        await safeQuery(`
-          CREATE TABLE IF NOT EXISTS users (
-            username TEXT PRIMARY KEY,
-            password TEXT NOT NULL,
-            role TEXT NOT NULL DEFAULT 'user',
-            selected_fonts TEXT[] DEFAULT '{}',
-            default_font TEXT,
-            default_font_size INTEGER,
-            default_font_color TEXT
-          );
-        `);
-        
-        await safeQuery(`
-          ALTER TABLE users ADD COLUMN IF NOT EXISTS selected_fonts TEXT[] DEFAULT '{}';
-        `);
-        await safeQuery(`
-          ALTER TABLE users ADD COLUMN IF NOT EXISTS default_font TEXT;
-        `);
-        await safeQuery(`
-          ALTER TABLE users ADD COLUMN IF NOT EXISTS default_font_size INTEGER;
-        `);
-        await safeQuery(`
-          ALTER TABLE users ADD COLUMN IF NOT EXISTS default_font_color TEXT;
+        const readyRes = await safeQuery(`
+          SELECT (
+            to_regclass('public.users') IS NOT NULL
+            AND to_regclass('public.font_app_images') IS NOT NULL
+            AND to_regclass('public.custom_fonts') IS NOT NULL
+            AND to_regclass('public.font_app_image_creations') IS NOT NULL
+            AND to_regclass('public.font_app_bulk_history') IS NOT NULL
+            AND to_regclass('public.font_app_project_data') IS NOT NULL
+            AND to_regclass('public.font_app_project_data_settings') IS NOT NULL
+            AND to_regclass('public.font_app_project_templates') IS NOT NULL
+            AND EXISTS (
+              SELECT 1 FROM information_schema.columns
+              WHERE table_name = 'font_app_project_data_settings' AND column_name = 'api_config'
+            )
+            AND EXISTS (
+              SELECT 1 FROM information_schema.columns
+              WHERE table_name = 'font_app_project_templates' AND column_name = 'updated_at'
+            )
+          ) AS ready
         `);
 
-        await safeQuery(`
-          CREATE TABLE IF NOT EXISTS font_app_images (
-            id TEXT PRIMARY KEY,
-            username TEXT NOT NULL,
-            image_url TEXT NOT NULL,
-            layers JSONB NOT NULL,
-            name TEXT NOT NULL,
-            is_locked BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-          );
-        `);
+        if (!readyRes.rows?.[0]?.ready) {
+          console.log("Initializing Postgres database schema...");
+          await safeQuery(`
+            CREATE TABLE IF NOT EXISTS users (
+              username TEXT PRIMARY KEY,
+              password TEXT NOT NULL,
+              role TEXT NOT NULL DEFAULT 'user',
+              selected_fonts TEXT[] DEFAULT '{}',
+              default_font TEXT,
+              default_font_size INTEGER,
+              default_font_color TEXT
+            );
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS selected_fonts TEXT[] DEFAULT '{}';
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS default_font TEXT;
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS default_font_size INTEGER;
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS default_font_color TEXT;
 
-        await safeQuery(`
-          ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS is_locked BOOLEAN DEFAULT FALSE;
-        `);
-        
-        await safeQuery(`
-          ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
-        `);
-        
-        await safeQuery(`
-          ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS copies_count INTEGER DEFAULT 0;
-        `);
-        await safeQuery(`
-          ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS downloads_count INTEGER DEFAULT 0;
-        `);
-        await safeQuery(`
-          ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS shares_count INTEGER DEFAULT 0;
-        `);
-        await safeQuery(`
-          ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS image_updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
-        `);
-        
-        await safeQuery(`
-          CREATE TABLE IF NOT EXISTS custom_fonts (
-            name TEXT PRIMARY KEY,
-            data BYTEA NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-          );
-        `);
+            CREATE TABLE IF NOT EXISTS font_app_images (
+              id TEXT PRIMARY KEY,
+              username TEXT NOT NULL,
+              image_url TEXT NOT NULL,
+              layers JSONB NOT NULL,
+              name TEXT NOT NULL,
+              is_locked BOOLEAN DEFAULT FALSE,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS is_locked BOOLEAN DEFAULT FALSE;
+            ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+            ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS copies_count INTEGER DEFAULT 0;
+            ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS downloads_count INTEGER DEFAULT 0;
+            ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS shares_count INTEGER DEFAULT 0;
+            ALTER TABLE font_app_images ADD COLUMN IF NOT EXISTS image_updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
 
-        // Performance Indexes: ensures instant lookups for project list and user authentication
-        await safeQuery(`
-          CREATE INDEX IF NOT EXISTS idx_font_app_images_user_created ON font_app_images (username, created_at DESC);
-        `);
-        await safeQuery(`
-          CREATE INDEX IF NOT EXISTS idx_users_lower_username ON users (LOWER(username));
-        `);
+            CREATE TABLE IF NOT EXISTS custom_fonts (
+              name TEXT PRIMARY KEY,
+              data BYTEA NOT NULL,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
 
-        await safeQuery(`
-          CREATE TABLE IF NOT EXISTS font_app_image_creations (
-            id SERIAL PRIMARY KEY,
-            image_id TEXT NOT NULL,
-            type TEXT NOT NULL,
-            username TEXT,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-          );
-        `);
-        await safeQuery(`
-          ALTER TABLE font_app_image_creations ADD COLUMN IF NOT EXISTS username TEXT;
-        `);
-        await safeQuery(`
-          CREATE INDEX IF NOT EXISTS idx_creations_image_time ON font_app_image_creations (image_id, created_at DESC);
-        `);
-        await safeQuery(`
-          CREATE INDEX IF NOT EXISTS idx_creations_user_time ON font_app_image_creations (username, created_at DESC);
-        `);
+            CREATE INDEX IF NOT EXISTS idx_font_app_images_user_created ON font_app_images (username, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_users_lower_username ON users (LOWER(username));
 
-        await safeQuery(`
-          CREATE TABLE IF NOT EXISTS font_app_bulk_history (
-            id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL,
-            project_name TEXT NOT NULL,
-            username TEXT NOT NULL,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            created_date DATE DEFAULT CURRENT_DATE,
-            total_cards INTEGER NOT NULL DEFAULT 0,
-            rows_data JSONB NOT NULL,
-            layers_data JSONB NOT NULL
-          );
-        `);
-        await safeQuery(`
-          CREATE INDEX IF NOT EXISTS idx_bulk_hist_proj_date ON font_app_bulk_history (project_id, created_date DESC, created_at DESC);
-        `);
-        await safeQuery(`
-          CREATE INDEX IF NOT EXISTS idx_bulk_hist_user_date ON font_app_bulk_history (username, created_date DESC);
-        `);
+            CREATE TABLE IF NOT EXISTS font_app_image_creations (
+              id SERIAL PRIMARY KEY,
+              image_id TEXT NOT NULL,
+              type TEXT NOT NULL,
+              username TEXT,
+              created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+            ALTER TABLE font_app_image_creations ADD COLUMN IF NOT EXISTS username TEXT;
+            CREATE INDEX IF NOT EXISTS idx_creations_image_time ON font_app_image_creations (image_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_creations_user_time ON font_app_image_creations (username, created_at DESC);
 
-        await safeQuery(`
-          CREATE TABLE IF NOT EXISTS font_app_project_data (
-            id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL,
-            username TEXT NOT NULL,
-            row_name TEXT NOT NULL DEFAULT '',
-            row_values JSONB NOT NULL DEFAULT '{}'::jsonb,
-            sort_order INTEGER NOT NULL DEFAULT 0,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-          );
-        `);
-        await safeQuery(`
-          CREATE INDEX IF NOT EXISTS idx_project_data_proj ON font_app_project_data (project_id, sort_order ASC, created_at ASC);
-        `);
+            CREATE TABLE IF NOT EXISTS font_app_bulk_history (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              project_name TEXT NOT NULL,
+              username TEXT NOT NULL,
+              created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+              created_date DATE DEFAULT CURRENT_DATE,
+              total_cards INTEGER NOT NULL DEFAULT 0,
+              rows_data JSONB NOT NULL,
+              layers_data JSONB NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_bulk_hist_proj_date ON font_app_bulk_history (project_id, created_date DESC, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_bulk_hist_user_date ON font_app_bulk_history (username, created_date DESC);
 
-        await safeQuery(`
-          CREATE TABLE IF NOT EXISTS font_app_project_data_settings (
-            project_id TEXT PRIMARY KEY,
-            group_by_layer_id TEXT NOT NULL DEFAULT '',
-            group_config JSONB NOT NULL DEFAULT '{}'::jsonb,
-            api_config JSONB DEFAULT NULL,
-            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-          );
-        `);
-        await safeQuery(`
-          ALTER TABLE font_app_project_data_settings ADD COLUMN IF NOT EXISTS api_config JSONB DEFAULT NULL;
-        `);
+            CREATE TABLE IF NOT EXISTS font_app_project_data (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              username TEXT NOT NULL,
+              row_name TEXT NOT NULL DEFAULT '',
+              row_values JSONB NOT NULL DEFAULT '{}'::jsonb,
+              sort_order INTEGER NOT NULL DEFAULT 0,
+              created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_project_data_proj ON font_app_project_data (project_id, sort_order ASC, created_at ASC);
 
-        await safeQuery(`
-          CREATE TABLE IF NOT EXISTS font_app_project_templates (
-            id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL,
-            name TEXT NOT NULL,
-            image_data TEXT NOT NULL,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-          );
-        `);
-        await safeQuery(`
-          ALTER TABLE font_app_project_templates ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
-        `);
-        await safeQuery(`
-          CREATE INDEX IF NOT EXISTS idx_project_templates_proj ON font_app_project_templates (project_id, created_at ASC);
-        `);
+            CREATE TABLE IF NOT EXISTS font_app_project_data_settings (
+              project_id TEXT PRIMARY KEY,
+              group_by_layer_id TEXT NOT NULL DEFAULT '',
+              group_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+              api_config JSONB DEFAULT NULL,
+              updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+            ALTER TABLE font_app_project_data_settings ADD COLUMN IF NOT EXISTS api_config JSONB DEFAULT NULL;
 
-        await safeQuery(
-          "INSERT INTO users (username, password, role) VALUES ('admin', 'admin@1234', 'admin') ON CONFLICT (username) DO UPDATE SET role = 'admin'"
-        );
+            CREATE TABLE IF NOT EXISTS font_app_project_templates (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              image_data TEXT NOT NULL,
+              created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+            ALTER TABLE font_app_project_templates ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
+            CREATE INDEX IF NOT EXISTS idx_project_templates_proj ON font_app_project_templates (project_id, created_at ASC);
 
-        // Sync any uploaded font files placed in font directories into custom_fonts so cloud/serverless deployments also have them
-        for (const dir of getExistingFontDirs()) {
-          try {
-            for (const fontFile of fs.readdirSync(dir)) {
-              if (!isFontFilename(fontFile)) continue;
-              const filePath = path.join(dir, fontFile);
-              if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
-                const buf = fs.readFileSync(filePath);
-                await safeQuery(
-                  "INSERT INTO custom_fonts (name, data) VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET data = EXCLUDED.data WHERE custom_fonts.data IS DISTINCT FROM EXCLUDED.data",
-                  [fontFile, buf]
-                );
-              }
-            }
-          } catch (syncErr) {
-            console.warn(`Could not sync font directory ${dir}:`, syncErr);
-          }
+            INSERT INTO users (username, password, role) VALUES ('admin', 'admin@1234', 'admin') ON CONFLICT (username) DO UPDATE SET role = 'admin';
+          `);
         }
-        cachedDbFontNames = null;
 
         isDbInitialized = true;
-        console.log("Database initialized successfully.");
       } catch (err) {
         console.error("Postgres initialization error:", err);
       } finally {
@@ -1003,18 +944,24 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
   // Fonts
   app.get("/api/fonts", async (req, res) => {
     try {
-      const localFiles: string[] = [];
-      for (const dir of getExistingFontDirs()) {
-        for (const f of fs.readdirSync(dir)) {
-          if (isFontFilename(f)) {
-            localFiles.push(f);
+      const now = Date.now();
+      let localFiles: string[] = [];
+      if (cachedLocalFontFiles && (now - lastLocalFontsScan) < FONT_NAMES_CACHE_TTL) {
+        localFiles = cachedLocalFontFiles;
+      } else {
+        for (const dir of getExistingFontDirs()) {
+          for (const f of fs.readdirSync(dir)) {
+            if (isFontFilename(f)) {
+              localFiles.push(f);
+            }
           }
         }
+        cachedLocalFontFiles = localFiles;
+        lastLocalFontsScan = now;
       }
       
       let dbFiles: string[] = [];
       if (HAS_POSTGRES) {
-        const now = Date.now();
         if (cachedDbFontNames && (now - lastFontNamesFetch) < FONT_NAMES_CACHE_TTL) {
           dbFiles = cachedDbFontNames;
         } else {
@@ -1090,6 +1037,7 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
             [fileName, file.buffer]
           );
           cachedDbFontNames = null;
+cachedLocalFontFiles = null;
           fontCache.clear();
           return res.json({ success: true, url: `/fonts/${encodeURIComponent(fileName)}?v=3`, name: fileName });
         } catch (err) {
@@ -1150,6 +1098,7 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
 
       if (deleted) {
         cachedDbFontNames = null;
+cachedLocalFontFiles = null;
         fontCache.clear();
         res.json({ success: true });
       } else {
@@ -1186,6 +1135,7 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
               console.log(`Renamed font in DB from ${currentDbName} to ${finalDbName}`);
               renamed = true;
               cachedDbFontNames = null;
+cachedLocalFontFiles = null;
               fontCache.clear();
             }
           }
@@ -1233,6 +1183,7 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
 
       if (renamed) {
         cachedDbFontNames = null;
+cachedLocalFontFiles = null;
         fontCache.delete(oldName);
         res.json({ success: true });
       } else {

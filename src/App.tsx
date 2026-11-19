@@ -438,7 +438,6 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    fetchFonts();
     if (typeof document !== "undefined" && document.fonts) {
       const handleLoadingDone = () => setFontsLoadedTick(t => t + 1);
       document.fonts.addEventListener("loadingdone", handleLoadingDone);
@@ -456,8 +455,8 @@ export default function App() {
 
   useEffect(() => {
     if (user?.username) {
-      fetchFonts();
       fetchProjects();
+      fetchFonts();
     }
   }, [user?.username]);
 
@@ -787,161 +786,212 @@ export default function App() {
   }, [isResizing]);
 
   const [fontsLoadedTick, setFontsLoadedTick] = useState(0);
+  const fontsCatalogLoadedRef = useRef(false);
+  const fontsFetchPromiseRef = useRef<Promise<Font[]> | null>(null);
+  const inFlightFontLoadsRef = useRef<Map<string, Promise<void>>>(new Map());
 
-  const fetchFonts = async () => {
+  const isFamilyLoadedInDoc = (familyName: string): boolean => {
+    if (typeof document === "undefined" || !document.fonts) return false;
+    const targetClean = familyName.replace(/^["']|["']$/g, "").trim().toLowerCase();
+    const targetNorm = normalizeFontLookup(familyName);
+    return Array.from(document.fonts.values()).some(face => {
+      if (face.status !== "loaded") return false;
+      const faceClean = face.family.replace(/^["']|["']$/g, "").trim().toLowerCase();
+      return faceClean === targetClean || normalizeFontLookup(faceClean) === targetNorm;
+    });
+  };
+
+  const registerFamilyBuffer = async (
+    familyName: string,
+    buffer: ArrayBuffer,
+    getBlobInfo: () => { blobUrl: string; format: string }
+  ) => {
+    if (!familyName || isFamilyLoadedInDoc(familyName)) return;
+
     try {
-      const res = await fetch("/api/fonts", { cache: "no-store" });
-      if (!res.ok) {
-        console.error(`Failed to fetch fonts: ${res.status} ${res.statusText}`);
-        return;
-      }
-      const data = await res.json();
-      
-      if (!Array.isArray(data)) {
-        console.error("Received non-array data for fonts:", data);
-        setFonts([]);
-        return;
-      }
-      
-      // Map API data to Font objects, safely stripping only known font extensions and preferring .woff2
-      const extRank = (raw: string) => {
-        const lower = raw.toLowerCase();
-        if (lower.endsWith(".woff2")) return 0;
-        if (lower.endsWith(".woff")) return 1;
-        if (lower.endsWith(".ttf")) return 2;
-        if (lower.endsWith(".otf")) return 3;
-        return 4;
-      };
-      const dedupedByFamily = new Map<string, Font>();
-      for (const font of data) {
-        const rawName = String(font.name || "");
-        const fontFamily = rawName.replace(/\.(woff2?|ttf|otf)$/i, "") || rawName;
-        if (!fontFamily) continue;
-        const key = fontFamily.toLowerCase();
-        const prev = dedupedByFamily.get(key);
-        if (!prev || extRank(rawName) < extRank(prev.rawName || prev.url)) {
-          dedupedByFamily.set(key, { name: fontFamily, rawName, url: font.url });
-        }
-      }
-      const apiFonts = Array.from(dedupedByFamily.values());
-      
-      // Set fonts immediately so they show up in the list
-      setFonts(apiFonts);
-
-      // Immediately inject CSS @font-face rules for all fonts and their candidate aliases using direct HTTP font URLs
-      for (const font of apiFonts) {
-        const rawUrl = font.url.startsWith("/") ? font.url : `/fonts/${encodeURIComponent(font.url)}`;
-        const primaryUrl = rawUrl.includes("?") ? rawUrl : `${rawUrl}?v=3`;
-        const ext = font.url.toLowerCase();
-        const fmt = ext.includes(".woff2") ? "woff2" : ext.includes(".woff") ? "woff" : ext.includes(".otf") ? "opentype" : "truetype";
-        const aliases = generateFontAliases(font.name);
-        for (const alias of aliases) {
-          injectStyleSheetFontFace(alias, primaryUrl, fmt);
-        }
-      }
-
-      const isFamilyLoadedInDoc = (familyName: string): boolean => {
-        const targetClean = familyName.replace(/^["']|["']$/g, "").trim().toLowerCase();
-        const targetNorm = normalizeFontLookup(familyName);
-        return Array.from(document.fonts.values()).some(face => {
-          if (face.status !== "loaded") return false;
-          const faceClean = face.family.replace(/^["']|["']$/g, "").trim().toLowerCase();
-          return faceClean === targetClean || normalizeFontLookup(faceClean) === targetNorm;
-        });
-      };
-
-      const registerFamilyBuffer = async (
-        familyName: string,
-        buffer: ArrayBuffer,
-        getBlobInfo: () => { blobUrl: string; format: string }
-      ) => {
-        if (!familyName || isFamilyLoadedInDoc(familyName)) return;
-
-        try {
-          const fontFace = new FontFace(familyName, buffer.slice(0));
-          const loadedFace = await fontFace.load();
-          document.fonts.add(loadedFace);
-          const { blobUrl, format } = getBlobInfo();
-          injectStyleSheetFontFace(familyName, blobUrl, format);
-          return;
-        } catch {
-          const { blobUrl, format } = getBlobInfo();
-          injectStyleSheetFontFace(familyName, blobUrl, format);
-          try {
-            await document.fonts.load(`16px "${escapeCssFontFamily(familyName)}"`);
-          } catch (_) {}
-        }
-      };
-
-      const loadSingleFont = async (font: Font) => {
-        const fontFamily = font.name;
-        if (!fontFamily) return;
-
-        const candidateFamilies = generateFontAliases(fontFamily);
-
-        if (candidateFamilies.every(isFamilyLoadedInDoc)) return;
-
-        const baseUrl = font.url.startsWith("/") ? font.url : `/fonts/${encodeURIComponent(font.url)}`;
-        // Ensure ?v=3 is present to bypass cached immutable font payloads
-        const primaryUrl = baseUrl.includes("?") ? baseUrl : `${baseUrl}?v=3`;
-
-        const fetchFontBuffer = async (targetUrl: string, forceReload = false): Promise<ArrayBuffer> => {
-          const response = await fetch(targetUrl, forceReload ? { cache: "reload" } : undefined);
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status} (${response.statusText})`);
-          }
-          const buffer = await response.arrayBuffer();
-          if (buffer.byteLength < 64) {
-            throw new Error(`Invalid font payload (${buffer.byteLength} bytes)`);
-          }
-          return buffer;
-        };
-
-        try {
-          let buffer: ArrayBuffer;
-          try {
-            buffer = await fetchFontBuffer(primaryUrl, false);
-          } catch {
-            // Retry once with fresh cache-busting query string on transient cold-start or stale cache errors
-            const retryUrl = `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}bust=${Date.now()}`;
-            buffer = await fetchFontBuffer(retryUrl, true);
-          }
-
-          let cachedBlobInfo: { blobUrl: string; format: string } | null = null;
-          const getBlobInfo = () => {
-            if (!cachedBlobInfo) {
-              const { mime, format } = detectFontMimeAndFormat(buffer);
-              cachedBlobInfo = {
-                blobUrl: URL.createObjectURL(new Blob([buffer], { type: mime })),
-                format,
-              };
-            }
-            return cachedBlobInfo;
-          };
-
-          for (const fam of candidateFamilies) {
-            try {
-              await registerFamilyBuffer(fam, buffer, getBlobInfo);
-            } catch {
-              // Ignore secondary alias registration error if primary succeeded
-            }
-          }
-        } catch (e) {
-          console.error(`Failed to load font: "${fontFamily}" from ${font.url}`, e);
-        }
-      };
-
-      // Load in controlled batches of 6 to prevent serverless DB pool exhaustion on cold start
-      const BATCH_SIZE = 6;
-      for (let i = 0; i < apiFonts.length; i += BATCH_SIZE) {
-        const batch = apiFonts.slice(i, i + BATCH_SIZE);
-        await Promise.all(batch.map(loadSingleFont));
-        setFontsLoadedTick(t => t + 1);
-      }
-    } catch (err) {
-      console.error("Failed to fetch fonts", err);
+      const fontFace = new FontFace(familyName, buffer.slice(0));
+      const loadedFace = await fontFace.load();
+      document.fonts.add(loadedFace);
+      const { blobUrl, format } = getBlobInfo();
+      injectStyleSheetFontFace(familyName, blobUrl, format);
+      return;
+    } catch {
+      const { blobUrl, format } = getBlobInfo();
+      injectStyleSheetFontFace(familyName, blobUrl, format);
+      try {
+        await document.fonts.load(`16px "${escapeCssFontFamily(familyName)}"`);
+      } catch (_) {}
     }
   };
+
+  const loadSingleFont = async (font: Font): Promise<void> => {
+    const fontFamily = font.name;
+    if (!fontFamily) return;
+
+    const existing = inFlightFontLoadsRef.current.get(fontFamily.toLowerCase());
+    if (existing) return existing;
+
+    const task = (async () => {
+      const candidateFamilies = generateFontAliases(fontFamily);
+      if (candidateFamilies.every(isFamilyLoadedInDoc)) return;
+
+      const baseUrl = font.url.startsWith("/") ? font.url : `/fonts/${encodeURIComponent(font.url)}`;
+      const primaryUrl = baseUrl.includes("?") ? baseUrl : `${baseUrl}?v=3`;
+
+      const fetchFontBuffer = async (targetUrl: string, forceReload = false): Promise<ArrayBuffer> => {
+        const response = await fetch(targetUrl, forceReload ? { cache: "reload" } : undefined);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status} (${response.statusText})`);
+        }
+        const buffer = await response.arrayBuffer();
+        if (buffer.byteLength < 64) {
+          throw new Error(`Invalid font payload (${buffer.byteLength} bytes)`);
+        }
+        return buffer;
+      };
+
+      try {
+        let buffer: ArrayBuffer;
+        try {
+          buffer = await fetchFontBuffer(primaryUrl, false);
+        } catch {
+          const retryUrl = `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}bust=${Date.now()}`;
+          buffer = await fetchFontBuffer(retryUrl, true);
+        }
+
+        let cachedBlobInfo: { blobUrl: string; format: string } | null = null;
+        const getBlobInfo = () => {
+          if (!cachedBlobInfo) {
+            const { mime, format } = detectFontMimeAndFormat(buffer);
+            cachedBlobInfo = {
+              blobUrl: URL.createObjectURL(new Blob([buffer], { type: mime })),
+              format,
+            };
+          }
+          return cachedBlobInfo;
+        };
+
+        for (const fam of candidateFamilies) {
+          try {
+            await registerFamilyBuffer(fam, buffer, getBlobInfo);
+          } catch {
+            // Ignore secondary alias registration error if primary succeeded
+          }
+        }
+        setFontsLoadedTick(t => t + 1);
+      } catch (e) {
+        console.error(`Failed to load font: "${fontFamily}" from ${font.url}`, e);
+      } finally {
+        inFlightFontLoadsRef.current.delete(fontFamily.toLowerCase());
+      }
+    })();
+
+    inFlightFontLoadsRef.current.set(fontFamily.toLowerCase(), task);
+    return task;
+  };
+
+  const ensureFontsLoadedForFamilies = async (targetNames: string[], fontCatalog = fonts) => {
+    if (!fontCatalog.length || !targetNames.length) return;
+    const needed = new Map<string, Font>();
+    for (const rawName of targetNames) {
+      if (!rawName || isGenericCssFont(rawName)) continue;
+      const norm = normalizeFontLookup(rawName);
+      const match = fontCatalog.find(
+        f => f.name === rawName || normalizeFontLookup(f.name) === norm
+      );
+      if (match && !needed.has(match.name.toLowerCase())) {
+        needed.set(match.name.toLowerCase(), match);
+      }
+    }
+    if (needed.size === 0) return;
+    await Promise.all(Array.from(needed.values()).map(loadSingleFont));
+  };
+
+  const fetchFonts = async (force = false): Promise<Font[]> => {
+    if (!force && fontsCatalogLoadedRef.current && fonts.length > 0) {
+      return fonts;
+    }
+    if (!force && fontsFetchPromiseRef.current) {
+      return fontsFetchPromiseRef.current;
+    }
+
+    const reqPromise = (async (): Promise<Font[]> => {
+      try {
+        const res = await fetch("/api/fonts", force ? { cache: "no-store" } : undefined);
+        if (!res.ok) {
+          console.error(`Failed to fetch fonts: ${res.status} ${res.statusText}`);
+          return fonts;
+        }
+        const data = await res.json();
+
+        if (!Array.isArray(data)) {
+          console.error("Received non-array data for fonts:", data);
+          setFonts([]);
+          return [];
+        }
+
+        const extRank = (raw: string) => {
+          const lower = raw.toLowerCase();
+          if (lower.endsWith(".woff2")) return 0;
+          if (lower.endsWith(".woff")) return 1;
+          if (lower.endsWith(".ttf")) return 2;
+          if (lower.endsWith(".otf")) return 3;
+          return 4;
+        };
+        const dedupedByFamily = new Map<string, Font>();
+        for (const font of data) {
+          const rawName = String(font.name || "");
+          const fontFamily = rawName.replace(/\.(woff2?|ttf|otf)$/i, "") || rawName;
+          if (!fontFamily) continue;
+          const key = fontFamily.toLowerCase();
+          const prev = dedupedByFamily.get(key);
+          if (!prev || extRank(rawName) < extRank(prev.rawName || prev.url)) {
+            dedupedByFamily.set(key, { name: fontFamily, rawName, url: font.url });
+          }
+        }
+        const apiFonts = Array.from(dedupedByFamily.values());
+        fontsCatalogLoadedRef.current = true;
+        setFonts(apiFonts);
+
+        // Register lightweight CSS @font-face rules immediately (zero network cost until rendered)
+        for (const font of apiFonts) {
+          const rawUrl = font.url.startsWith("/") ? font.url : `/fonts/${encodeURIComponent(font.url)}`;
+          const primaryUrl = rawUrl.includes("?") ? rawUrl : `${rawUrl}?v=3`;
+          const ext = font.url.toLowerCase();
+          const fmt = ext.includes(".woff2") ? "woff2" : ext.includes(".woff") ? "woff" : ext.includes(".otf") ? "opentype" : "truetype";
+          const aliases = generateFontAliases(font.name);
+          for (const alias of aliases) {
+            injectStyleSheetFontFace(alias, primaryUrl, fmt);
+          }
+        }
+
+        return apiFonts;
+      } catch (err) {
+        console.error("Failed to fetch fonts", err);
+        return fonts;
+      } finally {
+        fontsFetchPromiseRef.current = null;
+      }
+    })();
+
+    fontsFetchPromiseRef.current = reqPromise;
+    return reqPromise;
+  };
+
+  // Load ONLY fonts used by active layers and user's default font on-demand
+  useEffect(() => {
+    if (fonts.length === 0) return;
+    const neededFamilies: string[] = [];
+    if (user?.defaultFont) neededFamilies.push(user.defaultFont);
+    for (const layer of layers) {
+      if (layer.visible === false) continue;
+      if (layer.fontFamily) neededFamilies.push(layer.fontFamily);
+      if (layer.hasSuffixList && layer.suffixFontFamily) neededFamilies.push(layer.suffixFontFamily);
+    }
+    if (neededFamilies.length > 0) {
+      ensureFontsLoadedForFamilies(neededFamilies, fonts);
+    }
+  }, [fonts, layers, user?.defaultFont]);
 
   const fetchProjects = async () => {
     if (!user) return;
@@ -1749,7 +1799,7 @@ export default function App() {
         }
       }
       if (uploadedCount > 0) {
-        await fetchFonts();
+        await fetchFonts(true);
         setNotification({
           message: uploadedCount === 1 ? "Font uploaded and activated!" : `${uploadedCount} fonts uploaded and activated!`,
           type: "success",
@@ -1770,7 +1820,7 @@ export default function App() {
     try {
       const res = await fetch(`/api/fonts/${encodeURIComponent(fontName)}`, { method: "DELETE" });
       if (res.ok) {
-        await fetchFonts();
+        await fetchFonts(true);
       }
     } catch (err) {
       console.error("Failed to delete font", err);
@@ -4065,7 +4115,7 @@ export default function App() {
                                   body: JSON.stringify({ oldName: editingFont.name, newName: newFontName }),
                                 });
                                 if (res.ok) {
-                                  await fetchFonts();
+                                  await fetchFonts(true);
                                   setEditingFont(null);
                                   setNotification({ message: "Font renamed successfully", type: 'success' });
                                 } else {

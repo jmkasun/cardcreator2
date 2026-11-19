@@ -5,7 +5,7 @@ import {
   RefreshCw, Layers, Share2, CheckCircle2, Save,
   Wand2, Copy, ChevronRight, LayoutList, SlidersHorizontal,
   Eye, AlignLeft, AlignCenter, AlignRight, ArrowUp, ArrowDown,
-  Image as ImageIcon, Check, ChevronDown, ChevronUp, Sparkles, Printer, Calendar, Globe, Lock
+  Image as ImageIcon, Check, ChevronDown, ChevronUp, Sparkles, Printer, Calendar, Globe, Lock, Tags
 } from "lucide-react";
 import {
   TextLayer, Font, prepareLayersForRow, generateCardBlob, loadImage,
@@ -59,6 +59,57 @@ function normalizeFieldName(str: string): string {
     .toLowerCase()
     .replace(/[\s_\-\.]+/g, "")
     .trim();
+}
+
+function extractTagNames(expr: string): string[] {
+  if (!expr) return [];
+  const names: string[] = [];
+  const re = /<([^>]+)>/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(expr)) !== null) {
+    const tag = match[1].trim();
+    if (tag) names.push(tag);
+  }
+  return names;
+}
+
+function isTagTemplateMapping(expr: string, availableFields?: string[]): boolean {
+  if (!expr) return false;
+  if (availableFields && availableFields.includes(expr)) return false;
+  return /<([^>]+)>/.test(expr);
+}
+
+function resolveMappedFieldValue(
+  expr: string,
+  rec: Record<string, string>,
+  availableFieldsSet?: Set<string>
+): string {
+  if (!expr) return "";
+  if (Object.prototype.hasOwnProperty.call(rec, expr)) {
+    return rec[expr] !== undefined && rec[expr] !== null ? String(rec[expr]) : "";
+  }
+  if (availableFieldsSet && availableFieldsSet.has(expr)) {
+    return "";
+  }
+  if (!/<([^>]+)>/.test(expr)) {
+    return "";
+  }
+
+  const resolved = expr.replace(/<([^>]+)>/g, (fullMatch, rawTag: string) => {
+    const trimmed = rawTag.trim();
+    if (Object.prototype.hasOwnProperty.call(rec, rawTag)) {
+      return rec[rawTag] !== undefined && rec[rawTag] !== null ? String(rec[rawTag]) : "";
+    }
+    if (trimmed && Object.prototype.hasOwnProperty.call(rec, trimmed)) {
+      return rec[trimmed] !== undefined && rec[trimmed] !== null ? String(rec[trimmed]) : "";
+    }
+    if (availableFieldsSet && (availableFieldsSet.has(rawTag) || (trimmed && availableFieldsSet.has(trimmed)))) {
+      return "";
+    }
+    return fullMatch;
+  });
+
+  return resolved.replace(/[ \t]{2,}/g, " ").trim();
 }
 
 /**
@@ -814,8 +865,10 @@ export function ProjectDataListModal({
     fields: string[];
     records: Array<Record<string, string>>;
   } | null>(null);
-  // Maps project field key ('__rowName' or layer.id) -> uploaded/API field name (or '' if skipped)
+  // Maps project field key ('__rowName' or layer.id) -> uploaded/API field name or <tag> template (or '' if skipped)
   const [fieldMapping, setFieldMapping] = useState<Record<string, string>>({});
+  const [tagModeRows, setTagModeRows] = useState<Record<string, boolean>>({});
+  const tagInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const [importMode, setImportMode] = useState<"append" | "replace">("append");
   const [isImporting, setIsImporting] = useState(false);
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -1073,17 +1126,17 @@ export function ProjectDataListModal({
 
   const mapSourceRecordsToProjectRows = (
     records: Array<Record<string, string>>,
-    mapping: Record<string, string>
+    mapping: Record<string, string>,
+    availableFields?: string[]
   ): Array<{ rowName: string; rowValues: Record<string, string> }> => {
+    const availableFieldsSet = availableFields ? new Set(availableFields) : undefined;
     return records.map((rec, idx) => {
       const rowValues: Record<string, string> = {};
       activeLayers.forEach(layer => {
-        const mappedSourceField = mapping[layer.id];
-        if (mappedSourceField && rec[mappedSourceField] !== undefined) {
-          rowValues[layer.id] = String(rec[mappedSourceField]);
-        } else {
-          rowValues[layer.id] = "";
-        }
+        const mappedSourceExpr = mapping[layer.id];
+        rowValues[layer.id] = mappedSourceExpr
+          ? resolveMappedFieldValue(mappedSourceExpr, rec, availableFieldsSet)
+          : "";
         if (layer.hasSuffixList && layer.suffixList && layer.suffixList.length > 0) {
           rowValues[`${layer.id}__suffix`] = layer.selectedSuffix || layer.suffixList[0];
         }
@@ -1100,11 +1153,12 @@ export function ProjectDataListModal({
         }
       });
 
-      const mappedNameCol = mapping.__rowName;
+      const mappedNameExpr = mapping.__rowName;
+      const resolvedRowName = mappedNameExpr
+        ? resolveMappedFieldValue(mappedNameExpr, rec, availableFieldsSet)
+        : "";
       const rowName =
-        mappedNameCol && rec[mappedNameCol]
-          ? String(rec[mappedNameCol])
-          : rowValues[activeLayers[0]?.id] || `${project.name} ${idx + 1}`;
+        resolvedRowName || rowValues[activeLayers[0]?.id] || `${project.name} ${idx + 1}`;
 
       return { rowName, rowValues };
     });
@@ -1333,7 +1387,7 @@ export function ProjectDataListModal({
         throw new Error("No JSON records found in the API response.");
       }
 
-      const mappedRows = mapSourceRecordsToProjectRows(parsed.records, cfg.fieldMapping);
+      const mappedRows = mapSourceRecordsToProjectRows(parsed.records, cfg.fieldMapping, parsed.fields);
       const liveItems = toLiveProjectDataItems(mappedRows);
 
       if (shouldUseProxy && !cfg.useProxy) {
@@ -2403,6 +2457,7 @@ export function ProjectDataListModal({
           records: parsed.records,
         });
         setFieldMapping(computeAutoMapping(parsed.fields));
+        setTagModeRows({});
         setShowImportWizard(true);
       } catch (err) {
         console.error("File parse error:", err);
@@ -2749,14 +2804,22 @@ export function ProjectDataListModal({
         );
       }
 
-      // Compute auto-mapping and overlay any previously saved API field mapping for matching fields
+      // Compute auto-mapping and overlay any previously saved API field mapping (including <tag> templates)
       const autoMap = computeAutoMapping(parsed.fields);
+      const restoredTagRows: Record<string, boolean> = {};
       const saved = getSavedApiConfig();
       if (saved?.fieldMapping && typeof saved.fieldMapping === "object") {
         const availableSet = new Set(parsed.fields);
         Object.entries(saved.fieldMapping).forEach(([projKey, apiField]) => {
-          if (apiField && availableSet.has(apiField)) {
+          if (!apiField) return;
+          if (availableSet.has(apiField)) {
             autoMap[projKey] = apiField;
+          } else if (isTagTemplateMapping(apiField, parsed.fields)) {
+            const tags = extractTagNames(apiField);
+            if (tags.some(t => availableSet.has(t))) {
+              autoMap[projKey] = apiField;
+              restoredTagRows[projKey] = true;
+            }
           }
         });
       }
@@ -2768,6 +2831,7 @@ export function ProjectDataListModal({
         records: parsed.records,
       });
       setFieldMapping(autoMap);
+      setTagModeRows(restoredTagRows);
       setShowApiImportModal(false);
       setShowImportWizard(true);
       onNotification({
@@ -2797,7 +2861,7 @@ export function ProjectDataListModal({
   // Build mapped items from uploaded file or API response + current fieldMapping
   const mappedImportPreviewRows = useMemo(() => {
     if (!importFileInfo) return [];
-    return mapSourceRecordsToProjectRows(importFileInfo.records, fieldMapping);
+    return mapSourceRecordsToProjectRows(importFileInfo.records, fieldMapping, importFileInfo.fields);
   }, [importFileInfo, fieldMapping, activeLayers, project.name]);
 
   // Execute confirmed import (Live API loads into memory without DB save; CSV/JSON saves to DB)
@@ -5549,7 +5613,10 @@ export function ProjectDataListModal({
                     </span>
                     <button
                       type="button"
-                      onClick={() => setFieldMapping(computeAutoMapping(importFileInfo.fields))}
+                      onClick={() => {
+                        setFieldMapping(computeAutoMapping(importFileInfo.fields));
+                        setTagModeRows({});
+                      }}
                       className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 font-medium transition-colors"
                     >
                       <Wand2 size={12} />
@@ -5563,6 +5630,7 @@ export function ProjectDataListModal({
                           posMap[l.id] = importFileInfo.fields[i] || "";
                         });
                         setFieldMapping(posMap);
+                        setTagModeRows({});
                       }}
                       className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 font-medium transition-colors"
                     >
@@ -5603,131 +5671,266 @@ export function ProjectDataListModal({
                   )}
                 </div>
 
-                {/* Field Mapping Table */}
-                <div className="border border-slate-800 rounded-xl overflow-hidden bg-slate-950/40">
-                  <div className="grid grid-cols-12 gap-2 px-4 py-2.5 bg-slate-950 border-b border-slate-800 text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                    <div className="col-span-4">Project Field</div>
-                    <div className="col-span-4">
-                      {importFileInfo.format === "api" ? "API Return Field (JSON)" : "Uploaded File Field"}
-                    </div>
-                    <div className="col-span-4">
-                      {importFileInfo.format === "api" ? "Sample API Values" : "Sample Uploaded Values"}
-                    </div>
-                  </div>
-
-                  <div className="divide-y divide-slate-800/70">
-                    {/* Optional Record Name Mapping */}
-                    <div className="grid grid-cols-12 gap-2 items-center px-4 py-2.5 bg-slate-900/40">
-                      <div className="col-span-4 flex items-center gap-2 min-w-0">
-                        <span className="text-xs font-semibold text-slate-300 truncate">
-                          Record Name (Optional)
-                        </span>
-                        <span className="text-[10px] px-1.5 py-0.2 rounded bg-slate-800 text-slate-400 font-mono">
-                          label
-                        </span>
-                      </div>
-                      <div className="col-span-4">
-                        <select
-                          value={fieldMapping.__rowName || ""}
-                          onChange={e =>
-                            setFieldMapping(prev => ({ ...prev, __rowName: e.target.value }))
-                          }
-                          className="w-full bg-slate-950 border border-slate-700 focus:border-blue-500 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 outline-none"
-                        >
-                          <option value="">-- Auto-generate from first field --</option>
-                          {importFileInfo.fields.map(f => (
-                            <option key={f} value={f}>
-                              {f}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                      <div className="col-span-4 text-[11px] text-slate-400 truncate font-mono">
-                        {fieldMapping.__rowName
-                          ? importFileInfo.records
-                              .slice(0, 2)
-                              .map(r => r[fieldMapping.__rowName])
-                              .filter(Boolean)
-                              .join(" | ") || "(empty)"
-                          : "(Auto)"}
-                      </div>
-                    </div>
-
-                    {/* Project Layer Fields */}
-                    {activeLayers.map(layer => {
-                      const selectedUploaded = fieldMapping[layer.id] || "";
-                      const isPrice = isPriceLayer(layer);
-                      const sampleValues = selectedUploaded
-                        ? importFileInfo.records
-                            .slice(0, 2)
-                            .map(r => r[selectedUploaded])
-                            .filter(v => v !== undefined && v !== "")
-                            .join(" | ")
-                        : "";
-
-                      return (
-                        <div
-                          key={layer.id}
-                          className={cn(
-                            "grid grid-cols-12 gap-2 items-center px-4 py-2.5 transition-colors",
-                            selectedUploaded ? "bg-emerald-500/[0.03]" : ""
-                          )}
-                        >
-                          <div className="col-span-4 flex items-center justify-between gap-2 min-w-0 pr-2">
-                            <span className="text-xs font-bold text-white truncate" title={layer.name}>
-                              {layer.name || "Untitled Field"}
-                            </span>
-                            <span
-                              className={cn(
-                                "text-[10px] px-1.5 py-0.2 rounded font-mono uppercase shrink-0",
-                                isPrice
-                                  ? "bg-amber-500/20 text-amber-300"
-                                  : layer.type === "date"
-                                  ? "bg-purple-500/20 text-purple-300"
-                                  : "bg-slate-800 text-slate-400"
-                              )}
-                            >
-                              {isPrice ? "number" : layer.type || "text"}
-                            </span>
-                          </div>
-
-                          <div className="col-span-4 flex items-center gap-2">
-                            <ArrowRight size={13} className="text-slate-600 shrink-0" />
-                            <select
-                              value={selectedUploaded}
-                              onChange={e =>
-                                setFieldMapping(prev => ({ ...prev, [layer.id]: e.target.value }))
-                              }
-                              className={cn(
-                                "w-full bg-slate-950 border rounded-lg px-2.5 py-1.5 text-xs outline-none transition-colors",
-                                selectedUploaded
-                                  ? "border-emerald-500/60 text-emerald-200"
-                                  : "border-slate-700 text-slate-400 focus:border-blue-500"
-                              )}
-                            >
-                              <option value="">-- Skip / Do Not Import --</option>
-                              {importFileInfo.fields.map(f => (
-                                <option key={f} value={f}>
-                                  {f}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-
-                          <div className="col-span-4 text-[11px] text-slate-300 truncate font-mono">
-                            {selectedUploaded ? (
-                              sampleValues || <span className="text-slate-600 italic">(empty values)</span>
-                            ) : layer.isNumberLabel ? (
-                              <span className="text-sky-400/80 italic">Auto-converted from number</span>
-                            ) : (
-                              <span className="text-slate-600 italic">Not mapped</span>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })}
+                {/* Tag mapping helper tip */}
+                <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-sky-500/10 border border-sky-500/20 text-[11px] text-sky-200/90">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Tags size={13} className="text-sky-400 shrink-0" />
+                    <span>
+                      Need multiple fields in one Project Field? Click{" "}
+                      <strong className="text-white">Multi-Tag</strong> on any row and combine fields with{" "}
+                      <code className="px-1 py-0.5 rounded bg-slate-950 text-amber-300 font-mono">
+                        &lt;field1&gt; text &lt;field2&gt;
+                      </code>{" "}
+                      (e.g.{" "}
+                      <code className="px-1 py-0.5 rounded bg-slate-950 text-emerald-300 font-mono">
+                        &lt;town&gt; පදිංචි &lt;name&gt;
+                      </code>
+                      ).
+                    </span>
                   </div>
                 </div>
+
+                {/* Field Mapping Table */}
+                {(() => {
+                  const availableFieldsSet = new Set<string>(importFileInfo.fields);
+                  const insertTagForRow = (rowKey: string, fieldName: string) => {
+                    const tagText = `<${fieldName}>`;
+                    const inputEl = tagInputRefs.current[rowKey];
+                    const currentVal = fieldMapping[rowKey] || "";
+                    if (inputEl && typeof inputEl.selectionStart === "number") {
+                      const start = inputEl.selectionStart;
+                      const end = inputEl.selectionEnd ?? start;
+                      const before = currentVal.slice(0, start);
+                      const after = currentVal.slice(end);
+                      const nextVal = `${before}${tagText}${after}`;
+                      setFieldMapping(prev => ({ ...prev, [rowKey]: nextVal }));
+                      requestAnimationFrame(() => {
+                        inputEl.focus();
+                        const nextPos = start + tagText.length;
+                        inputEl.setSelectionRange(nextPos, nextPos);
+                      });
+                    } else {
+                      const sep = currentVal && !/\s$/.test(currentVal) ? " " : "";
+                      setFieldMapping(prev => ({ ...prev, [rowKey]: `${currentVal}${sep}${tagText}` }));
+                    }
+                  };
+
+                  const enableTagModeForRow = (rowKey: string) => {
+                    const currentVal = fieldMapping[rowKey] || "";
+                    if (currentVal && availableFieldsSet.has(currentVal)) {
+                      setFieldMapping(prev => ({ ...prev, [rowKey]: `<${currentVal}> ` }));
+                    }
+                    setTagModeRows(prev => ({ ...prev, [rowKey]: true }));
+                    requestAnimationFrame(() => {
+                      tagInputRefs.current[rowKey]?.focus();
+                    });
+                  };
+
+                  const disableTagModeForRow = (rowKey: string) => {
+                    const currentVal = fieldMapping[rowKey] || "";
+                    const tags = extractTagNames(currentVal);
+                    const unwrapped =
+                      tags.length === 1 && availableFieldsSet.has(tags[0]) && currentVal.trim() === `<${tags[0]}>`
+                        ? tags[0]
+                        : availableFieldsSet.has(currentVal)
+                        ? currentVal
+                        : "";
+                    setFieldMapping(prev => ({ ...prev, [rowKey]: unwrapped }));
+                    setTagModeRows(prev => ({ ...prev, [rowKey]: false }));
+                  };
+
+                  const renderRowMappingControl = (rowKey: string, isRowName = false) => {
+                    const currentVal = fieldMapping[rowKey] || "";
+                    const isTagMode =
+                      Boolean(tagModeRows[rowKey]) || isTagTemplateMapping(currentVal, importFileInfo.fields);
+
+                    if (!isTagMode) {
+                      return (
+                        <div className="flex items-center gap-1.5">
+                          {!isRowName && <ArrowRight size={13} className="text-slate-600 shrink-0" />}
+                          <select
+                            value={currentVal}
+                            onChange={e =>
+                              setFieldMapping(prev => ({ ...prev, [rowKey]: e.target.value }))
+                            }
+                            className={cn(
+                              "flex-1 min-w-0 bg-slate-950 border rounded-lg px-2.5 py-1.5 text-xs outline-none transition-colors",
+                              currentVal
+                                ? isRowName
+                                  ? "border-blue-500/60 text-slate-100"
+                                  : "border-emerald-500/60 text-emerald-200"
+                                : "border-slate-700 text-slate-400 focus:border-blue-500"
+                            )}
+                          >
+                            <option value="">
+                              {isRowName ? "-- Auto-generate from first field --" : "-- Skip / Do Not Import --"}
+                            </option>
+                            {importFileInfo.fields.map(f => (
+                              <option key={f} value={f}>
+                                {f}
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            onClick={() => enableTagModeForRow(rowKey)}
+                            title="Combine multiple fields using <tag> template (e.g. <town> පදිංචි <name>)"
+                            className="shrink-0 flex items-center gap-1 px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-sky-500/20 text-slate-300 hover:text-sky-300 border border-slate-700 hover:border-sky-500/40 text-[10px] font-semibold transition-colors"
+                          >
+                            <Tags size={11} />
+                            <span>Multi-Tag</span>
+                          </button>
+                        </div>
+                      );
+                    }
+
+                    const usedTagsSet = new Set(extractTagNames(currentVal));
+                    const sampleExample =
+                      importFileInfo.fields.length >= 2
+                        ? `<${importFileInfo.fields[0]}> පදිංචි <${importFileInfo.fields[1]}>`
+                        : `<${importFileInfo.fields[0] || "town"}> පදිංචි <name>`;
+
+                    return (
+                      <div className="space-y-1.5">
+                        <div className="flex items-center gap-1.5">
+                          {!isRowName && <ArrowRight size={13} className="text-sky-400 shrink-0" />}
+                          <input
+                            ref={el => {
+                              tagInputRefs.current[rowKey] = el;
+                            }}
+                            type="text"
+                            value={currentVal}
+                            onChange={e =>
+                              setFieldMapping(prev => ({ ...prev, [rowKey]: e.target.value }))
+                            }
+                            placeholder={sampleExample}
+                            className="flex-1 min-w-0 bg-slate-950 border border-sky-500/60 focus:border-sky-400 rounded-lg px-2.5 py-1.5 text-xs text-sky-100 placeholder:text-slate-600 outline-none font-mono"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => disableTagModeForRow(rowKey)}
+                            title="Switch back to single field dropdown"
+                            className="shrink-0 px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-[10px] font-semibold transition-colors"
+                          >
+                            Single
+                          </button>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-1 max-h-20 overflow-y-auto pl-0.5">
+                          <span className="text-[10px] text-slate-500 mr-0.5">Insert:</span>
+                          {importFileInfo.fields.map(f => {
+                            const isUsed = usedTagsSet.has(f);
+                            return (
+                              <button
+                                key={f}
+                                type="button"
+                                onClick={() => insertTagForRow(rowKey, f)}
+                                className={cn(
+                                  "px-1.5 py-0.5 rounded text-[10px] font-mono border transition-colors",
+                                  isUsed
+                                    ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
+                                    : "bg-slate-900 hover:bg-sky-500/20 text-slate-300 hover:text-sky-200 border-slate-700 hover:border-sky-500/40"
+                                )}
+                              >
+                                &lt;{f}&gt;
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  };
+
+                  return (
+                    <div className="border border-slate-800 rounded-xl overflow-hidden bg-slate-950/40">
+                      <div className="grid grid-cols-12 gap-2 px-4 py-2.5 bg-slate-950 border-b border-slate-800 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                        <div className="col-span-3">Project Field</div>
+                        <div className="col-span-5">
+                          {importFileInfo.format === "api" ? "API Return Field (JSON / Tags)" : "Uploaded File Field / Tags"}
+                        </div>
+                        <div className="col-span-4">
+                          {importFileInfo.format === "api" ? "Sample API Values" : "Sample Uploaded Values"}
+                        </div>
+                      </div>
+
+                      <div className="divide-y divide-slate-800/70">
+                        {/* Optional Record Name Mapping */}
+                        <div className="grid grid-cols-12 gap-2 items-start px-4 py-2.5 bg-slate-900/40">
+                          <div className="col-span-3 flex items-center gap-2 min-w-0 pt-1.5">
+                            <span className="text-xs font-semibold text-slate-300 truncate">
+                              Record Name (Optional)
+                            </span>
+                            <span className="text-[10px] px-1.5 py-0.2 rounded bg-slate-800 text-slate-400 font-mono shrink-0">
+                              label
+                            </span>
+                          </div>
+                          <div className="col-span-5">{renderRowMappingControl("__rowName", true)}</div>
+                          <div className="col-span-4 text-[11px] text-slate-400 truncate font-mono pt-1.5">
+                            {fieldMapping.__rowName
+                              ? importFileInfo.records
+                                  .slice(0, 2)
+                                  .map(r => resolveMappedFieldValue(fieldMapping.__rowName, r, availableFieldsSet))
+                                  .filter(Boolean)
+                                  .join(" | ") || "(empty)"
+                              : "(Auto)"}
+                          </div>
+                        </div>
+
+                        {/* Project Layer Fields */}
+                        {activeLayers.map(layer => {
+                          const selectedUploaded = fieldMapping[layer.id] || "";
+                          const isPrice = isPriceLayer(layer);
+                          const sampleValues = selectedUploaded
+                            ? importFileInfo.records
+                                .slice(0, 2)
+                                .map(r => resolveMappedFieldValue(selectedUploaded, r, availableFieldsSet))
+                                .filter(v => v !== undefined && v !== "")
+                                .join(" | ")
+                            : "";
+
+                          return (
+                            <div
+                              key={layer.id}
+                              className={cn(
+                                "grid grid-cols-12 gap-2 items-start px-4 py-2.5 transition-colors",
+                                selectedUploaded ? "bg-emerald-500/[0.03]" : ""
+                              )}
+                            >
+                              <div className="col-span-3 flex items-center justify-between gap-2 min-w-0 pr-2 pt-1.5">
+                                <span className="text-xs font-bold text-white truncate" title={layer.name}>
+                                  {layer.name || "Untitled Field"}
+                                </span>
+                                <span
+                                  className={cn(
+                                    "text-[10px] px-1.5 py-0.2 rounded font-mono uppercase shrink-0",
+                                    isPrice
+                                      ? "bg-amber-500/20 text-amber-300"
+                                      : layer.type === "date"
+                                      ? "bg-purple-500/20 text-purple-300"
+                                      : "bg-slate-800 text-slate-400"
+                                  )}
+                                >
+                                  {isPrice ? "number" : layer.type || "text"}
+                                </span>
+                              </div>
+
+                              <div className="col-span-5">{renderRowMappingControl(layer.id, false)}</div>
+
+                              <div className="col-span-4 text-[11px] text-slate-300 truncate font-mono pt-1.5" title={sampleValues}>
+                                {selectedUploaded ? (
+                                  sampleValues || <span className="text-slate-600 italic">(empty values)</span>
+                                ) : layer.isNumberLabel ? (
+                                  <span className="text-sky-400/80 italic">Auto-converted from number</span>
+                                ) : (
+                                  <span className="text-slate-600 italic">Not mapped</span>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 {/* Live Preview of Mapped Records */}
                 <div>
