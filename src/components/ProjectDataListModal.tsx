@@ -1552,7 +1552,7 @@ export function ProjectDataListModal({
       autoAdjustSpace: typeof rawCfg.autoAdjustSpace === "boolean" ? rawCfg.autoAdjustSpace : DEFAULT_GROUP_CONFIG.autoAdjustSpace,
       autoCenterSpacing: typeof rawCfg.autoCenterSpacing === "boolean" ? rawCfg.autoCenterSpacing : DEFAULT_GROUP_CONFIG.autoCenterSpacing,
       spacePaddingPercent: Math.max(1.5, typeof rawCfg.spacePaddingPercent === "number" ? rawCfg.spacePaddingPercent : DEFAULT_GROUP_CONFIG.spacePaddingPercent),
-      lineGapScale: Math.max(1.30, typeof rawCfg.lineGapScale === "number" ? rawCfg.lineGapScale : DEFAULT_GROUP_CONFIG.lineGapScale),
+      lineGapScale: Math.min(2.0, Math.max(1.30, typeof rawCfg.lineGapScale === "number" ? rawCfg.lineGapScale : DEFAULT_GROUP_CONFIG.lineGapScale)),
       includeStaticLabels: typeof rawCfg.includeStaticLabels === "boolean" ? rawCfg.includeStaticLabels : DEFAULT_GROUP_CONFIG.includeStaticLabels,
       breakLongLines: typeof rawCfg.breakLongLines === "boolean" ? rawCfg.breakLongLines : DEFAULT_GROUP_CONFIG.breakLongLines,
       imageRules: {
@@ -6583,17 +6583,17 @@ export function ProjectDataListModal({
                         <span className="text-slate-400">Line Spacing</span>
                         <span className="font-mono text-violet-300">
                           {groupPreviewInfo?.autoCentered && groupPreviewInfo.appliedLineGapScale !== undefined
-                            ? `Auto ${Math.max(1.30, groupPreviewInfo.appliedLineGapScale).toFixed(2)}x`
-                            : `${Math.max(1.30, groupConfig.lineGapScale).toFixed(2)}x`}
+                            ? `Auto ${Math.min(2.0, Math.max(1.30, groupPreviewInfo.appliedLineGapScale)).toFixed(2)}x`
+                            : `${Math.min(2.0, Math.max(1.30, groupConfig.lineGapScale)).toFixed(2)}x`}
                         </span>
                       </div>
                       <input
                         type="range"
                         min={1.30}
-                        max={2.4}
+                        max={2.0}
                         step={0.05}
                         value={Math.min(
-                          2.4,
+                          2.0,
                           Math.max(
                             1.30,
                             groupPreviewInfo?.autoCentered && groupPreviewInfo.appliedLineGapScale !== undefined
@@ -6605,7 +6605,7 @@ export function ProjectDataListModal({
                           setGroupConfig(p => ({
                             ...p,
                             autoCenterSpacing: false,
-                            lineGapScale: Math.max(1.30, Number(e.target.value)),
+                            lineGapScale: Math.min(2.0, Math.max(1.30, Number(e.target.value))),
                           }))
                         }
                         className="w-full accent-violet-500"

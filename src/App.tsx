@@ -199,6 +199,7 @@ interface TextLayer {
   sinhalaMonthFontSize?: number;
   useSinhalaMonth?: boolean;
   sinhalaMonths?: string[];
+  dateSuffix?: string;
   isBold?: boolean;
   isItalic?: boolean;
   isUnderline?: boolean;
@@ -1996,6 +1997,7 @@ export default function App() {
       useSinhalaMonth: false,
       sinhalaMonthFontSize: user?.defaultFontSize || 60,
       sinhalaMonths: ["ckjdß", "fmnrjdß", "ud¾;=", "wfma%,a", "uehs", "cQks", "cQ,s", "wf.daia;=", "iema;eïn¾", "Tlaf;dan¾", "fkdjeïn¾", "foieïn¾"],
+      dateSuffix: "",
       isBold: false,
       isItalic: false,
       isUnderline: false,
@@ -2755,20 +2757,27 @@ export default function App() {
           let yearStr = "";
           let monthStr = "";
           let dayStr = "";
-          
+
+          const rawDateSuffix = layer.type === 'date' ? (layer.dateSuffix || "") : "";
+          const dateSuffixAppend = rawDateSuffix.trim() !== ""
+            ? (/^\s/.test(rawDateSuffix) ? rawDateSuffix : ` ${rawDateSuffix}`)
+            : "";
+
           if (layer.type === 'date' && layer.useSinhalaMonth && layer.sinhalaMonths) {
             try {
               const d = new Date(layer.text);
               if (!isNaN(d.getTime())) {
                 yearStr = d.getFullYear().toString();
                 monthStr = layer.sinhalaMonths[d.getMonth()] || "";
-                dayStr = d.getDate().toString();
+                dayStr = `${d.getDate().toString()}${dateSuffixAppend}`;
                 isSinhalaDate = true;
                 displayText = `${yearStr} ${monthStr} ${dayStr}`;
               }
             } catch (e) {
               console.error("Failed to format date with Sinhala month", e);
             }
+          } else if (layer.type === 'date' && (layer.text || "").trim() !== "" && dateSuffixAppend) {
+            displayText = `${displayText}${dateSuffixAppend}`;
           }
 
           if (layer.shadowBlur > 0) {
@@ -3004,11 +3013,39 @@ export default function App() {
       const matchedHitFont = fonts.find(f => f.name === layer.fontFamily || normalizeFontLookup(f.name) === normalizeFontLookup(layer.fontFamily));
       const hitFallback = matchedHitFont && matchedHitFont.name !== layer.fontFamily ? matchedHitFont.name : undefined;
       ctx.font = buildCanvasFontSpec(layer.fontSize, layer.fontFamily, layer.isBold, layer.isItalic, true, hitFallback);
-      const metrics = ctx.measureText(displayText);
+
+      const rawHitDateSuffix = layer.type === 'date' ? (layer.dateSuffix || "") : "";
+      const hitDateSuffixAppend = rawHitDateSuffix.trim() !== ""
+        ? (/^\s/.test(rawHitDateSuffix) ? rawHitDateSuffix : ` ${rawHitDateSuffix}`)
+        : "";
+      let width = 0;
+      if (layer.type === 'date' && layer.useSinhalaMonth && layer.sinhalaMonths) {
+        const d = new Date(layer.text);
+        if (!isNaN(d.getTime())) {
+          const yStr = d.getFullYear().toString();
+          const mStr = layer.sinhalaMonths[d.getMonth()] || "";
+          const dStr = `${d.getDate().toString()}${hitDateSuffixAppend}`;
+          const monthFontSize = ((layer.sinhalaMonthFontSize || layer.fontSize) * (canvas.width / 1000));
+          const monthFontStr = buildCanvasFontSpec(monthFontSize, layer.fontFamily, layer.isBold, layer.isItalic, true, hitFallback);
+          const origFont = ctx.font;
+          const w1 = ctx.measureText(yStr + " ").width;
+          ctx.font = monthFontStr;
+          const w2 = ctx.measureText(mStr + " ").width;
+          ctx.font = origFont;
+          const w3 = ctx.measureText(dStr).width;
+          width = w1 + w2 + w3;
+        } else {
+          width = ctx.measureText(displayText).width;
+        }
+      } else {
+        if (layer.type === 'date' && (layer.text || "").trim() !== "" && hitDateSuffixAppend) {
+          displayText = `${displayText}${hitDateSuffixAppend}`;
+        }
+        width = ctx.measureText(displayText).width;
+      }
+
       const x = (layer.x / 100) * canvas.width;
       const y = (layer.y / 100) * canvas.height;
-      
-      const width = metrics.width;
       const height = layer.fontSize;
       
       let startX = x - width / 2;
@@ -7664,6 +7701,25 @@ export default function App() {
 
                   {selectedLayer.type === 'date' && (
                     <div className="space-y-4 bg-slate-900/30 p-3 rounded-xl border border-slate-800/50">
+                      {!projects.find(p => p.id === currentProjectId)?.isLocked && (
+                        <div>
+                          <label className="text-[10px] uppercase tracking-wider font-bold text-slate-500 block mb-1.5">
+                            Suffix Text (Fixed)
+                          </label>
+                          <input
+                            type="text"
+                            value={selectedLayer.dateSuffix || ""}
+                            placeholder="e.g. වන දින"
+                            onChange={(e) => updateLayer(selectedLayer.id, { dateSuffix: e.target.value })}
+                            className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-sm outline-none focus:ring-1 focus:ring-blue-500"
+                            style={{ fontFamily: `"${selectedLayer.fontFamily}", sans-serif` }}
+                          />
+                          <p className="text-[10px] text-slate-500 mt-1">
+                            Shown after the date using the same font &amp; style.
+                          </p>
+                        </div>
+                      )}
+
                       <div className="flex items-center justify-between">
                         <label className="text-xs font-semibold text-slate-400">Sinhala Month</label>
                         <button

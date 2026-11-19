@@ -36,6 +36,7 @@ export interface TextLayer {
   sinhalaMonthFontSize?: number;
   useSinhalaMonth?: boolean;
   sinhalaMonths?: string[];
+  dateSuffix?: string;
   isBold?: boolean;
   isItalic?: boolean;
   isUnderline?: boolean;
@@ -229,19 +230,26 @@ export function resolveLayerText(
   let monthStr = "";
   let dayStr = "";
 
+  const rawDateSuffix = layer.type === 'date' ? (layer.dateSuffix || "") : "";
+  const dateSuffixAppend = rawDateSuffix.trim() !== ""
+    ? (/^\s/.test(rawDateSuffix) ? rawDateSuffix : ` ${rawDateSuffix}`)
+    : "";
+
   if (layer.type === 'date' && layer.useSinhalaMonth && layer.sinhalaMonths) {
     try {
       const d = new Date(layer.text);
       if (!isNaN(d.getTime())) {
         yearStr = d.getFullYear().toString();
         monthStr = layer.sinhalaMonths[d.getMonth()] || "";
-        dayStr = d.getDate().toString();
+        dayStr = `${d.getDate().toString()}${dateSuffixAppend}`;
         isSinhalaDate = true;
         displayText = `${yearStr} ${monthStr} ${dayStr}`;
       }
     } catch (e) {
       console.error("Failed to format date with Sinhala month", e);
     }
+  } else if (layer.type === 'date' && (layer.text || "").trim() !== "" && dateSuffixAppend) {
+    displayText = `${displayText}${dateSuffixAppend}`;
   }
 
   return { displayText, isSinhalaDate, yearStr, monthStr, dayStr };
@@ -1366,7 +1374,7 @@ export async function renderGroupedLayersOnCanvas(
   // Calculate vertical auto-fit scaling so entries never clip off the bottom edge or overlap lower blessing lines
   const maxFieldFontSize = Math.max(...orderedFieldLayers.map(l => l.fontSize || 32));
   const userFontScale = Math.max(0.4, Math.min(2.0, options.fontScale || 1));
-  const lineGap = Math.max(1.30, Math.min(3.0, options.lineGapScale || 1.55));
+  const lineGap = Math.max(1.30, Math.min(2.0, options.lineGapScale || 1.55));
 
   const priceFieldsForTotal = options.showGroupTotal
     ? orderedFieldLayers.filter(isNumericPriceField)
@@ -1795,7 +1803,7 @@ export async function renderGroupedCardToCanvas(
     const maxFieldFontSize = Math.max(...orderedFieldLayers.map(l => l.fontSize || 32));
     const userFontScale = Math.max(0.4, Math.min(2.0, options.fontScale || 1));
     const baseFS = maxFieldFontSize * userFontScale;
-    const userLineGap = Math.max(1.30, Math.min(3.0, options.lineGapScale || 1.55));
+    const userLineGap = Math.max(1.30, Math.min(2.0, options.lineGapScale || 1.55));
     const userRowStep = baseFS * userLineGap;
     const userSublineGap = baseFS * 1.15;
 
@@ -1936,7 +1944,7 @@ export async function renderGroupedCardToCanvas(
 
         chosenRowStep = Math.max(
           minComfortRowStep,
-          Math.min(baseFS * 2.40, avgPairInk + clampedVisualRowGap)
+          Math.min(baseFS * 2.0, avgPairInk + clampedVisualRowGap)
         );
         chosenSublineGap = Math.max(
           minComfortSubGap,
