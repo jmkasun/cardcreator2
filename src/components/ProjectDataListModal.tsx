@@ -972,6 +972,7 @@ export function ProjectDataListModal({
   const [processingGroupKey, setProcessingGroupKey] = useState<string | null>(null);
   const [previewGroupKey, setPreviewGroupKey] = useState<string | null>(null);
   const [multiRowPreviewTarget, setMultiRowPreviewTarget] = useState<MultiRowPreviewTarget | null>(null);
+  const lastPreviewedGroupKeyRef = useRef<string | null>(null);
   const groupPreviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [isRenderingGroupPreview, setIsRenderingGroupPreview] = useState(false);
   const [groupPreviewInfo, setGroupPreviewInfo] = useState<GroupedRenderResult | null>(null);
@@ -1607,7 +1608,7 @@ export function ProjectDataListModal({
       autoAdjustSpace: typeof rawCfg.autoAdjustSpace === "boolean" ? rawCfg.autoAdjustSpace : DEFAULT_GROUP_CONFIG.autoAdjustSpace,
       autoCenterSpacing: typeof rawCfg.autoCenterSpacing === "boolean" ? rawCfg.autoCenterSpacing : DEFAULT_GROUP_CONFIG.autoCenterSpacing,
       spacePaddingPercent: Math.max(1.5, typeof rawCfg.spacePaddingPercent === "number" ? rawCfg.spacePaddingPercent : DEFAULT_GROUP_CONFIG.spacePaddingPercent),
-      lineGapScale: Math.min(2.0, Math.max(1.30, typeof rawCfg.lineGapScale === "number" ? rawCfg.lineGapScale : DEFAULT_GROUP_CONFIG.lineGapScale)),
+      lineGapScale: Math.min(2.0, Math.max(1.0, typeof rawCfg.lineGapScale === "number" ? rawCfg.lineGapScale : DEFAULT_GROUP_CONFIG.lineGapScale)),
       includeStaticLabels: typeof rawCfg.includeStaticLabels === "boolean" ? rawCfg.includeStaticLabels : DEFAULT_GROUP_CONFIG.includeStaticLabels,
       breakLongLines: typeof rawCfg.breakLongLines === "boolean" ? rawCfg.breakLongLines : DEFAULT_GROUP_CONFIG.breakLongLines,
       imageRules: {
@@ -1678,6 +1679,7 @@ export function ProjectDataListModal({
     setEditingItem(null);
     setPreviewGroupKey(null);
     setMultiRowPreviewTarget(null);
+    lastPreviewedGroupKeyRef.current = null;
     setPreviewSingleItemId(null);
     setShowTemplateManagerModal(false);
     setCustomDefaultImageUrl(null);
@@ -3163,6 +3165,10 @@ export function ProjectDataListModal({
     const title = selectedIds.size > 0
       ? `Selected Records (${targetItems.length})`
       : `${project.name} (${targetItems.length} Records)`;
+    if (lastPreviewedGroupKeyRef.current !== key) {
+      lastPreviewedGroupKeyRef.current = key;
+      setGroupConfig(p => (p.autoCenterSpacing ? p : { ...p, autoCenterSpacing: true }));
+    }
     setMultiRowPreviewTarget({
       key,
       title,
@@ -3172,6 +3178,14 @@ export function ProjectDataListModal({
     });
   };
 
+  const openGroupPreview = (key: string) => {
+    if (lastPreviewedGroupKeyRef.current !== key) {
+      lastPreviewedGroupKeyRef.current = key;
+      setGroupConfig(p => (p.autoCenterSpacing ? p : { ...p, autoCenterSpacing: true }));
+    }
+    setPreviewGroupKey(key);
+  };
+
   // Generate & download or share a combined image for a group or multiple rows
   const handleGroupCardAction = async (
     group: { key: string; rawValue: string; displayValue: string; items: ProjectDataItem[]; groupByLayerId?: string },
@@ -3179,6 +3193,12 @@ export function ProjectDataListModal({
   ) => {
     try {
       setProcessingGroupKey(group.key);
+      const isSwitchingGroup = lastPreviewedGroupKeyRef.current !== group.key;
+      const effectiveAutoCenter = isSwitchingGroup ? true : groupConfig.autoCenterSpacing;
+      if (isSwitchingGroup) {
+        lastPreviewedGroupKeyRef.current = group.key;
+        setGroupConfig(p => (p.autoCenterSpacing ? p : { ...p, autoCenterSpacing: true }));
+      }
       const effectiveGroupBy = group.groupByLayerId ?? groupByLayerId ?? "";
       const selection = resolveGroupOrRowImage({
         items: group.items,
@@ -3221,7 +3241,7 @@ export function ProjectDataListModal({
         totalLabel: groupConfig.totalLabel,
         includeStaticLabels: groupConfig.includeStaticLabels,
         autoAdjustSpace: groupConfig.autoAdjustSpace,
-        autoCenterInAvailableSpace: groupConfig.autoCenterSpacing,
+        autoCenterInAvailableSpace: effectiveAutoCenter,
         spacePaddingPercent: groupConfig.spacePaddingPercent,
         breakLongLines: groupConfig.breakLongLines,
       };
@@ -4500,7 +4520,7 @@ export function ProjectDataListModal({
                 <div className="flex items-center gap-2">
                   {groupedEntries[0] && (
                     <button
-                      onClick={() => setPreviewGroupKey(groupedEntries[0].key)}
+                      onClick={() => openGroupPreview(groupedEntries[0].key)}
                       className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-violet-600/20 hover:bg-violet-600/30 text-violet-200 border border-violet-500/30 font-medium transition-colors"
                     >
                       <SlidersHorizontal size={12} />
@@ -4581,7 +4601,7 @@ export function ProjectDataListModal({
                           {(projectTemplates.length > 0 || groupImgSelection.isManualOverride) && (
                             <button
                               type="button"
-                              onClick={() => setPreviewGroupKey(group.key)}
+                              onClick={() => openGroupPreview(group.key)}
                               className={cn(
                                 "text-[11px] px-2.5 py-0.5 rounded-full border font-medium flex items-center gap-1 transition-colors",
                                 groupImgSelection.isManualOverride
@@ -4613,7 +4633,7 @@ export function ProjectDataListModal({
                         {/* Group Image Actions */}
                         <div className="flex flex-wrap items-center gap-2">
                           <button
-                            onClick={() => setPreviewGroupKey(group.key)}
+                            onClick={() => openGroupPreview(group.key)}
                             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition-colors"
                             title="Preview grouped image and select or customize print image"
                           >
@@ -6682,19 +6702,19 @@ export function ProjectDataListModal({
                         <span className="text-slate-400">Line Spacing</span>
                         <span className="font-mono text-violet-300">
                           {groupPreviewInfo?.autoCentered && groupPreviewInfo.appliedLineGapScale !== undefined
-                            ? `Auto ${Math.min(2.0, Math.max(1.30, groupPreviewInfo.appliedLineGapScale)).toFixed(2)}x`
-                            : `${Math.min(2.0, Math.max(1.30, groupConfig.lineGapScale)).toFixed(2)}x`}
+                            ? `Auto ${Math.min(2.0, Math.max(1.0, groupPreviewInfo.appliedLineGapScale)).toFixed(2)}x`
+                            : `${Math.min(2.0, Math.max(1.0, groupConfig.lineGapScale)).toFixed(2)}x`}
                         </span>
                       </div>
                       <input
                         type="range"
-                        min={1.30}
+                        min={1.0}
                         max={2.0}
                         step={0.05}
                         value={Math.min(
                           2.0,
                           Math.max(
-                            1.30,
+                            1.0,
                             groupPreviewInfo?.autoCentered && groupPreviewInfo.appliedLineGapScale !== undefined
                               ? groupPreviewInfo.appliedLineGapScale
                               : groupConfig.lineGapScale
@@ -6704,7 +6724,7 @@ export function ProjectDataListModal({
                           setGroupConfig(p => ({
                             ...p,
                             autoCenterSpacing: false,
-                            lineGapScale: Math.min(2.0, Math.max(1.30, Number(e.target.value))),
+                            lineGapScale: Math.min(2.0, Math.max(1.0, Number(e.target.value))),
                           }))
                         }
                         className="w-full accent-violet-500"
