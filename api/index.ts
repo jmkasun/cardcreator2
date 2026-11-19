@@ -73,17 +73,34 @@ function getExistingFontDirs(): string[] {
 // Database setup
 const HAS_POSTGRES = !!process.env.DATABASE_URL;
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL?.split('?')[0],
-  ssl: {
-    rejectUnauthorized: false
-  },
-  max: 6,
-  idleTimeoutMillis: 10000,
-  connectionTimeoutMillis: 20000,
-  keepAlive: true,
-  keepAliveInitialDelayMillis: 10000,
-});
+const globalForPool = globalThis as unknown as { __fontAppApiPool?: pg.Pool };
+const pool =
+  globalForPool.__fontAppApiPool ||
+  new Pool({
+    connectionString: process.env.DATABASE_URL?.split('?')[0],
+    ssl: {
+      rejectUnauthorized: false,
+    },
+    max: 1,
+    idleTimeoutMillis: 1500,
+    connectionTimeoutMillis: 15000,
+    allowExitOnIdle: true,
+  });
+if (!globalForPool.__fontAppApiPool) {
+  globalForPool.__fontAppApiPool = pool;
+}
+
+function isSlotExhaustedError(err: any): boolean {
+  const code = String(err?.code || '').toUpperCase();
+  const msg = String(err?.message || '').toLowerCase();
+  return (
+    code === '53300' ||
+    msg.includes('connection slots') ||
+    msg.includes('too many clients') ||
+    msg.includes('max_connections') ||
+    msg.includes('superuser attribute')
+  );
+}
 
 function isTransientDbDisconnect(err: any): boolean {
   const code = String(err?.code || '').toUpperCase();
@@ -92,6 +109,7 @@ function isTransientDbDisconnect(err: any): boolean {
     code === '57P01' ||
     code === '57P02' ||
     code === '57P03' ||
+    code === '53300' ||
     code === '08006' ||
     code === '08003' ||
     code === 'ECONNRESET' ||
@@ -141,24 +159,27 @@ pool.on('error', (err: any) => {
 
 // Helper for resilient DB queries with automatic retry on transient connection/slot errors
 async function safeQuery(text: string, params: any[] = [], retriesValue = 3): Promise<pg.QueryResult<any>> {
-  for (let i = 0; i <= retriesValue; i++) {
+  let effectiveMaxRetries = retriesValue;
+  for (let i = 0; i <= effectiveMaxRetries; i++) {
     try {
       return await pool.query(text, params);
     } catch (err: any) {
-      const errMsg = err.message?.toLowerCase() || '';
+      const errMsg = err?.message?.toLowerCase() || '';
+      const slotBusy = isSlotExhaustedError(err);
+      if (slotBusy && effectiveMaxRetries < 5) {
+        effectiveMaxRetries = 5;
+      }
       const isConnError =
         isTransientDbDisconnect(err) ||
-        errMsg.includes('connection slots') ||
-        errMsg.includes('too many clients') ||
-        errMsg.includes('max_connections') ||
+        slotBusy ||
         errMsg.includes('client is offline') ||
         errMsg.includes('timeout') ||
         errMsg.includes('terminated') ||
         errMsg.includes('econnreset');
 
-      if (isConnError && i < retriesValue) {
-        const delay = 400 * (i + 1) + Math.random() * 400;
-        console.warn(`[DB] Transient error (${errMsg.substring(0, 60)}), retrying in ${Math.round(delay)}ms...`);
+      if (isConnError && i < effectiveMaxRetries) {
+        const baseDelay = slotBusy ? 450 * (i + 1) : 400 * (i + 1);
+        const delay = baseDelay + Math.random() * 350;
         await new Promise(resolve => setTimeout(resolve, delay));
         continue;
       }
@@ -730,6 +751,12 @@ app.post("/api/login", async (req, res) => {
     
     res.status(401).json({ success: false, message: "Invalid username or password" });
   } catch (err) {
+    if (isSlotExhaustedError(err)) {
+      return res.status(503).json({
+        success: false,
+        message: "Database is temporarily busy. Please try logging in again in a moment.",
+      });
+    }
     console.error("Login error:", err);
     res.status(500).json({ success: false, message: "Internal server error" });
   }
@@ -1880,21 +1907,19 @@ app.get("/api/projects/:projectId/data-list", async (req, res) => {
           )`;
         });
 
-        const [rowsRes, countRes] = await Promise.all([
-          safeQuery(
-            `SELECT id, project_id as "projectId", username, row_name as "rowName",
-                    row_values as "rowValues", sort_order as "sortOrder",
-                    created_at as "createdAt", updated_at as "updatedAt"
-             FROM font_app_project_data
-             WHERE project_id = $1 AND (${layerPredicates.join(" OR ")})
-             ORDER BY sort_order ASC, created_at ASC`,
-            params
-          ),
-          safeQuery(
-            `SELECT COUNT(*)::int as total FROM font_app_project_data WHERE project_id = $1`,
-            [projectId]
-          ),
-        ]);
+        const rowsRes = await safeQuery(
+          `SELECT id, project_id as "projectId", username, row_name as "rowName",
+                  row_values as "rowValues", sort_order as "sortOrder",
+                  created_at as "createdAt", updated_at as "updatedAt"
+           FROM font_app_project_data
+           WHERE project_id = $1 AND (${layerPredicates.join(" OR ")})
+           ORDER BY sort_order ASC, created_at ASC`,
+          params
+        );
+        const countRes = await safeQuery(
+          `SELECT COUNT(*)::int as total FROM font_app_project_data WHERE project_id = $1`,
+          [projectId]
+        );
         const sortedRows = sortItemsByDateAscending(rowsRes.rows, dateLayerIds, activeFilterMonthDays);
         return res.json({
           success: true,

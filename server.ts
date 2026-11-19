@@ -78,17 +78,34 @@ if (HAS_POSTGRES) {
   console.log("No remote database configured, falling back to data.json");
 }
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL?.split('?')[0],
-  ssl: {
-    rejectUnauthorized: false
-  },
-  max: 6,
-  idleTimeoutMillis: 10000,
-  connectionTimeoutMillis: 20000,
-  keepAlive: true,
-  keepAliveInitialDelayMillis: 10000,
-});
+const globalForPool = globalThis as unknown as { __fontAppServerPool?: pg.Pool };
+const pool =
+  globalForPool.__fontAppServerPool ||
+  new Pool({
+    connectionString: process.env.DATABASE_URL?.split('?')[0],
+    ssl: {
+      rejectUnauthorized: false,
+    },
+    max: 2,
+    idleTimeoutMillis: 2500,
+    connectionTimeoutMillis: 15000,
+    allowExitOnIdle: true,
+  });
+if (!globalForPool.__fontAppServerPool) {
+  globalForPool.__fontAppServerPool = pool;
+}
+
+function isSlotExhaustedError(err: any): boolean {
+  const code = String(err?.code || '').toUpperCase();
+  const msg = String(err?.message || '').toLowerCase();
+  return (
+    code === '53300' ||
+    msg.includes('connection slots') ||
+    msg.includes('too many clients') ||
+    msg.includes('max_connections') ||
+    msg.includes('superuser attribute')
+  );
+}
 
 function isTransientDbDisconnect(err: any): boolean {
   const code = String(err?.code || '').toUpperCase();
@@ -97,6 +114,7 @@ function isTransientDbDisconnect(err: any): boolean {
     code === '57P01' ||
     code === '57P02' ||
     code === '57P03' ||
+    code === '53300' ||
     code === '08006' ||
     code === '08003' ||
     code === 'ECONNRESET' ||
@@ -135,25 +153,28 @@ function setCachedTemplateImage(id: string, buffer: Buffer, contentType: string)
   projectTemplateImageCache.set(id, { buffer, contentType });
 }
 
-// Helper for self-contained queries with retry logic on connection errors
+// Helper for self-contained queries with retry logic on connection/slot errors
 async function safeQuery(text: string, params: any[] = [], retriesValue = 3): Promise<pg.QueryResult<any>> {
-  for (let i = 0; i <= retriesValue; i++) {
+  let effectiveMaxRetries = retriesValue;
+  for (let i = 0; i <= effectiveMaxRetries; i++) {
     try {
       return await pool.query(text, params);
     } catch (err: any) {
-      const errMsg = err.message?.toLowerCase() || '';
+      const errMsg = err?.message?.toLowerCase() || '';
+      const slotBusy = isSlotExhaustedError(err);
+      if (slotBusy && effectiveMaxRetries < 5) {
+        effectiveMaxRetries = 5;
+      }
       const isConnError =
         isTransientDbDisconnect(err) ||
-        errMsg.includes('connection slots') ||
-        errMsg.includes('too many clients') ||
-        errMsg.includes('max_connections') ||
+        slotBusy ||
         errMsg.includes('client is offline') ||
         errMsg.includes('timeout') ||
         errMsg.includes('terminated');
-      
-      if (isConnError && i < retriesValue) {
-        const delay = 500 * (i + 1) + Math.random() * 500; // Increased delay with jitter
-        console.warn(`[DB] Connection error (${errMsg.substring(0, 50)}...), retrying in ${Math.round(delay)}ms... (Attempt ${i+1}/${retriesValue})`);
+
+      if (isConnError && i < effectiveMaxRetries) {
+        const baseDelay = slotBusy ? 450 * (i + 1) : 400 * (i + 1);
+        const delay = baseDelay + Math.random() * 350;
         await new Promise(resolve => setTimeout(resolve, delay));
         continue;
       }
@@ -790,6 +811,12 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
       
       return res.status(401).json({ success: false, message: "Invalid username or password" });
     } catch (err) {
+      if (isSlotExhaustedError(err)) {
+        return res.status(503).json({
+          success: false,
+          message: "Database is temporarily busy. Please try logging in again in a moment.",
+        });
+      }
       console.error("Login route exception:", err instanceof Error ? err.message : String(err));
       res.status(500).json({ success: false, message: "Internal server error" });
     }
@@ -1853,21 +1880,19 @@ cachedLocalFontFiles = null;
             )`;
           });
 
-          const [rowsRes, countRes] = await Promise.all([
-            safeQuery(
-              `SELECT id, project_id as "projectId", username, row_name as "rowName",
-                      row_values as "rowValues", sort_order as "sortOrder",
-                      created_at as "createdAt", updated_at as "updatedAt"
-               FROM font_app_project_data
-               WHERE project_id = $1 AND (${layerPredicates.join(" OR ")})
-               ORDER BY sort_order ASC, created_at ASC`,
-              params
-            ),
-            safeQuery(
-              `SELECT COUNT(*)::int as total FROM font_app_project_data WHERE project_id = $1`,
-              [projectId]
-            ),
-          ]);
+          const rowsRes = await safeQuery(
+            `SELECT id, project_id as "projectId", username, row_name as "rowName",
+                    row_values as "rowValues", sort_order as "sortOrder",
+                    created_at as "createdAt", updated_at as "updatedAt"
+             FROM font_app_project_data
+             WHERE project_id = $1 AND (${layerPredicates.join(" OR ")})
+             ORDER BY sort_order ASC, created_at ASC`,
+            params
+          );
+          const countRes = await safeQuery(
+            `SELECT COUNT(*)::int as total FROM font_app_project_data WHERE project_id = $1`,
+            [projectId]
+          );
           const sortedRows = sortItemsByDateAscending(rowsRes.rows, dateLayerIds, activeFilterMonthDays);
           return res.json({
             success: true,
