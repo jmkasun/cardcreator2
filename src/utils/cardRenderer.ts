@@ -1942,9 +1942,10 @@ export async function renderGroupedCardToCanvas(
         const maxVisualRowGap = Math.max(minVisualRowGap, baseFS * 1.35);
         const clampedVisualRowGap = Math.max(minVisualRowGap, Math.min(maxVisualRowGap, targetVisualRowGap));
 
+        const autoMaxLineGapScale = options.items.length >= 3 ? 1.6 : 2.0;
         chosenRowStep = Math.max(
           minComfortRowStep,
-          Math.min(baseFS * 2.0, avgPairInk + clampedVisualRowGap)
+          Math.min(baseFS * autoMaxLineGapScale, avgPairInk + clampedVisualRowGap)
         );
         chosenSublineGap = Math.max(
           minComfortSubGap,
@@ -2150,6 +2151,10 @@ export async function renderGroupedCardToCanvas(
             finalSublineGap = minSublineStep * fitRatio;
           }
         }
+      }
+
+      if (allowAutoCenter && options.items.length >= 3) {
+        finalRowStep = Math.min(finalRowStep, maxFieldFontSize * finalFontScale * 1.8);
       }
 
       const scaleFactor = finalFontScale / Math.max(0.01, userFontScale);
