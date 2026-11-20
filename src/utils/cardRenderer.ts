@@ -1374,7 +1374,7 @@ export async function renderGroupedLayersOnCanvas(
   // Calculate vertical auto-fit scaling so entries never clip off the bottom edge or overlap lower blessing lines
   const maxFieldFontSize = Math.max(...orderedFieldLayers.map(l => l.fontSize || 32));
   const userFontScale = Math.max(0.4, Math.min(2.0, options.fontScale || 1));
-  const lineGap = Math.max(1.0, Math.min(2.0, options.lineGapScale || 1.55));
+  const lineGap = Math.max(1.2, Math.min(2.0, options.lineGapScale || 1.55));
 
   const priceFieldsForTotal = options.showGroupTotal
     ? orderedFieldLayers.filter(isNumericPriceField)
@@ -1429,7 +1429,7 @@ export async function renderGroupedLayersOnCanvas(
 
       if (desiredCenterSpan > allowedCenterSpan) {
         // First compress inter-row and subline spacing slightly before shrinking font size
-        const minRowStep = maxFieldFontSize * userFontScale * Math.min(lineGap, 1.0);
+        const minRowStep = maxFieldFontSize * userFontScale * Math.min(lineGap, 1.2);
         const minSublineStep = maxFieldFontSize * userFontScale * 1.05;
         const minSpacingSpan = sublineStepsCount * minSublineStep + itemStepsCount * minRowStep;
 
@@ -1803,7 +1803,7 @@ export async function renderGroupedCardToCanvas(
     const maxFieldFontSize = Math.max(...orderedFieldLayers.map(l => l.fontSize || 32));
     const userFontScale = Math.max(0.4, Math.min(2.0, options.fontScale || 1));
     const baseFS = maxFieldFontSize * userFontScale;
-    const userLineGap = Math.max(1.0, Math.min(2.0, options.lineGapScale || 1.55));
+    const userLineGap = Math.max(1.2, Math.min(2.0, options.lineGapScale || 1.55));
     const userRowStep = baseFS * userLineGap;
     const userSublineGap = baseFS * 1.15;
 
@@ -1812,7 +1812,7 @@ export async function renderGroupedCardToCanvas(
       : [];
     const hasTotalRow = options.showGroupTotal && priceFieldsForTotal.length > 0;
 
-    const clampedPadPercent = Math.max(1.5, options.spacePaddingPercent ?? 2.0);
+    const clampedPadPercent = Math.max(1.2, options.spacePaddingPercent ?? 2.0);
     const userPadPx = Math.round(Math.max(6, (clampedPadPercent / 100) * bgH));
 
     // Measure exact visual ink ascent/descent for every line to guarantee true visual centering
@@ -1913,8 +1913,8 @@ export async function renderGroupedCardToCanvas(
 
     const G = detectedGap.origHeight;
     const allowAutoCenter = options.autoCenterInAvailableSpace !== false;
-    const minComfortPad = Math.max(6, Math.round(bgH * 0.015));
-    const minComfortRowStep = baseFS * 1.0;
+    const minComfortPad = Math.max(6, Math.round(bgH * 0.012));
+    const minComfortRowStep = baseFS * 1.2;
     const minComfortSubGap = baseFS * 1.05;
     const minFitCenterSpan = sublineStepsCount * minComfortSubGap + itemStepsCount * minComfortRowStep;
     const minFitHeight = line1Ascent + minFitCenterSpan + lastLineDescent + minComfortPad * 2;
@@ -2126,7 +2126,7 @@ export async function renderGroupedCardToCanvas(
       let finalFontScale = userFontScale;
       let finalRowStep = userRowStep;
       let finalSublineGap = userSublineGap;
-      const minEffectivePad = Math.max(6, Math.round(bgH * 0.015));
+      const minEffectivePad = Math.max(6, Math.round(bgH * 0.012));
       const maxAllowedSpan = Math.max(8, newMainHeight - minEffectivePad * 2 - line1Ascent - lastLineDescent);
 
       if (userCenterSpan > maxAllowedSpan) {
@@ -2135,7 +2135,7 @@ export async function renderGroupedCardToCanvas(
           finalFontScale = userFontScale * fitRatio;
           finalRowStep = userRowStep * fitRatio;
         } else {
-          const minRowStep = baseFS * Math.min(userLineGap, 1.0);
+          const minRowStep = baseFS * Math.min(userLineGap, 1.2);
           const minSublineStep = baseFS * 1.05;
           const minSpacingSpan = sublineStepsCount * minSublineStep + itemStepsCount * minRowStep;
 
