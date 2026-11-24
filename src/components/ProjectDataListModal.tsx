@@ -5,7 +5,7 @@ import {
   RefreshCw, Layers, Share2, CheckCircle2, Save,
   Wand2, Copy, ChevronRight, LayoutList, SlidersHorizontal,
   Eye, AlignLeft, AlignCenter, AlignRight, ArrowUp, ArrowDown,
-  Image as ImageIcon, Check, ChevronDown, ChevronUp, Sparkles, Printer, Calendar, Globe, Lock, Tags
+  Image as ImageIcon, Check, ChevronDown, ChevronUp, Sparkles, Printer, Calendar, Globe, Lock, Tags, MoreVertical, Coins
 } from "lucide-react";
 import {
   TextLayer, Font, prepareLayersForRow, generateCardBlob, loadImage,
@@ -989,6 +989,8 @@ export function ProjectDataListModal({
   const [customDefaultImageUrl, setCustomDefaultImageUrl] = useState<string | null>(null);
   const [showTemplateManagerModal, setShowTemplateManagerModal] = useState(false);
   const [showRulesInPreview, setShowRulesInPreview] = useState(false);
+  const [showDataToolbarMenu, setShowDataToolbarMenu] = useState(false);
+  const dataToolbarMenuRef = useRef<HTMLDivElement | null>(null);
   const [previewSingleItemId, setPreviewSingleItemId] = useState<string | null>(null);
   const singlePreviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [isRenderingSinglePreview, setIsRenderingSinglePreview] = useState(false);
@@ -996,6 +998,24 @@ export function ProjectDataListModal({
   const pendingUploadRoleRef = useRef<"male" | "female" | "multiple" | "fallback" | "manualGroup" | "manualSingle" | "replaceDefault" | "replaceTemplate" | null>(null);
   const pendingReplaceTemplateRef = useRef<ProjectTemplateImage | null>(null);
   const loadedImagesMapRef = useRef<Map<string, HTMLImageElement>>(new Map());
+
+  useEffect(() => {
+    if (!showDataToolbarMenu) return;
+    const handleDocMouseDown = (ev: MouseEvent) => {
+      if (dataToolbarMenuRef.current && !dataToolbarMenuRef.current.contains(ev.target as Node)) {
+        setShowDataToolbarMenu(false);
+      }
+    };
+    const handleKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") setShowDataToolbarMenu(false);
+    };
+    document.addEventListener("mousedown", handleDocMouseDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handleDocMouseDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [showDataToolbarMenu]);
 
   const effectiveDefaultImageUrl = customDefaultImageUrl || image;
 
@@ -1682,6 +1702,7 @@ export function ProjectDataListModal({
     lastPreviewedGroupKeyRef.current = null;
     setPreviewSingleItemId(null);
     setShowTemplateManagerModal(false);
+    setShowDataToolbarMenu(false);
     setCustomDefaultImageUrl(null);
     setReplacingTargetId(null);
 
@@ -1902,6 +1923,33 @@ export function ProjectDataListModal({
     });
     return map;
   }, [activeLayers, filteredItems]);
+
+  const priceTotalEntries = useMemo(
+    () =>
+      Object.keys(priceTotals).map(layerId => ({
+        layerId,
+        label: priceTotals[layerId].label,
+        total: priceTotals[layerId].total,
+      })),
+    [priceTotals]
+  );
+
+  const selectedPriceTotals = useMemo(() => {
+    if (selectedIds.size === 0) return {};
+    const map: Record<string, number> = {};
+    activeLayers.forEach(layer => {
+      if (isPriceLayer(layer)) {
+        let sum = 0;
+        filteredItems.forEach(item => {
+          if (selectedIds.has(item.id)) {
+            sum += parsePriceValue(item.rowValues?.[layer.id]);
+          }
+        });
+        map[layer.id] = sum;
+      }
+    });
+    return map;
+  }, [activeLayers, filteredItems, selectedIds]);
 
   // Grouped entries when groupByLayerId is active
   const groupedEntries = useMemo(() => {
@@ -4015,54 +4063,120 @@ export function ProjectDataListModal({
               <span>Add Data</span>
             </button>
 
-            {/* Import JSON / CSV */}
-            <label className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 font-semibold cursor-pointer transition-colors">
-              <Upload size={14} className="text-emerald-400" />
-              <span>Import JSON / CSV</span>
-              <input
-                ref={importFileInputRef}
-                type="file"
-                accept=".json,.csv,.tsv,.txt"
-                onChange={handleImportFileChange}
-                className="hidden"
-              />
-            </label>
+            {/* Hidden file input kept mounted for both kebab menu and empty-state import button */}
+            <input
+              ref={importFileInputRef}
+              type="file"
+              accept=".json,.csv,.tsv,.txt"
+              onChange={handleImportFileChange}
+              className="hidden"
+            />
 
-            {/* Load from API */}
-            <button
-              type="button"
-              onClick={openApiImportModal}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-600/20 hover:bg-sky-600/30 text-sky-300 border border-sky-500/30 font-semibold transition-colors"
-              title="Call a JSON API from your browser and map returned fields to project fields"
-            >
-              <Globe size={14} className="text-sky-400" />
-              <span>Load from API</span>
-            </button>
+            {/* Kebab Menu: Import JSON / CSV, Load from API, Export CSV / JSON, Clear All */}
+            <div className="relative" ref={dataToolbarMenuRef}>
+              <button
+                type="button"
+                onClick={() => setShowDataToolbarMenu(prev => !prev)}
+                className={cn(
+                  "flex items-center justify-center p-1.5 rounded-lg border transition-colors",
+                  showDataToolbarMenu
+                    ? "bg-slate-800 border-slate-600 text-white"
+                    : "bg-slate-900 hover:bg-slate-800 border-slate-700/80 text-slate-300 hover:text-white"
+                )}
+                title="Data import, export & clear options"
+                aria-expanded={showDataToolbarMenu}
+                aria-haspopup="menu"
+              >
+                <MoreVertical size={15} />
+              </button>
 
-            {/* Export Dropdown Buttons */}
-            <div className="flex items-center rounded-lg bg-slate-800 border border-slate-700 p-0.5">
-              <button
-                onClick={() => handleExportList("csv")}
-                disabled={items.length === 0}
-                className="flex items-center gap-1 px-2 py-1 text-slate-300 hover:text-white hover:bg-slate-700/60 rounded disabled:opacity-40"
-                title="Export saved data as CSV"
-              >
-                <FileSpreadsheet size={13} className="text-emerald-400" />
-                <span>CSV</span>
-              </button>
-              <span className="text-slate-700">|</span>
-              <button
-                onClick={() => handleExportList("json")}
-                disabled={items.length === 0}
-                className="flex items-center gap-1 px-2 py-1 text-slate-300 hover:text-white hover:bg-slate-700/60 rounded disabled:opacity-40"
-                title="Export saved data as JSON"
-              >
-                <FileJson size={13} className="text-amber-400" />
-                <span>JSON</span>
-              </button>
+              {showDataToolbarMenu && (
+                <div
+                  role="menu"
+                  className="absolute left-0 top-full mt-1.5 w-52 rounded-xl bg-slate-900 border border-slate-700/90 shadow-2xl py-1.5 z-40"
+                >
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setShowDataToolbarMenu(false);
+                      importFileInputRef.current?.click();
+                    }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-xs font-medium text-emerald-300 hover:bg-slate-800 transition-colors"
+                  >
+                    <Upload size={14} className="text-emerald-400 shrink-0" />
+                    <span>Import JSON / CSV</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setShowDataToolbarMenu(false);
+                      openApiImportModal();
+                    }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-xs font-medium text-sky-300 hover:bg-slate-800 transition-colors"
+                  >
+                    <Globe size={14} className="text-sky-400 shrink-0" />
+                    <span>Load from API</span>
+                  </button>
+
+                  <div className="my-1 border-t border-slate-800" />
+
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={items.length === 0}
+                    onClick={() => {
+                      setShowDataToolbarMenu(false);
+                      handleExportList("csv");
+                    }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-xs font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <FileSpreadsheet size={14} className="text-emerald-400 shrink-0" />
+                    <span>Export CSV</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={items.length === 0}
+                    onClick={() => {
+                      setShowDataToolbarMenu(false);
+                      handleExportList("json");
+                    }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-xs font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <FileJson size={14} className="text-amber-400 shrink-0" />
+                    <span>Export JSON</span>
+                  </button>
+
+                  {(items.length > 0 || totalRecordCount > 0) && (
+                    <>
+                      <div className="my-1 border-t border-slate-800" />
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setShowDataToolbarMenu(false);
+                          handleBulkDelete(true);
+                        }}
+                        className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-xs font-medium text-rose-400 hover:bg-rose-500/15 transition-colors"
+                      >
+                        <Trash2 size={14} className="shrink-0" />
+                        <span>
+                          {isDateFiltered && totalRecordCount > items.length
+                            ? `Clear All (${totalRecordCount})`
+                            : "Clear All"}
+                        </span>
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
 
-            {/* Delete Selected / Clear All */}
+            {/* Delete Selected (shown when rows are checked) */}
             {selectedIds.size > 0 && (
               <button
                 onClick={() => handleBulkDelete(false)}
@@ -4070,22 +4184,6 @@ export function ProjectDataListModal({
               >
                 <Trash2 size={13} />
                 <span>Delete Selected ({selectedIds.size})</span>
-              </button>
-            )}
-
-            {(items.length > 0 || totalRecordCount > 0) && selectedIds.size === 0 && (
-              <button
-                type="button"
-                onClick={() => handleBulkDelete(true)}
-                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/20 font-medium transition-colors"
-                title="Clear all saved records for this project"
-              >
-                <Trash2 size={13} />
-                <span>
-                  {isDateFiltered && totalRecordCount > items.length
-                    ? `Clear All (${totalRecordCount})`
-                    : "Clear All"}
-                </span>
               </button>
             )}
           </div>
@@ -4516,6 +4614,17 @@ export function ProjectDataListModal({
                     <strong className="text-white">{groupedEntries.length}</strong>{" "}
                     {groupedEntries.length === 1 ? "group" : "groups"} ({filteredItems.length} total entries)
                   </span>
+                  {priceTotalEntries.map(pt => (
+                    <span
+                      key={pt.layerId}
+                      className="inline-flex items-center gap-1 text-xs px-2.5 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30 font-mono font-bold"
+                    >
+                      <Coins size={11} className="shrink-0" />
+                      <span>
+                        Total{priceTotalEntries.length > 1 ? ` (${pt.label})` : ""}: {formatPriceNumber(pt.total)}
+                      </span>
+                    </span>
+                  ))}
                 </div>
                 <div className="flex items-center gap-2">
                   {groupedEntries[0] && (
@@ -5010,13 +5119,53 @@ export function ProjectDataListModal({
                   </tr>
                 )}
               </tbody>
+              {priceTotalEntries.length > 0 && filteredItems.length > 0 && (
+                <tfoot className="sticky bottom-0 z-10 bg-slate-950/95 backdrop-blur-sm border-t-2 border-amber-500/30 text-xs shadow-sm">
+                  <tr>
+                    <td className="px-2.5 py-2.5 border-r border-slate-800/60" />
+                    <td className="px-2 py-2.5 border-r border-slate-800/60" />
+                    <td className="px-3 py-2.5 font-bold text-amber-300 border-r border-slate-800/60 uppercase tracking-wider text-[11px]">
+                      Total
+                    </td>
+                    {activeLayers.map(layer => {
+                      const stat = priceTotals[layer.id];
+                      const selTotal = selectedPriceTotals[layer.id];
+                      return (
+                        <td
+                          key={layer.id}
+                          className={cn(
+                            "px-3 py-2.5 border-r border-slate-800/60 font-mono",
+                            stat ? "bg-amber-500/[0.06] text-amber-300 font-bold" : "text-slate-600"
+                          )}
+                        >
+                          {stat ? (
+                            <div className="flex flex-col">
+                              <span>{formatPriceNumber(stat.total)}</span>
+                              {selectedIds.size > 0 && selTotal !== undefined && (
+                                <span className="text-[10px] text-emerald-300 font-normal">
+                                  Selected: {formatPriceNumber(selTotal)}
+                                </span>
+                              )}
+                            </div>
+                          ) : (
+                            "—"
+                          )}
+                        </td>
+                      );
+                    })}
+                    <td className="px-3 py-2.5 text-center text-[11px] text-slate-400">
+                      {filteredItems.length} {filteredItems.length === 1 ? "row" : "rows"}
+                    </td>
+                  </tr>
+                </tfoot>
+              )}
             </table>
           )}
         </div>
 
         {/* Footer Info */}
         <div className="px-4 sm:px-6 py-2.5 border-t border-slate-800 bg-slate-950 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400 shrink-0">
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <span>
               Showing <strong className="text-slate-200">{filteredItems.length}</strong> of{" "}
               <strong className="text-slate-200">
@@ -5026,8 +5175,29 @@ export function ProjectDataListModal({
               </strong>{" "}
               {liveApiSourceItems !== null ? "live API records" : "database records"}
             </span>
-            <span className="hidden sm:inline text-slate-600">•</span>
-            <span className="hidden sm:inline text-slate-500">
+            {priceTotalEntries.length > 0 && (
+              <div className="flex flex-wrap items-center gap-2">
+                {priceTotalEntries.map(pt => {
+                  const selTotal = selectedPriceTotals[pt.layerId];
+                  return (
+                    <span
+                      key={pt.layerId}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30 font-mono font-bold text-[11px]"
+                    >
+                      <Coins size={11} className="shrink-0" />
+                      <span>
+                        Total{priceTotalEntries.length > 1 ? ` (${pt.label})` : ""}: {formatPriceNumber(pt.total)}
+                        {selectedIds.size > 0 && selTotal !== undefined
+                          ? ` • Selected: ${formatPriceNumber(selTotal)}`
+                          : ""}
+                      </span>
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+            <span className="hidden md:inline text-slate-600">•</span>
+            <span className="hidden md:inline text-slate-500">
               Tip: Click any cell to quick-edit, or click the green check icon to load a row directly onto the canvas.
             </span>
           </div>

@@ -19,19 +19,25 @@ import { cn } from "../lib/utils";
 export function isPriceLayer(layer?: Partial<TextLayer> | null): boolean {
   if (!layer) return false;
   if (layer.type === 'number') return true;
-  // Ignore linked words labels or list labels
-  if (layer.isNumberLabel || layer.isListLabel) return false;
+  // Ignore linked words labels, list labels, or dates
+  if (layer.isNumberLabel || layer.isListLabel || layer.type === 'date' || layer.type === 'list') return false;
   const nameLower = (layer.name || '').toLowerCase().trim();
   return (
     nameLower.includes('price') || 
     nameLower.includes('මුදල') || 
     nameLower.includes('ගාස්තුව') || 
     nameLower.includes('මිල') || 
+    nameLower.includes('ගණන') ||
     nameLower.includes('amount') || 
     nameLower.includes('cost') || 
     nameLower.includes('fee') ||
     nameLower.includes('rate') ||
-    nameLower.includes('tag')
+    nameLower.includes('tag') ||
+    nameLower.includes('total') ||
+    nameLower.includes('lkr') ||
+    nameLower.includes('rupee') ||
+    nameLower.includes('donation') ||
+    /\brs\b/.test(nameLower)
   );
 }
 
@@ -40,13 +46,14 @@ export function isPriceLayer(layer?: Partial<TextLayer> | null): boolean {
  */
 export function parsePriceValue(val: any): number {
   if (val === undefined || val === null) return 0;
-  const str = String(val).trim();
-  if (!str) return 0;
-  const cleaned = str
-    .replace(/[RsrsLKRlkr\$\/\=\-]/g, "")
+  const str = String(val)
+    .replace(/(\/[-=]|\$[-=])\s*$/g, "")
     .replace(/,/g, "")
     .trim();
-  const num = parseFloat(cleaned);
+  if (!str) return 0;
+  const match = str.match(/-?\d+(?:\.\d+)?/);
+  if (!match) return 0;
+  const num = parseFloat(match[0]);
   return isNaN(num) ? 0 : num;
 }
 
