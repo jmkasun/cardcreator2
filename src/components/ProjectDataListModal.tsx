@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   X, Plus, Trash2, Edit2, Upload, Download, FileSpreadsheet, FileJson,
   Database, Search, ArrowRight, ArrowLeft, ArrowLeftRight,
-  RefreshCw, Layers, Share2, CheckCircle2, Save,
+  RefreshCw, Share2, CheckCircle2, Save,
   Wand2, Copy, ChevronRight, LayoutList, SlidersHorizontal,
   Eye, AlignLeft, AlignCenter, AlignRight, ArrowUp, ArrowDown,
   Image as ImageIcon, Check, ChevronDown, ChevronUp, Sparkles, Printer, Calendar, Globe, Lock, Tags, MoreVertical, Coins
@@ -13,7 +13,7 @@ import {
   ensurePngBlobForClipboard
 } from "../utils/cardRenderer";
 import { convertNumberToSinhala } from "../utils/sinhalaConverter";
-import { isPriceLayer, parsePriceValue, formatPriceNumber } from "./BulkImageCreatorModal";
+import { isPriceLayer, parsePriceValue, formatPriceNumber } from "../utils/priceUtils";
 import { cn } from "../lib/utils";
 
 export interface ProjectDataItem {
@@ -45,7 +45,6 @@ interface ProjectDataListModalProps {
   fonts: Font[];
   user: { username: string; role: 'admin' | 'user' } | null;
   onApplyRowToCanvas: (rowValues: Record<string, string>) => void;
-  onOpenInBulkCreator: (rows: Array<{ id: string; name: string; values: Record<string, string> }>) => void;
   onRecordCreationEvents: (count: number, type?: 'copy' | 'download' | 'share') => Promise<void>;
   onNotification: (notif: { message: string; type: 'success' | 'error' | 'info' }) => void;
   onDefaultImageUpdated?: (projectId: string, newImageUrl: string) => void;
@@ -860,7 +859,6 @@ export function ProjectDataListModal({
   fonts,
   user,
   onApplyRowToCanvas,
-  onOpenInBulkCreator,
   onRecordCreationEvents,
   onNotification,
   onDefaultImageUpdated,
@@ -950,8 +948,16 @@ export function ProjectDataListModal({
   const [apiReauthError, setApiReauthError] = useState<string | null>(null);
   const [isReauthingApi, setIsReauthingApi] = useState(false);
 
-  // Row image generation / share state
+  // Row image generation / share / copy state
   const [processingRowId, setProcessingRowId] = useState<string | null>(null);
+  const [processingRowAction, setProcessingRowAction] = useState<"download" | "share" | "copy" | null>(null);
+  const [openRowMenu, setOpenRowMenu] = useState<{
+    item: ProjectDataItem;
+    idx: number;
+    top: number;
+    left: number;
+    openUpward: boolean;
+  } | null>(null);
   const [shareTargetCard, setShareTargetCard] = useState<{
     name: string;
     filename: string;
@@ -1016,6 +1022,45 @@ export function ProjectDataListModal({
       document.removeEventListener("keydown", handleKeyDown);
     };
   }, [showDataToolbarMenu]);
+
+  useEffect(() => {
+    if (!openRowMenu) return;
+    const handleDocMouseDown = (ev: MouseEvent) => {
+      const target = ev.target as HTMLElement | null;
+      if (target?.closest("[data-row-kebab-menu]") || target?.closest("[data-row-kebab-trigger]")) {
+        return;
+      }
+      setOpenRowMenu(null);
+    };
+    const handleKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") setOpenRowMenu(null);
+    };
+    const handleResize = () => setOpenRowMenu(null);
+    document.addEventListener("mousedown", handleDocMouseDown);
+    document.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("resize", handleResize);
+    return () => {
+      document.removeEventListener("mousedown", handleDocMouseDown);
+      document.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("resize", handleResize);
+    };
+  }, [openRowMenu]);
+
+  const toggleRowKebabMenu = (e: React.MouseEvent<HTMLButtonElement>, item: ProjectDataItem, idx: number) => {
+    e.stopPropagation();
+    if (openRowMenu?.item.id === item.id) {
+      setOpenRowMenu(null);
+      return;
+    }
+    const rect = e.currentTarget.getBoundingClientRect();
+    const menuHeightEstimate = 185;
+    const openUpward =
+      window.innerHeight - rect.bottom < menuHeightEstimate + 16 && rect.top > menuHeightEstimate;
+    const menuWidth = 204;
+    const left = Math.max(8, Math.min(rect.right - menuWidth, window.innerWidth - menuWidth - 8));
+    const top = openUpward ? rect.top - 6 : rect.bottom + 6;
+    setOpenRowMenu({ item, idx, top, left, openUpward });
+  };
 
   const effectiveDefaultImageUrl = customDefaultImageUrl || image;
 
@@ -3097,10 +3142,14 @@ export function ProjectDataListModal({
     onNotification({ message: `Exported ${targetList.length} records as ${format.toUpperCase()}`, type: "success" });
   };
 
-  // Generate & download or share a single row image directly
-  const handleRowCardAction = async (item: ProjectDataItem, idx: number, action: "download" | "share") => {
-    try {
-      setProcessingRowId(item.id);
+  // Generate & download, share, or copy a single row image directly
+  const handleRowCardAction = async (
+    item: ProjectDataItem,
+    idx: number,
+    action: "download" | "share" | "copy"
+  ) => {
+    const cardTitle = item.rowName?.trim() || `${project.name}_${idx + 1}`;
+    const buildRowCardBlob = async () => {
       const selection = resolveGroupOrRowImage({
         items: [item],
         overrideKey: `row_${item.id}`,
@@ -3111,10 +3160,50 @@ export function ProjectDataListModal({
         defaultImageUrl: effectiveDefaultImageUrl,
       });
       const img = await getLoadedImageForUrl(selection.url);
-      const cardTitle = item.rowName?.trim() || `${project.name}_${idx + 1}`;
-      const safeFilename = `${String(idx + 1).padStart(2, "0")}_${cardTitle.replace(/[^a-zA-Z0-9_\u0D80-\u0DFF-]/g, "_")}.jpg`;
       const rowLayers = prepareLayersForRow(activeLayers, item.rowValues || {});
       const blob = await generateCardBlob(img, rowLayers, fonts);
+      return { blob, selection };
+    };
+
+    if (action === "copy") {
+      if (!navigator.clipboard || !(window as any).ClipboardItem) {
+        onNotification({ message: "Clipboard image copy is not supported in this browser", type: "error" });
+        return;
+      }
+      try {
+        setProcessingRowId(item.id);
+        setProcessingRowAction("copy");
+        const pngPromise = (async () => {
+          const { blob } = await buildRowCardBlob();
+          return await ensurePngBlobForClipboard(blob);
+        })();
+        try {
+          await navigator.clipboard.write([
+            new (window as any).ClipboardItem({ "image/png": pngPromise }),
+          ]);
+        } catch {
+          const pngBlob = await pngPromise;
+          await navigator.clipboard.write([
+            new (window as any).ClipboardItem({ "image/png": pngBlob }),
+          ]);
+        }
+        onRecordCreationEvents(1, "copy").catch(() => {});
+        onNotification({ message: `Copied "${cardTitle}" card image to clipboard!`, type: "success" });
+      } catch (err) {
+        console.error("Card copy failed:", err);
+        onNotification({ message: "Could not copy image to clipboard in this browser", type: "error" });
+      } finally {
+        setProcessingRowId(null);
+        setProcessingRowAction(null);
+      }
+      return;
+    }
+
+    try {
+      setProcessingRowId(item.id);
+      setProcessingRowAction(action);
+      const { blob, selection } = await buildRowCardBlob();
+      const safeFilename = `${String(idx + 1).padStart(2, "0")}_${cardTitle.replace(/[^a-zA-Z0-9_\u0D80-\u0DFF-]/g, "_")}.jpg`;
       const dataUrl = URL.createObjectURL(blob);
 
       if (action === "download") {
@@ -3150,6 +3239,7 @@ export function ProjectDataListModal({
       onNotification({ message: "Failed to generate card image", type: "error" });
     } finally {
       setProcessingRowId(null);
+      setProcessingRowAction(null);
     }
   };
 
@@ -3587,21 +3677,6 @@ export function ProjectDataListModal({
       list[target] = tmp;
       return { ...prev, includedFieldIds: list };
     });
-  };
-
-  // Send selected or all rows to BulkImageCreatorModal
-  const handleSendToBulkCreator = () => {
-    const targetList = selectedIds.size > 0 ? items.filter(i => selectedIds.has(i.id)) : items;
-    if (targetList.length === 0) {
-      onNotification({ message: "No saved records to send to Bulk Creator", type: "info" });
-      return;
-    }
-    const bulkRows = targetList.map((item, idx) => ({
-      id: `row_${Date.now()}_${idx}`,
-      name: item.rowName || `${project.name} ${idx + 1}`,
-      values: { ...(item.rowValues || {}) },
-    }));
-    onOpenInBulkCreator(bulkRows);
   };
 
   const toggleSelectAll = () => {
@@ -4083,7 +4158,7 @@ export function ProjectDataListModal({
                     ? "bg-slate-800 border-slate-600 text-white"
                     : "bg-slate-900 hover:bg-slate-800 border-slate-700/80 text-slate-300 hover:text-white"
                 )}
-                title="Data import, export & clear options"
+                title="Template images, data import, export & clear options"
                 aria-expanded={showDataToolbarMenu}
                 aria-haspopup="menu"
               >
@@ -4093,8 +4168,28 @@ export function ProjectDataListModal({
               {showDataToolbarMenu && (
                 <div
                   role="menu"
-                  className="absolute left-0 top-full mt-1.5 w-52 rounded-xl bg-slate-900 border border-slate-700/90 shadow-2xl py-1.5 z-40"
+                  className="absolute left-0 top-full mt-1.5 w-56 rounded-xl bg-slate-900 border border-slate-700/90 shadow-2xl py-1.5 z-40"
                 >
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setShowDataToolbarMenu(false);
+                      setShowTemplateManagerModal(true);
+                    }}
+                    className="w-full flex items-center justify-between gap-2.5 px-3 py-2 text-left text-xs font-medium text-sky-300 hover:bg-slate-800 transition-colors"
+                  >
+                    <span className="flex items-center gap-2.5">
+                      <ImageIcon size={14} className="text-sky-400 shrink-0" />
+                      <span>Template Images</span>
+                    </span>
+                    <span className="px-1.5 py-0.2 rounded-full bg-sky-500/25 text-sky-200 text-[10px] font-mono">
+                      {projectTemplates.length + 1}
+                    </span>
+                  </button>
+
+                  <div className="my-1 border-t border-slate-800" />
+
                   <button
                     type="button"
                     role="menuitem"
@@ -4189,20 +4284,6 @@ export function ProjectDataListModal({
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            {/* Project Template Images & Rules */}
-            <button
-              type="button"
-              onClick={() => setShowTemplateManagerModal(true)}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-sky-600/15 hover:bg-sky-600/25 text-sky-300 border border-sky-500/30 font-semibold transition-colors"
-              title="Upload extra background images & set automatic rules (1 row Male / 1 row Female / Multiple rows)"
-            >
-              <ImageIcon size={13} className="text-sky-400" />
-              <span>Template Images</span>
-              <span className="px-1.5 py-0.2 rounded-full bg-sky-500/25 text-sky-200 text-[10px] font-mono">
-                {projectTemplates.length + 1}
-              </span>
-            </button>
-
             {/* Group By Selector */}
             <div className="flex items-center gap-1.5 bg-slate-900 border border-slate-700/80 rounded-lg px-2.5 py-1.5">
               <LayoutList size={13} className="text-violet-400 shrink-0" />
@@ -4260,23 +4341,6 @@ export function ProjectDataListModal({
                   : filteredItems.length === 1
                   ? "(1 Record)"
                   : `(${filteredItems.length} Records)`}
-              </span>
-            </button>
-
-            {/* Send to Bulk Creator */}
-            <button
-              onClick={handleSendToBulkCreator}
-              disabled={items.length === 0}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold shadow-sm disabled:opacity-40 transition-all"
-              title={
-                selectedIds.size > 0
-                  ? `Load ${selectedIds.size} selected records into Bulk Image Creator`
-                  : "Load all saved records into Bulk Image Creator"
-              }
-            >
-              <Layers size={14} />
-              <span className="hidden sm:inline">
-                {selectedIds.size > 0 ? `Bulk Cards (${selectedIds.size})` : "Bulk Creator"}
               </span>
             </button>
           </div>
@@ -4497,7 +4561,12 @@ export function ProjectDataListModal({
         )}
 
         {/* Main Table / Grouped Cards Area */}
-        <div className="flex-1 overflow-auto bg-slate-900 relative">
+        <div
+          className="flex-1 overflow-auto bg-slate-900 relative"
+          onScroll={() => {
+            if (openRowMenu) setOpenRowMenu(null);
+          }}
+        >
           {isLoading ? (
             <div className="flex flex-col items-center justify-center h-full gap-3 text-slate-400">
               <RefreshCw
@@ -4831,28 +4900,44 @@ export function ProjectDataListModal({
                                 <Eye size={13} />
                               </button>
                               <button
-                                onClick={() => {
-                                  onApplyRowToCanvas(item.rowValues || {});
-                                  onClose();
-                                }}
-                                className="p-1.5 rounded-lg bg-emerald-600/15 hover:bg-emerald-600/30 text-emerald-400 transition-colors"
-                                title="Load this entry onto Canvas"
+                                onClick={() => handleRowCardAction(item, rIdx, "copy")}
+                                disabled={processingRowId === item.id}
+                                className="p-1.5 rounded-lg bg-cyan-600/15 hover:bg-cyan-600/30 text-cyan-400 transition-colors disabled:opacity-40"
+                                title="Copy card image to clipboard"
                               >
-                                <CheckCircle2 size={13} />
+                                {processingRowId === item.id && processingRowAction === "copy" ? (
+                                  <RefreshCw size={13} className="animate-spin" />
+                                ) : (
+                                  <Copy size={13} />
+                                )}
                               </button>
                               <button
-                                onClick={() => openEditDialog(item)}
-                                className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors"
-                                title="Edit entry"
+                                onClick={() => handleRowCardAction(item, rIdx, "share")}
+                                disabled={processingRowId === item.id}
+                                className="p-1.5 rounded-lg bg-indigo-600/15 hover:bg-indigo-600/30 text-indigo-400 transition-colors disabled:opacity-40"
+                                title="Share card image"
                               >
-                                <Edit2 size={12} />
+                                {processingRowId === item.id && processingRowAction === "share" ? (
+                                  <RefreshCw size={13} className="animate-spin" />
+                                ) : (
+                                  <Share2 size={13} />
+                                )}
                               </button>
                               <button
-                                onClick={() => handleDeleteItem(item.id)}
-                                className="p-1.5 rounded-lg hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 transition-colors"
-                                title="Delete entry"
+                                type="button"
+                                data-row-kebab-trigger="true"
+                                onClick={e => toggleRowKebabMenu(e, item, rIdx)}
+                                className={cn(
+                                  "p-1.5 rounded-lg transition-colors",
+                                  openRowMenu?.item.id === item.id
+                                    ? "bg-slate-700 text-white"
+                                    : "bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white"
+                                )}
+                                title="More actions (Load, Download, Edit, Delete)"
+                                aria-expanded={openRowMenu?.item.id === item.id}
+                                aria-haspopup="menu"
                               >
-                                <Trash2 size={12} />
+                                <MoreVertical size={13} />
                               </button>
                             </div>
                           </div>
@@ -4878,9 +4963,6 @@ export function ProjectDataListModal({
                   </th>
                   <th className="w-12 px-2 py-3 text-center font-semibold text-slate-500 border-r border-slate-800/60">
                     #
-                  </th>
-                  <th className="min-w-[140px] max-w-[200px] px-3 py-2.5 font-semibold text-slate-300 border-r border-slate-800/60">
-                    Record Name
                   </th>
                   {activeLayers.map(layer => {
                     const isPrice = isPriceLayer(layer);
@@ -4920,7 +5002,7 @@ export function ProjectDataListModal({
                       </th>
                     );
                   })}
-                  <th className="w-44 min-w-[170px] px-3 py-3 text-center font-semibold text-slate-300">
+                  <th className="w-36 min-w-[140px] px-3 py-3 text-center font-semibold text-slate-300">
                     Actions
                   </th>
                 </tr>
@@ -4948,9 +5030,6 @@ export function ProjectDataListModal({
                       </td>
                       <td className="px-2 py-2 text-center text-slate-500 font-mono text-[11px] border-r border-slate-800/60">
                         {idx + 1}
-                      </td>
-                      <td className="px-3 py-2 border-r border-slate-800/60 font-medium text-slate-200 truncate max-w-[200px]">
-                        {item.rowName || <span className="text-slate-600 italic">—</span>}
                       </td>
                       {activeLayers.map(layer => {
                         const val = item.rowValues?.[layer.id] ?? "";
@@ -5037,26 +5116,15 @@ export function ProjectDataListModal({
                           </button>
 
                           <button
-                            onClick={() => {
-                              onApplyRowToCanvas(item.rowValues || {});
-                              onClose();
-                            }}
-                            className="p-1.5 rounded-lg bg-emerald-600/15 hover:bg-emerald-600/30 text-emerald-400 transition-colors"
-                            title="Load this record into Card Editor"
-                          >
-                            <CheckCircle2 size={14} />
-                          </button>
-
-                          <button
-                            onClick={() => handleRowCardAction(item, idx, "download")}
+                            onClick={() => handleRowCardAction(item, idx, "copy")}
                             disabled={isProcessing}
-                            className="p-1.5 rounded-lg bg-blue-600/15 hover:bg-blue-600/30 text-blue-400 transition-colors disabled:opacity-40"
-                            title="Download JPG card for this record"
+                            className="p-1.5 rounded-lg bg-cyan-600/15 hover:bg-cyan-600/30 text-cyan-400 transition-colors disabled:opacity-40"
+                            title="Copy card image to clipboard"
                           >
-                            {isProcessing ? (
+                            {isProcessing && processingRowAction === "copy" ? (
                               <RefreshCw size={14} className="animate-spin" />
                             ) : (
-                              <Download size={14} />
+                              <Copy size={14} />
                             )}
                           </button>
 
@@ -5066,23 +5134,32 @@ export function ProjectDataListModal({
                             className="p-1.5 rounded-lg bg-indigo-600/15 hover:bg-indigo-600/30 text-indigo-400 transition-colors disabled:opacity-40"
                             title="Share card image"
                           >
-                            <Share2 size={14} />
+                            {isProcessing && processingRowAction === "share" ? (
+                              <RefreshCw size={14} className="animate-spin" />
+                            ) : (
+                              <Share2 size={14} />
+                            )}
                           </button>
 
                           <button
-                            onClick={() => openEditDialog(item)}
-                            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors"
-                            title="Edit full record"
+                            type="button"
+                            data-row-kebab-trigger="true"
+                            onClick={e => toggleRowKebabMenu(e, item, idx)}
+                            className={cn(
+                              "p-1.5 rounded-lg transition-colors",
+                              openRowMenu?.item.id === item.id
+                                ? "bg-slate-700 text-white"
+                                : "bg-slate-800/90 hover:bg-slate-700 text-slate-300 hover:text-white"
+                            )}
+                            title="More actions (Load into Card Editor, Download, Edit, Delete)"
+                            aria-expanded={openRowMenu?.item.id === item.id}
+                            aria-haspopup="menu"
                           >
-                            <Edit2 size={13} />
-                          </button>
-
-                          <button
-                            onClick={() => handleDeleteItem(item.id)}
-                            className="p-1.5 rounded-lg hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 transition-colors"
-                            title="Delete record"
-                          >
-                            <Trash2 size={13} />
+                            {isProcessing && processingRowAction === "download" ? (
+                              <RefreshCw size={14} className="animate-spin text-blue-400" />
+                            ) : (
+                              <MoreVertical size={14} />
+                            )}
                           </button>
                         </div>
                       </td>
@@ -5091,7 +5168,7 @@ export function ProjectDataListModal({
                 })}
                 {filteredItems.length === 0 && (
                   <tr>
-                    <td colSpan={activeLayers.length + 4} className="px-4 py-12 text-center text-xs text-slate-400">
+                    <td colSpan={activeLayers.length + 3} className="px-4 py-12 text-center text-xs text-slate-400">
                       <div className="flex flex-col items-center justify-center gap-2.5">
                         <span>
                           {isDateFiltered && totalRecordCount > items.length
@@ -5122,9 +5199,7 @@ export function ProjectDataListModal({
               {priceTotalEntries.length > 0 && filteredItems.length > 0 && (
                 <tfoot className="sticky bottom-0 z-10 bg-slate-950/95 backdrop-blur-sm border-t-2 border-amber-500/30 text-xs shadow-sm">
                   <tr>
-                    <td className="px-2.5 py-2.5 border-r border-slate-800/60" />
-                    <td className="px-2 py-2.5 border-r border-slate-800/60" />
-                    <td className="px-3 py-2.5 font-bold text-amber-300 border-r border-slate-800/60 uppercase tracking-wider text-[11px]">
+                    <td colSpan={2} className="px-2.5 py-2.5 font-bold text-amber-300 border-r border-slate-800/60 uppercase tracking-wider text-[11px] text-center">
                       Total
                     </td>
                     {activeLayers.map(layer => {
@@ -5237,20 +5312,7 @@ export function ProjectDataListModal({
               </div>
 
               <div className="flex-1 overflow-y-auto p-5 space-y-4">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                    Record Name / Label
-                  </label>
-                  <input
-                    type="text"
-                    value={editingItem.rowName}
-                    onChange={e => setEditingItem({ ...editingItem, rowName: e.target.value })}
-                    placeholder="e.g. Donor #1 or File name..."
-                    className="w-full bg-slate-950 border border-slate-800 focus:border-blue-500 rounded-xl px-3 py-2 text-xs sm:text-sm text-white outline-none"
-                  />
-                </div>
-
-                <div className="border-t border-slate-800 pt-3 space-y-3">
+                <div className="space-y-3">
                   <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
                     Project Fields
                   </p>
@@ -7565,6 +7627,80 @@ export function ProjectDataListModal({
                 </button>
               </div>
             </div>
+          </div>
+        )}
+        {/* ROW KEBAB ACTION MENU */}
+        {openRowMenu && (
+          <div
+            data-row-kebab-menu="true"
+            role="menu"
+            style={{
+              position: "fixed",
+              top: `${openRowMenu.top}px`,
+              left: `${openRowMenu.left}px`,
+              transform: openRowMenu.openUpward ? "translateY(-100%)" : undefined,
+            }}
+            className="z-[170] w-52 rounded-xl bg-slate-900 border border-slate-700/90 shadow-2xl py-1.5 animate-in fade-in zoom-in-95 duration-100"
+          >
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                const target = openRowMenu.item;
+                setOpenRowMenu(null);
+                onApplyRowToCanvas(target.rowValues || {});
+                onClose();
+              }}
+              className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-xs font-medium text-emerald-300 hover:bg-slate-800 transition-colors"
+            >
+              <CheckCircle2 size={14} className="text-emerald-400 shrink-0" />
+              <span>Load into Card Editor</span>
+            </button>
+
+            <button
+              type="button"
+              role="menuitem"
+              disabled={processingRowId === openRowMenu.item.id}
+              onClick={() => {
+                const { item: target, idx: targetIdx } = openRowMenu;
+                setOpenRowMenu(null);
+                handleRowCardAction(target, targetIdx, "download");
+              }}
+              className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-xs font-medium text-blue-300 hover:bg-slate-800 disabled:opacity-40 transition-colors"
+            >
+              <Download size={14} className="text-blue-400 shrink-0" />
+              <span>Download JPG</span>
+            </button>
+
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                const target = openRowMenu.item;
+                setOpenRowMenu(null);
+                openEditDialog(target);
+              }}
+              className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-xs font-medium text-slate-200 hover:bg-slate-800 transition-colors"
+            >
+              <Edit2 size={14} className="text-slate-300 shrink-0" />
+              <span>Edit Record</span>
+            </button>
+
+            <div className="my-1 border-t border-slate-800" />
+
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                const targetId = openRowMenu.item.id;
+                setOpenRowMenu(null);
+                handleDeleteItem(targetId);
+              }}
+              className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-xs font-medium text-rose-400 hover:bg-rose-500/15 transition-colors"
+            >
+              <Trash2 size={14} className="shrink-0" />
+              <span>Delete Record</span>
+            </button>
           </div>
         )}
       </div>

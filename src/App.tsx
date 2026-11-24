@@ -1,10 +1,10 @@
 import React, { useState, useRef, useEffect } from "react";
 import { useDropzone } from "react-dropzone";
-import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, ChevronUp, RefreshCw, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check, Lock, Unlock, FileUp, FileDown, Copy, Undo2, List, Eye, EyeOff, Tag, Move, Hash, ListOrdered, Coins, Loader2, Sparkles, BarChart3, MoreVertical, Layers, Database, Search, ArrowRightLeft } from "lucide-react";
+import { Upload, Type, Download, LogOut, Plus, Minus, Trash2, Settings, Image as ImageIcon, Type as FontIcon, Save, AlignLeft, AlignCenter, AlignRight, Bold, Italic, Underline, Calendar, UserCircle, Shield, Key, Users, ChevronDown, ChevronUp, RefreshCw, UserPlus, UserMinus, Edit2, Share2, MessageCircle, Menu, X, Check, Lock, Unlock, FileUp, FileDown, Copy, Undo2, List, Eye, EyeOff, Tag, Move, Hash, ListOrdered, Coins, Loader2, Sparkles, BarChart3, MoreVertical, Database, Search, ArrowRightLeft } from "lucide-react";
 import { cn } from "@/src/lib/utils";
 import { motion, AnimatePresence } from "motion/react";
 import { convertNumberToSinhala, numberToSinhalaWords, formatNumberForCanvas, isUnicodeFont } from "./utils/sinhalaConverter";
-import { BulkImageCreatorModal, BulkRow, isPriceLayer } from "./components/BulkImageCreatorModal";
+import { isPriceLayer } from "./utils/priceUtils";
 import { ProjectDataListModal } from "./components/ProjectDataListModal";
 
 interface User {
@@ -280,9 +280,7 @@ export default function App() {
   const [selectedStatsProject, setSelectedStatsProject] = useState<ImageProject | null>(null);
   const [openKebabProjectId, setOpenKebabProjectId] = useState<string | null>(null);
   const [kebabMenuPos, setKebabMenuPos] = useState<{ left: number; top?: number; bottom?: number } | null>(null);
-  const [showBulkModal, setShowBulkModal] = useState(false);
   const [showDataListModal, setShowDataListModal] = useState(false);
-  const [bulkPrefillRows, setBulkPrefillRows] = useState<BulkRow[] | null>(null);
   const [metricsDateRange, setMetricsDateRange] = useState<'alltime' | 'today' | 'yesterday' | 'week' | 'month' | 'custom'>('alltime');
   const [metricsCustomStartDate, setMetricsCustomStartDate] = useState<string>(() => {
     const d = new Date();
@@ -3653,17 +3651,6 @@ export default function App() {
               >
                 <Download className="w-4 h-4 sm:w-[18px] sm:h-[18px]" />
               </button>
-              <button
-                onClick={() => {
-                  setBulkPrefillRows(null);
-                  setShowBulkModal(true);
-                }}
-                title="Bulk Image Generator (Create multiple cards with spreadsheet data)"
-                className="flex items-center gap-1.5 px-2 sm:px-2.5 py-1.5 sm:py-2 bg-gradient-to-r from-blue-600/25 to-indigo-600/25 hover:from-blue-600/40 hover:to-indigo-600/40 text-blue-300 hover:text-white rounded-lg transition-all border border-blue-500/40 shadow-sm shrink-0"
-              >
-                <Layers className="w-4 h-4 text-blue-400" />
-                <span className="hidden xl:inline text-xs font-semibold">Bulk Create</span>
-              </button>
               {currentProjectId && (
                 <button
                   onClick={() => setShowDataListModal(true)}
@@ -5351,23 +5338,6 @@ export default function App() {
                 >
                   <Database size={13} className="text-emerald-400 shrink-0" />
                   <span>Saved Data List</span>
-                </button>
-
-                {/* Bulk Image Creator */}
-                <button
-                  type="button"
-                  onClick={() => {
-                    closeKebab();
-                    if (currentProjectId !== proj.id) {
-                      loadProject(proj);
-                    }
-                    setBulkPrefillRows(null);
-                    setShowBulkModal(true);
-                  }}
-                  className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-blue-600/20 text-blue-300 hover:text-white text-left transition-colors"
-                >
-                  <Layers size={13} className="text-blue-400 shrink-0" />
-                  <span>Bulk Image Creator</span>
                 </button>
 
                 {/* Admin: Copy Project to Another Account */}
@@ -8337,18 +8307,6 @@ export default function App() {
               <span className="font-medium">Share Image</span>
             </button>
 
-            <button
-              onClick={() => {
-                setCanvasContextMenu(null);
-                setBulkPrefillRows(null);
-                setShowBulkModal(true);
-              }}
-              className="flex items-center gap-2 px-2.5 py-2 text-slate-200 hover:text-white hover:bg-blue-600/20 rounded-lg transition-colors group text-left"
-            >
-              <Layers size={14} className="text-blue-400 group-hover:text-blue-300" />
-              <span className="font-medium">Bulk Create Images</span>
-            </button>
-
             {currentProjectId && (
               <button
                 onClick={() => {
@@ -8392,35 +8350,6 @@ export default function App() {
         </div>
       )}
 
-      {/* Bulk Image Generator Modal */}
-      {showBulkModal && (image || currentProjectId) && (
-        <BulkImageCreatorModal
-          isOpen={showBulkModal}
-          onClose={() => {
-            setShowBulkModal(false);
-            setBulkPrefillRows(null);
-          }}
-          project={projects.find(p => p.id === currentProjectId) || {
-            id: currentProjectId || 'temp',
-            username: user?.username || 'user',
-            imageUrl: image || '',
-            layers: layers,
-            name: 'Card Project',
-            createdAt: new Date().toISOString()
-          }}
-          image={image || (projects.find(p => p.id === currentProjectId)?.imageUrl ?? '')}
-          fonts={fonts}
-          user={user}
-          initialRows={bulkPrefillRows}
-          onRecordCreationEvents={async (count: number, type?: 'copy' | 'download' | 'share') => {
-            if (currentProjectId) {
-              await recordCreationEvent(currentProjectId, type || 'download', count);
-            }
-          }}
-          onNotification={setNotification}
-        />
-      )}
-
       {/* Project Saved Data List Modal */}
       {showDataListModal && currentProjectId && (
         <ProjectDataListModal
@@ -8462,11 +8391,6 @@ export default function App() {
               });
             });
             setNotification({ message: "Record loaded onto card canvas!", type: "success" });
-          }}
-          onOpenInBulkCreator={(bulkRows) => {
-            setShowDataListModal(false);
-            setBulkPrefillRows(bulkRows);
-            setShowBulkModal(true);
           }}
           onRecordCreationEvents={async (count: number, type?: 'copy' | 'download' | 'share') => {
             if (currentProjectId) {
