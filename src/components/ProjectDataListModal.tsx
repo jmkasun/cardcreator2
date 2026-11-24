@@ -920,6 +920,7 @@ export function ProjectDataListModal({
   const [items, setItems] = useState<ProjectDataItem[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [savingAction, setSavingAction] = useState<"save" | "save_copy" | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [dateFilterMode, setDateFilterMode] = useState<DateFilterMode>("5days");
@@ -2412,50 +2413,72 @@ export function ProjectDataListModal({
   };
 
   // Save Add / Edit entry (in memory for Live API mode, or PostgreSQL DB otherwise)
-  const handleSaveEntry = async (e?: React.FormEvent) => {
+  // When copyAfterSave is true, also renders and copies the card image to the clipboard
+  const handleSaveEntry = async (
+    e?: React.FormEvent,
+    options?: { copyAfterSave?: boolean }
+  ) => {
     if (e) e.preventDefault();
-    if (!editingItem) return;
+    if (!editingItem || isSaving) return;
 
-    if (liveApiSourceItems !== null || editingItem.id?.startsWith("api_")) {
-      if (editingItem.mode === "add") {
-        const newItem: ProjectDataItem = {
-          id: `api_${Date.now()}_add`,
-          projectId: project.id,
-          username: user?.username || "api",
-          rowName: editingItem.rowName,
-          rowValues: editingItem.rowValues,
-          sortOrder: liveApiSourceItems ? liveApiSourceItems.length : items.length,
-        };
-        setLiveApiSourceItems(prev => (prev ? [...prev, newItem] : [newItem]));
-        setItems(prev => [...prev, newItem]);
-        setTotalRecordCount(c => c + 1);
-        onNotification({ message: "Record added to live session (not saved to database)", type: "success" });
-      } else if (editingItem.mode === "edit" && editingItem.id) {
-        setLiveApiSourceItems(prev =>
-          prev
-            ? prev.map(it =>
-                it.id === editingItem.id
-                  ? { ...it, rowName: editingItem.rowName, rowValues: editingItem.rowValues }
-                  : it
-              )
-            : prev
-        );
-        setItems(prev =>
-          prev.map(it =>
-            it.id === editingItem.id
-              ? { ...it, rowName: editingItem.rowName, rowValues: editingItem.rowValues }
-              : it
-          )
-        );
-        onNotification({ message: "Record updated in live session", type: "success" });
+    const copyAfterSave = Boolean(options?.copyAfterSave);
+    const targetEditing = editingItem;
+    const isLiveMode = liveApiSourceItems !== null || Boolean(targetEditing.id?.startsWith("api_"));
+    const snapshotItem: ProjectDataItem = {
+      id: targetEditing.id || `temp_${Date.now()}`,
+      projectId: project.id,
+      username: user?.username || (isLiveMode ? "api" : "user"),
+      rowName: targetEditing.rowName,
+      rowValues: targetEditing.rowValues,
+      sortOrder: liveApiSourceItems ? liveApiSourceItems.length : items.length,
+    };
+
+    const executeSave = async (): Promise<{
+      savedItem: ProjectDataItem;
+      isLive: boolean;
+      mode: "add" | "edit";
+    }> => {
+      if (isLiveMode) {
+        if (targetEditing.mode === "add") {
+          const newItem: ProjectDataItem = {
+            id: `api_${Date.now()}_add`,
+            projectId: project.id,
+            username: user?.username || "api",
+            rowName: targetEditing.rowName,
+            rowValues: targetEditing.rowValues,
+            sortOrder: liveApiSourceItems ? liveApiSourceItems.length : items.length,
+          };
+          setLiveApiSourceItems(prev => (prev ? [...prev, newItem] : [newItem]));
+          setItems(prev => [...prev, newItem]);
+          setTotalRecordCount(c => c + 1);
+          return { savedItem: newItem, isLive: true, mode: "add" };
+        } else if (targetEditing.mode === "edit" && targetEditing.id) {
+          const updatedItem: ProjectDataItem = {
+            ...snapshotItem,
+            id: targetEditing.id,
+          };
+          setLiveApiSourceItems(prev =>
+            prev
+              ? prev.map(it =>
+                  it.id === targetEditing.id
+                    ? { ...it, rowName: targetEditing.rowName, rowValues: targetEditing.rowValues }
+                    : it
+                )
+              : prev
+          );
+          setItems(prev =>
+            prev.map(it =>
+              it.id === targetEditing.id
+                ? { ...it, rowName: targetEditing.rowName, rowValues: targetEditing.rowValues }
+                : it
+            )
+          );
+          return { savedItem: updatedItem, isLive: true, mode: "edit" };
+        }
+        return { savedItem: snapshotItem, isLive: true, mode: targetEditing.mode };
       }
-      setEditingItem(null);
-      return;
-    }
 
-    setIsSaving(true);
-    try {
-      if (editingItem.mode === "add") {
+      if (targetEditing.mode === "add") {
         const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}/data-list`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2463,45 +2486,161 @@ export function ProjectDataListModal({
             username: user?.username || "user",
             mode: "append",
             item: {
-              rowName: editingItem.rowName,
-              rowValues: editingItem.rowValues,
+              rowName: targetEditing.rowName,
+              rowValues: targetEditing.rowValues,
             },
           }),
         });
         if (!res.ok) throw new Error("Failed to add entry");
         const data = await res.json();
+        let createdItem = snapshotItem;
         if (Array.isArray(data.items) && data.items.length > 0) {
+          createdItem = data.items[0];
           setItems(prev => [...prev, ...data.items]);
           setTotalRecordCount(c => c + data.items.length);
         } else {
           await fetchProjectDataList();
         }
-        onNotification({ message: "Record added and saved to database!", type: "success" });
-      } else if (editingItem.mode === "edit" && editingItem.id) {
+        return { savedItem: createdItem, isLive: false, mode: "add" };
+      } else if (targetEditing.mode === "edit" && targetEditing.id) {
         const res = await fetch(
-          `/api/projects/${encodeURIComponent(project.id)}/data-list/${encodeURIComponent(editingItem.id)}`,
+          `/api/projects/${encodeURIComponent(project.id)}/data-list/${encodeURIComponent(targetEditing.id)}`,
           {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              rowName: editingItem.rowName,
-              rowValues: editingItem.rowValues,
+              rowName: targetEditing.rowName,
+              rowValues: targetEditing.rowValues,
             }),
           }
         );
         if (!res.ok) throw new Error("Failed to update entry");
         const data = await res.json();
+        const updatedItem: ProjectDataItem = data.item || { ...snapshotItem, id: targetEditing.id };
         if (data.item) {
           setItems(prev => prev.map(it => (it.id === data.item.id ? data.item : it)));
         }
-        onNotification({ message: "Record updated in database!", type: "success" });
+        return { savedItem: updatedItem, isLive: false, mode: "edit" };
       }
+      return { savedItem: snapshotItem, isLive: false, mode: targetEditing.mode };
+    };
+
+    setIsSaving(true);
+    setSavingAction(copyAfterSave ? "save_copy" : "save");
+
+    // Start saving right away
+    const savePromise = executeSave();
+
+    // Initiate clipboard write synchronously inside the click gesture so Safari/iOS/Chrome keep activation valid
+    let clipboardPromise: Promise<"copied" | "unsupported" | "failed"> | null = null;
+    if (copyAfterSave) {
+      const canClipboard =
+        typeof navigator !== "undefined" &&
+        Boolean(navigator.clipboard) &&
+        typeof (window as any).ClipboardItem !== "undefined";
+
+      if (!canClipboard) {
+        clipboardPromise = Promise.resolve("unsupported");
+      } else {
+        const pngPromise = (async () => {
+          const { savedItem } = await savePromise;
+          const selection = resolveGroupOrRowImage({
+            items: [savedItem],
+            overrideKey: `row_${savedItem.id}`,
+            groupConfig,
+            activeLayers,
+            groupByLayerId: "",
+            templates: projectTemplates,
+            defaultImageUrl: effectiveDefaultImageUrl,
+          });
+          const img = await getLoadedImageForUrl(selection.url);
+          const rowLayers = prepareLayersForRow(activeLayers, savedItem.rowValues || {});
+          const blob = await generateCardBlob(img, rowLayers, fonts);
+          return await ensurePngBlobForClipboard(blob);
+        })();
+
+        clipboardPromise = (async () => {
+          try {
+            await navigator.clipboard.write([
+              new (window as any).ClipboardItem({ "image/png": pngPromise }),
+            ]);
+            return "copied" as const;
+          } catch {
+            try {
+              const pngBlob = await pngPromise;
+              await navigator.clipboard.write([
+                new (window as any).ClipboardItem({ "image/png": pngBlob }),
+              ]);
+              return "copied" as const;
+            } catch (clipErr) {
+              console.error("Save & Copy clipboard failed:", clipErr);
+              return "failed" as const;
+            }
+          }
+        })();
+      }
+    }
+
+    try {
+      const { isLive, mode } = await savePromise;
+
+      if (copyAfterSave && clipboardPromise) {
+        const copyStatus = await clipboardPromise;
+        if (copyStatus === "copied") {
+          onRecordCreationEvents(1, "copy").catch(() => {});
+          if (isLive) {
+            onNotification({
+              message:
+                mode === "add"
+                  ? "Record added to live session & card image copied to clipboard!"
+                  : "Record updated in live session & card image copied to clipboard!",
+              type: "success",
+            });
+          } else {
+            onNotification({
+              message:
+                mode === "add"
+                  ? "Record saved & card image copied to clipboard!"
+                  : "Record updated & card image copied to clipboard!",
+              type: "success",
+            });
+          }
+        } else {
+          onNotification({
+            message:
+              copyStatus === "unsupported"
+                ? "Record saved, but clipboard image copy is not supported in this browser"
+                : "Record saved, but could not copy card image to clipboard",
+            type: "info",
+          });
+        }
+      } else {
+        if (isLive) {
+          onNotification({
+            message:
+              mode === "add"
+                ? "Record added to live session (not saved to database)"
+                : "Record updated in live session",
+            type: "success",
+          });
+        } else {
+          onNotification({
+            message:
+              mode === "add"
+                ? "Record added and saved to database!"
+                : "Record updated in database!",
+            type: "success",
+          });
+        }
+      }
+
       setEditingItem(null);
     } catch (err) {
       console.error("Error saving entry:", err);
       onNotification({ message: "Failed to save record to database", type: "error" });
     } finally {
       setIsSaving(false);
+      setSavingAction(null);
     }
   };
 
@@ -5563,20 +5702,38 @@ export function ProjectDataListModal({
                 </div>
               </div>
 
-              <div className="flex items-center justify-end gap-2 px-5 py-3.5 border-t border-slate-800 bg-slate-950">
+              <div className="flex flex-wrap items-center justify-end gap-2 px-4 sm:px-5 py-3.5 border-t border-slate-800 bg-slate-950">
                 <button
                   type="button"
                   onClick={() => setEditingItem(null)}
-                  className="px-4 py-2 rounded-xl text-xs font-medium text-slate-400 hover:text-white hover:bg-slate-800"
+                  disabled={isSaving}
+                  className="px-3.5 py-2 rounded-xl text-xs font-medium text-slate-400 hover:text-white hover:bg-slate-800 disabled:opacity-50"
                 >
                   Cancel
                 </button>
                 <button
+                  type="button"
+                  onClick={() => handleSaveEntry(undefined, { copyAfterSave: true })}
+                  disabled={isSaving}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold shadow disabled:opacity-50 transition-colors"
+                >
+                  {savingAction === "save_copy" ? (
+                    <RefreshCw size={14} className="animate-spin" />
+                  ) : (
+                    <Copy size={14} />
+                  )}
+                  <span>{editingItem.mode === "add" ? "Save & Copy" : "Update & Copy"}</span>
+                </button>
+                <button
                   type="submit"
                   disabled={isSaving}
-                  className="flex items-center gap-1.5 px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow disabled:opacity-50"
+                  className="flex items-center gap-1.5 px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow disabled:opacity-50 transition-colors"
                 >
-                  {isSaving ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
+                  {savingAction === "save" ? (
+                    <RefreshCw size={14} className="animate-spin" />
+                  ) : (
+                    <Save size={14} />
+                  )}
                   <span>{editingItem.mode === "add" ? "Save Record" : "Update Record"}</span>
                 </button>
               </div>
