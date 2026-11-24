@@ -317,8 +317,6 @@ export default function App() {
   const [copyProjectPreserveLock, setCopyProjectPreserveLock] = useState(false);
   const [copyProjectUserSearch, setCopyProjectUserSearch] = useState("");
   const [isCopyingProject, setIsCopyingProject] = useState(false);
-  const [isEditingHeaderName, setIsEditingHeaderName] = useState(false);
-  const [headerNameInput, setHeaderNameInput] = useState("");
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showChangePasswordModal, setShowChangePasswordModal] = useState(false);
   const [showUserManagementModal, setShowUserManagementModal] = useState(false);
@@ -3545,72 +3543,19 @@ export default function App() {
             My Card Creator
           </span>
 
-          {/* Current Project Name & Quick Rename */}
+          {/* Current Project Name */}
           {(() => {
             const currentProject = projects.find(p => p.id === currentProjectId);
             if (!currentProject) return null;
 
             return (
               <div className="flex items-center gap-1 sm:gap-1.5 ml-1 sm:ml-2 pl-1.5 sm:pl-2.5 border-l border-slate-800 min-w-0">
-                {isEditingHeaderName ? (
-                  <form
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      if (headerNameInput.trim()) {
-                        renameProject(currentProject.id, headerNameInput);
-                      }
-                      setIsEditingHeaderName(false);
-                    }}
-                    className="flex items-center gap-1 min-w-0"
-                  >
-                    <input
-                      type="text"
-                      value={headerNameInput}
-                      onChange={(e) => setHeaderNameInput(e.target.value)}
-                      onBlur={() => {
-                        if (headerNameInput.trim() && headerNameInput.trim() !== currentProject.name) {
-                          renameProject(currentProject.id, headerNameInput);
-                        }
-                        setIsEditingHeaderName(false);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Escape') setIsEditingHeaderName(false);
-                      }}
-                      autoFocus
-                      className="bg-slate-800 border border-blue-500 rounded-lg px-2 py-1 text-xs sm:text-sm text-white focus:outline-none w-28 xs:w-36 sm:w-48 md:w-64 shadow-inner"
-                    />
-                    <button
-                      type="submit"
-                      className="p-1 sm:p-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-colors shrink-0"
-                      title="Save name"
-                    >
-                      <Check size={14} />
-                    </button>
-                    <button
-                      type="button"
-                      onMouseDown={(e) => {
-                        e.preventDefault();
-                        setIsEditingHeaderName(false);
-                      }}
-                      className="p-1 sm:p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white rounded-lg transition-colors shrink-0"
-                      title="Cancel"
-                    >
-                      <X size={14} />
-                    </button>
-                  </form>
-                ) : (
-                  <button
-                    onClick={() => {
-                      setHeaderNameInput(currentProject.name);
-                      setIsEditingHeaderName(true);
-                    }}
-                    className="flex items-center gap-1 sm:gap-1.5 text-xs sm:text-sm font-medium text-slate-200 hover:text-white bg-slate-800/70 hover:bg-slate-800 px-2 sm:px-2.5 py-1 sm:py-1.5 rounded-lg border border-slate-700/60 transition-all group max-w-[80px] xs:max-w-[120px] sm:max-w-[170px] md:max-w-xs min-w-0 shrink"
-                    title="Click to rename project"
-                  >
-                    <span className="truncate">{currentProject.name}</span>
-                    <Edit2 size={12} className="text-slate-400 group-hover:text-blue-400 shrink-0 transition-colors" />
-                  </button>
-                )}
+                <div
+                  className="flex items-center gap-1 sm:gap-1.5 text-xs sm:text-sm font-medium text-slate-200 bg-slate-800/70 px-2 sm:px-2.5 py-1 sm:py-1.5 rounded-lg border border-slate-700/60 max-w-[90px] xs:max-w-[130px] sm:max-w-[180px] md:max-w-xs min-w-0 shrink"
+                  title={currentProject.name}
+                >
+                  <span className="truncate">{currentProject.name}</span>
+                </div>
 
                 {/* Creation Count Pill */}
                 <button
@@ -5731,19 +5676,13 @@ export default function App() {
                           )}
 
                           {/* Name Overlay */}
-                          <div 
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setProjectToRename({ id: proj.id, name: proj.name });
-                              setRenameInputVal(proj.name);
-                            }}
-                            className="absolute bottom-0 left-0 right-0 p-1 bg-black/75 backdrop-blur-md flex items-center justify-center gap-1 cursor-pointer hover:bg-black/90 transition-colors group/name"
-                            title={`Click to rename: ${proj.name}`}
+                          <div
+                            className="absolute bottom-0 left-0 right-0 p-1 bg-black/75 backdrop-blur-md flex items-center justify-center"
+                            title={proj.name}
                           >
-                            <span className="text-[10px] text-white font-medium truncate text-center select-none max-w-[85%]">
+                            <span className="text-[10px] text-white font-medium truncate text-center select-none max-w-[92%]">
                               {proj.name}
                             </span>
-                            <Edit2 size={9} className="text-slate-400 group-hover/name:text-blue-400 opacity-0 group-hover/name:opacity-100 transition-opacity shrink-0" />
                           </div>
                         </div>
 
