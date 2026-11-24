@@ -1836,7 +1836,10 @@ cachedLocalFontFiles = null;
         }
       }
 
-      const useFiveDayFilter = mode === "5days" && dateLayerIds.length > 0 && monthDays.length > 0;
+      const useFiveDayFilter =
+        (mode === "5days" || mode === "week" || mode === "7days" || mode === "days") &&
+        dateLayerIds.length > 0 &&
+        monthDays.length > 0;
       const useMonthFilter = mode === "month" && dateLayerIds.length > 0 && targetMonth !== "";
       const activeFilterMonthDays = useFiveDayFilter
         ? monthDays
