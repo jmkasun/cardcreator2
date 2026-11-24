@@ -1443,6 +1443,20 @@ export default function App() {
     const projectName = existingProject ? existingProject.name : (currentProjectId ? `Project ${new Date().toLocaleDateString()}` : `New Project`);
     const isLocked = existingProject?.isLocked || false;
 
+    const layersToPersist = isLocked && existingProject
+      ? existingProject.layers.map((orig) => {
+          const current = layers.find((l) => l.id === orig.id);
+          if (!current) return orig;
+          return {
+            ...orig,
+            text: current.text,
+            selectedSuffix: current.selectedSuffix,
+            resetAfterCopy: current.resetAfterCopy,
+            visible: current.visible,
+          };
+        })
+      : layers;
+
     // Only send the image blob if it is a brand new data: URL not yet persisted
     const isDataUrl = typeof image === 'string' && image.startsWith('data:');
 
@@ -1450,7 +1464,7 @@ export default function App() {
       id: projectId,
       username: user.username,
       imageUrl: isDataUrl ? image : (existingProject?.imageUrl || `/api/images/${projectId}/image`),
-      layers,
+      layers: layersToPersist,
       name: projectName,
       createdAt: existingProject?.createdAt || new Date().toISOString(),
       isLocked: isLocked,
@@ -1461,7 +1475,7 @@ export default function App() {
       const payload: any = {
         id: projectId,
         username: user.username,
-        layers,
+        layers: layersToPersist,
         name: projectName,
         isLocked,
       };
@@ -1549,6 +1563,7 @@ export default function App() {
     if (!project) return;
 
     const newLockedStatus = !project.isLocked;
+    const effectiveLayers = targetId === currentProjectId ? layers : project.layers;
     
     // When locking, immediately hide properties by clearing active layer selection
     if (newLockedStatus && targetId === currentProjectId) {
@@ -1556,7 +1571,7 @@ export default function App() {
     }
 
     // Update local state first for immediate feedback
-    setProjects(prev => prev.map(p => p.id === targetId ? { ...p, isLocked: newLockedStatus } : p));
+    setProjects(prev => prev.map(p => p.id === targetId ? { ...p, isLocked: newLockedStatus, layers: effectiveLayers } : p));
     
     try {
       const res = await fetch("/api/images", {
@@ -1565,12 +1580,15 @@ export default function App() {
         body: JSON.stringify({
           id: project.id,
           username: user?.username || project.username,
-          layers: project.layers,
+          layers: effectiveLayers,
           name: project.name,
           isLocked: newLockedStatus,
         }),
       });
       if (res.ok) {
+        if (targetId === currentProjectId) {
+          lastSavedLayersRef.current = JSON.stringify(effectiveLayers);
+        }
         setNotification({ message: `Project ${newLockedStatus ? 'locked' : 'unlocked'}`, type: 'success' });
       }
     } catch (err) {
@@ -1654,10 +1672,21 @@ export default function App() {
   };
 
   const loadProject = (project: ImageProject) => {
+    // Persist any unsaved layer text/settings on the current project before switching
+    if (
+      currentProjectId &&
+      currentProjectId !== project.id &&
+      JSON.stringify(layers) !== lastSavedLayersRef.current
+    ) {
+      void saveProject();
+    }
     setCurrentProjectId(project.id);
     setImage(project.imageUrl);
-    // Clear text contents when loading as requested
-    const preparedLayers = project.layers.map(l => ({ ...l, text: "", name: l.name || l.text }));
+    const preparedLayers = project.layers.map(l => ({
+      ...l,
+      text: l.text ?? "",
+      name: l.name || l.text || "Text Layer",
+    }));
     setLayers(preparedLayers);
     lastSavedLayersRef.current = JSON.stringify(preparedLayers);
     setSelectedLayerId(null);
@@ -2968,13 +2997,9 @@ export default function App() {
     drawCanvas();
   }, [image, layers, fonts, fontsLoadedTick, selectedLayerId, isPreviewMode]);
 
-  // Auto-save effect
+  // Auto-save effect (persists layer edits, including text content values on both unlocked and locked projects)
   useEffect(() => {
     if (!user || !image || !currentProjectId) return;
-    
-    // Check if current project is locked
-    const currentProject = projects.find(p => p.id === currentProjectId);
-    if (currentProject?.isLocked) return;
 
     // Check if layers actually changed from last saved state
     const currentLayersStr = JSON.stringify(layers);
@@ -2984,7 +3009,7 @@ export default function App() {
 
     const timer = setTimeout(() => {
       saveProject();
-    }, 1500); // Debounce save for 1.5 seconds
+    }, 700);
 
     return () => clearTimeout(timer);
   }, [layers, image, currentProjectId, projects]);
