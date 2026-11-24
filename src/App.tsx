@@ -2223,6 +2223,19 @@ export default function App() {
     if (selectedLayerId === id) setSelectedLayerId(null);
   };
 
+  const moveLayer = (id: string, direction: 'up' | 'down') => {
+    setLayers((prev) => {
+      const idx = prev.findIndex((l) => l.id === id);
+      if (idx === -1) return prev;
+      const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
+      if (targetIdx < 0 || targetIdx >= prev.length) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(idx, 1);
+      next.splice(targetIdx, 0, moved);
+      return next;
+    });
+  };
+
   const toggleListOptionLabel = (listLayerId: string) => {
     const listLayer = layers.find(l => l.id === listLayerId);
     if (!listLayer) return;
@@ -5871,7 +5884,9 @@ export default function App() {
                     <p className="text-sm text-slate-600 italic text-center py-4">No layers yet</p>
                   ) : (
                     <AnimatePresence mode="popLayout">
-                      {layers.map((layer) => (
+                      {layers.map((layer, layerIndex) => {
+                        const isProjectLocked = Boolean(projects.find(p => p.id === currentProjectId)?.isLocked);
+                        return (
                         <motion.div
                           layout
                           initial={{ opacity: 0, x: -20 }}
@@ -5985,9 +6000,37 @@ export default function App() {
                                   <RefreshCw size={10} className={layer.resetAfterCopy ? "text-amber-400" : "text-slate-500"} />
                                   <span>{layer.resetAfterCopy ? "Reset" : "Stay"}</span>
                                 </button>
+                                <div className="flex items-center border border-slate-700/60 rounded bg-slate-800/80 shrink-0">
+                                  <button
+                                    type="button"
+                                    tabIndex={-1}
+                                    disabled={isProjectLocked || layerIndex === 0}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      moveLayer(layer.id, 'up');
+                                    }}
+                                    className="p-0.5 hover:text-blue-400 text-slate-400 transition-all disabled:opacity-25 disabled:cursor-not-allowed"
+                                    title="Move Layer Up"
+                                  >
+                                    <ChevronUp size={13} />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    tabIndex={-1}
+                                    disabled={isProjectLocked || layerIndex === layers.length - 1}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      moveLayer(layer.id, 'down');
+                                    }}
+                                    className="p-0.5 hover:text-blue-400 text-slate-400 transition-all disabled:opacity-25 disabled:cursor-not-allowed border-l border-slate-700/60"
+                                    title="Move Layer Down"
+                                  >
+                                    <ChevronDown size={13} />
+                                  </button>
+                                </div>
                                 <button
                                   tabIndex={-1}
-                                  disabled={projects.find(p => p.id === currentProjectId)?.isLocked}
+                                  disabled={isProjectLocked}
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     deleteLayer(layer.id);
@@ -6269,7 +6312,8 @@ export default function App() {
                             </div>
                           </div>
                         </motion.div>
-                      ))}
+                        );
+                      })}
                     </AnimatePresence>
                   )}
                 </div>
