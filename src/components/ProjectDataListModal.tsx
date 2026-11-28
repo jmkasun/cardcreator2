@@ -3547,7 +3547,7 @@ export function ProjectDataListModal({
         const file = new File([blob], safeFilename, { type: "image/jpeg" });
         if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
           try {
-            await navigator.share({ files: [file], title: cardTitle });
+            await navigator.share({ files: [file] });
             onRecordCreationEvents(1, "share").catch(() => {});
             onNotification({ message: "Card shared successfully!", type: "success" });
             setTimeout(() => URL.revokeObjectURL(dataUrl), 20000);
@@ -3728,7 +3728,7 @@ export function ProjectDataListModal({
         const file = new File([blob], safeFilename, { type: "image/jpeg" });
         if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
           try {
-            await navigator.share({ files: [file], title: groupTitle });
+            await navigator.share({ files: [file] });
             onRecordCreationEvents(1, "share").catch(() => {});
             onNotification({ message: "Group card image shared successfully!", type: "success" });
             setTimeout(() => URL.revokeObjectURL(dataUrl), 20000);
