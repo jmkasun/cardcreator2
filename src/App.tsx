@@ -811,13 +811,15 @@ export default function App() {
         fitImageToScreen(imageCacheRef.current);
       }
     };
+    const rafId = requestAnimationFrame(handleMobileFitResize);
     window.addEventListener("resize", handleMobileFitResize);
     window.addEventListener("orientationchange", handleMobileFitResize);
     return () => {
+      cancelAnimationFrame(rafId);
       window.removeEventListener("resize", handleMobileFitResize);
       window.removeEventListener("orientationchange", handleMobileFitResize);
     };
-  }, [isPreviewMode]);
+  }, [isPreviewMode, projects.length]);
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
@@ -5669,6 +5671,112 @@ export default function App() {
       </AnimatePresence>
 
       <div className="flex-1 flex flex-col md:flex-row overflow-hidden relative">
+        {/* Mobile Default Projects Strip (visible by default on mobile without opening the menu) */}
+        {!isPreviewMode && (
+          <div className="md:hidden shrink-0 bg-slate-900/95 border-b border-slate-800 px-2.5 py-2 flex flex-col gap-1.5 z-20">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">My Projects</h3>
+                {projects.length > 0 && (
+                  <span className="text-[10px] text-slate-500 font-mono">({projects.length})</span>
+                )}
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                {projects.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => setProjectSortMode(prev => prev === 'recent' ? 'creations' : 'recent')}
+                    className={cn(
+                      "text-[10px] px-2 py-0.5 rounded-md flex items-center gap-1 border transition-all",
+                      projectSortMode === 'creations'
+                        ? "bg-amber-500/20 text-amber-300 border-amber-500/40"
+                        : "bg-slate-800 text-slate-300 border-slate-700"
+                    )}
+                    title="Toggle sorting between Most Recent and Top Creations"
+                  >
+                    <Sparkles size={10} className={projectSortMode === 'creations' ? 'text-amber-400' : 'text-slate-400'} />
+                    <span>{projectSortMode === 'creations' ? 'Top' : 'Recent'}</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setShowSidebar(true)}
+                  className="text-[10px] px-2 py-0.5 rounded-md bg-slate-800 text-slate-300 border border-slate-700 hover:text-white transition-colors"
+                  title="Open Projects & Layers Menu"
+                >
+                  All
+                </button>
+              </div>
+            </div>
+
+            {isProjectsLoading && projects.length === 0 ? (
+              <div className="flex items-center gap-2 py-2 text-xs text-slate-400">
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-500" />
+                <span>Loading projects...</span>
+              </div>
+            ) : projects.length === 0 ? (
+              <div className="flex items-center justify-between py-1 text-[11px] text-slate-500">
+                <span>No projects yet</span>
+                <button
+                  type="button"
+                  onClick={() => setShowSidebar(true)}
+                  className="text-blue-400 font-medium"
+                >
+                  Upload Image
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 overflow-x-auto pb-0.5 custom-scrollbar">
+                {[...projects]
+                  .sort((a, b) => {
+                    if (projectSortMode === 'creations') {
+                      return (b.creationsCount || 0) - (a.creationsCount || 0);
+                    }
+                    const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+                    const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+                    return timeB - timeA;
+                  })
+                  .map((proj) => (
+                    <button
+                      key={proj.id}
+                      type="button"
+                      onClick={() => loadProject(proj)}
+                      className={cn(
+                        "relative w-14 h-14 shrink-0 rounded-lg overflow-hidden border-2 transition-all text-left",
+                        currentProjectId === proj.id
+                          ? "border-blue-500 ring-1 ring-blue-500/40 shadow-md"
+                          : "border-slate-700/80 hover:border-slate-500"
+                      )}
+                      title={proj.name}
+                    >
+                      <img
+                        src={proj.imageUrl}
+                        alt={proj.name}
+                        loading="lazy"
+                        className="w-full h-full object-cover"
+                        referrerPolicy="no-referrer"
+                      />
+                      <div className="absolute top-0.5 left-0.5 px-1 py-px rounded bg-black/80 text-[8px] font-bold text-amber-300 border border-amber-500/30 flex items-center gap-0.5">
+                        <Sparkles size={7} className="text-amber-400 shrink-0" />
+                        <span>{proj.creationsCount || 0}</span>
+                      </div>
+                      {proj.isLocked && (
+                        <div className="absolute top-0.5 right-0.5 p-0.5 rounded bg-red-600/85 text-white">
+                          <Lock size={8} />
+                        </div>
+                      )}
+                      <div className="absolute bottom-0 left-0 right-0 px-1 py-0.5 bg-black/75 backdrop-blur-sm">
+                        <span className="block text-[9px] text-white font-medium truncate text-center leading-tight">
+                          {proj.name}
+                        </span>
+                      </div>
+                    </button>
+                  ))}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Sidebar Left - Layers & Controls */}
         <aside 
           ref={sidebarRef}
