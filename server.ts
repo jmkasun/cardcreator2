@@ -1883,17 +1883,77 @@ cachedLocalFontFiles = null;
       .map(entry => entry.item);
   }
 
+  function parseServerPriceValue(val: unknown): number {
+    if (val === undefined || val === null) return 0;
+    const str = String(val)
+      .replace(/(\/[-=]|\$[-=])\s*$/g, "")
+      .replace(/,/g, "")
+      .trim();
+    if (!str) return 0;
+    const match = str.match(/-?\d+(?:\.\d+)?/);
+    if (!match) return 0;
+    const num = parseFloat(match[0]);
+    return isNaN(num) ? 0 : num;
+  }
+
+  function findLatestDataItemId(list: Array<{ id?: any; sortOrder?: any; createdAt?: any }>): string | null {
+    let latest: any = null;
+    for (const item of list) {
+      if (!latest) {
+        latest = item;
+        continue;
+      }
+      const soA = Number(item.sortOrder ?? 0);
+      const soB = Number(latest.sortOrder ?? 0);
+      if (soA > soB) {
+        latest = item;
+      } else if (soA === soB) {
+        const tA = item.createdAt ? new Date(item.createdAt).getTime() : 0;
+        const tB = latest.createdAt ? new Date(latest.createdAt).getTime() : 0;
+        if (tA >= tB) latest = item;
+      }
+    }
+    return latest?.id ? String(latest.id) : null;
+  }
+
+  function computeServerPriceTotals(
+    list: Array<{ rowValues?: Record<string, any> }>,
+    priceLayerIds: string[]
+  ): Record<string, number> {
+    const totals: Record<string, number> = {};
+    if (priceLayerIds.length === 0) return totals;
+    for (const pid of priceLayerIds) totals[pid] = 0;
+    for (const item of list) {
+      for (const pid of priceLayerIds) {
+        totals[pid] += parseServerPriceValue(item.rowValues?.[pid]);
+      }
+    }
+    return totals;
+  }
+
   // Project Saved Data List Endpoints
   app.get("/api/projects/:projectId/data-list", async (req, res) => {
     try {
       const { projectId } = req.params;
       const mode = String(req.query.mode || "all");
       const rawDateLayerIds = typeof req.query.dateLayerIds === "string" ? req.query.dateLayerIds : "";
+      const rawPriceLayerIds = typeof req.query.priceLayerIds === "string" ? req.query.priceLayerIds : "";
       const rawMonthDays = typeof req.query.monthDays === "string" ? req.query.monthDays : "";
       const rawMonth = typeof req.query.month === "string" ? req.query.month.trim().padStart(2, "0") : "";
       const targetMonth = /^(0[1-9]|1[0-2])$/.test(rawMonth) ? rawMonth : "";
+      const searchQ = typeof req.query.q === "string" ? req.query.q.trim() : "";
+      const focusId = typeof req.query.focusId === "string" ? req.query.focusId.trim() : "";
+      const groupByLayerId = typeof req.query.groupByLayerId === "string" ? req.query.groupByLayerId.trim() : "";
+      const rawPage = String(req.query.page || "").trim();
+      const rawLimit = String(req.query.limit || "").trim();
+      const pageLimit = rawLimit && rawLimit !== "all" ? Math.max(0, parseInt(rawLimit, 10) || 0) : 0;
+      const isPaged = pageLimit > 0;
 
       let dateLayerIds = rawDateLayerIds
+        .split(",")
+        .map(s => s.trim())
+        .filter(Boolean);
+      const priceLayerIds = rawPriceLayerIds
         .split(",")
         .map(s => s.trim())
         .filter(Boolean);
@@ -1929,8 +1989,12 @@ cachedLocalFontFiles = null;
       const useDateFilter = activeFilterMonthDays.length > 0;
 
       if (HAS_POSTGRES) {
+        const params: any[] = [projectId];
+        const whereClauses: string[] = ["project_id = $1"];
+
         if (useDateFilter) {
-          const params: any[] = [projectId, activeFilterMonthDays];
+          params.push(activeFilterMonthDays);
+          const mdParamIdx = params.length;
           const layerPredicates = dateLayerIds.map((lid) => {
             params.push(lid);
             const pIdx = params.length;
@@ -1941,7 +2005,7 @@ cachedLocalFontFiles = null;
                   LPAD((regexp_match(row_values->>$${pIdx}, '^\\s*\\d{4}[-/](\\d{1,2})[-/](\\d{1,2})'))[1], 2, '0')
                   || '-' ||
                   LPAD((regexp_match(row_values->>$${pIdx}, '^\\s*\\d{4}[-/](\\d{1,2})[-/](\\d{1,2})'))[2], 2, '0')
-                ) = ANY($2::text[])
+                ) = ANY($${mdParamIdx}::text[])
               )
               OR
               (
@@ -1951,61 +2015,310 @@ cachedLocalFontFiles = null;
                     LPAD((regexp_match(row_values->>$${pIdx}, '^\\s*(\\d{1,2})[-/](\\d{1,2})[-/]\\d{4}'))[1], 2, '0')
                     || '-' ||
                     LPAD((regexp_match(row_values->>$${pIdx}, '^\\s*(\\d{1,2})[-/](\\d{1,2})[-/]\\d{4}'))[2], 2, '0')
-                  ) = ANY($2::text[])
+                  ) = ANY($${mdParamIdx}::text[])
                   OR
                   (
                     LPAD((regexp_match(row_values->>$${pIdx}, '^\\s*(\\d{1,2})[-/](\\d{1,2})[-/]\\d{4}'))[2], 2, '0')
                     || '-' ||
                     LPAD((regexp_match(row_values->>$${pIdx}, '^\\s*(\\d{1,2})[-/](\\d{1,2})[-/]\\d{4}'))[1], 2, '0')
-                  ) = ANY($2::text[])
+                  ) = ANY($${mdParamIdx}::text[])
                 )
               )
             )`;
           });
+          whereClauses.push(`(${layerPredicates.join(" OR ")})`);
+        }
 
-          const rowsRes = await safeQuery(
+        if (searchQ !== "") {
+          params.push(`%${searchQ}%`);
+          const qIdx = params.length;
+          whereClauses.push(
+            `(COALESCE(row_name, '') ILIKE $${qIdx} OR EXISTS (SELECT 1 FROM jsonb_each_text(COALESCE(row_values, '{}'::jsonb)) kv WHERE kv.value ILIKE $${qIdx}))`
+          );
+        }
+
+        const whereSql = whereClauses.join(" AND ");
+
+        // Fastest pure-SQL paging path when no date-column sort, grouping, or price summing is required
+        if (isPaged && dateLayerIds.length === 0 && !groupByLayerId && priceLayerIds.length === 0) {
+          const statsParams = [...params];
+          let focusSelectSql = "NULL::int AS focus_rn";
+          if (focusId) {
+            statsParams.push(focusId);
+            focusSelectSql = `(SELECT rn::int FROM filtered WHERE id = $${statsParams.length} LIMIT 1) AS focus_rn`;
+          }
+          const statsRes = await safeQuery(
+            `WITH filtered AS (
+               SELECT id, sort_order, created_at,
+                      ROW_NUMBER() OVER (ORDER BY sort_order ASC, created_at ASC) - 1 AS rn
+               FROM font_app_project_data
+               WHERE ${whereSql}
+             )
+             SELECT
+               (SELECT COUNT(*)::int FROM font_app_project_data WHERE project_id = $1) AS total_count,
+               (SELECT COUNT(*)::int FROM filtered) AS matched_count,
+               (SELECT id FROM filtered ORDER BY sort_order DESC, created_at DESC LIMIT 1) AS latest_id,
+               ${focusSelectSql}`,
+            statsParams
+          );
+
+          const statsRow = statsRes.rows[0] || {};
+          const totalCount = Number(statsRow.total_count ?? 0);
+          const matchedCount = Number(statsRow.matched_count ?? 0);
+          const latestItemId = statsRow.latest_id ? String(statsRow.latest_id) : null;
+          const totalPages = Math.max(1, Math.ceil(matchedCount / pageLimit));
+
+          let focusFound = false;
+          let targetPage = 1;
+          if (focusId && statsRow.focus_rn !== null && statsRow.focus_rn !== undefined) {
+            focusFound = true;
+            targetPage = Math.floor(Number(statsRow.focus_rn) / pageLimit) + 1;
+          } else if (rawPage === "latest" || !rawPage) {
+            targetPage = totalPages;
+          } else {
+            targetPage = Math.min(Math.max(1, parseInt(rawPage, 10) || 1), totalPages);
+          }
+
+          const offset = Math.max(0, (targetPage - 1) * pageLimit);
+          const pageParams = [...params, pageLimit, offset];
+          const limitIdx = pageParams.length - 1;
+          const offsetIdx = pageParams.length;
+          const pageRes = await safeQuery(
             `SELECT id, project_id as "projectId", username, row_name as "rowName",
                     row_values as "rowValues", sort_order as "sortOrder",
-                    created_at as "createdAt", updated_at as "updatedAt",
-                    (SELECT COUNT(*)::int FROM font_app_project_data WHERE project_id = $1) as "_totalCount"
+                    created_at as "createdAt", updated_at as "updatedAt"
              FROM font_app_project_data
-             WHERE project_id = $1 AND (${layerPredicates.join(" OR ")})
-             ORDER BY sort_order ASC, created_at ASC`,
-            params
+             WHERE ${whereSql}
+             ORDER BY sort_order ASC, created_at ASC
+             LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+            pageParams
           );
-          let totalCount = rowsRes.rows.length > 0 ? Number(rowsRes.rows[0]._totalCount ?? rowsRes.rows.length) : null;
-          if (totalCount === null) {
+
+          return res.json({
+            success: true,
+            items: pageRes.rows,
+            page: targetPage,
+            pageSize: pageLimit,
+            totalPages,
+            matchedCount,
+            matchedGroupCount: 0,
+            totalCount,
+            latestItemId,
+            focusFound,
+            priceTotals: {},
+            filteredByDate: false,
+          });
+        }
+
+        // Metadata-slice paging path (fetches only lightweight fields first, then full row_values ONLY for target page IDs)
+        if (isPaged) {
+          const metaKeys = Array.from(
+            new Set([...dateLayerIds, ...priceLayerIds, ...(groupByLayerId ? [groupByLayerId] : [])])
+          );
+          const metaParams = [...params];
+          const metaColExprs = metaKeys.map((k, idx) => {
+            metaParams.push(k);
+            return `row_values->>$${metaParams.length} AS "m_${idx}"`;
+          });
+          const needSeparateTotal = useDateFilter || searchQ !== "";
+          const totalExpr = needSeparateTotal
+            ? `, (SELECT COUNT(*)::int FROM font_app_project_data WHERE project_id = $1) AS "_totalCount"`
+            : "";
+
+          const metaRes = await safeQuery(
+            `SELECT id, sort_order as "sortOrder", created_at as "createdAt"
+                    ${metaColExprs.length > 0 ? `, ${metaColExprs.join(", ")}` : ""}
+                    ${totalExpr}
+             FROM font_app_project_data
+             WHERE ${whereSql}
+             ORDER BY sort_order ASC, created_at ASC`,
+            metaParams
+          );
+
+          let totalCount = metaRes.rows.length;
+          if (needSeparateTotal) {
+            if (metaRes.rows.length > 0 && metaRes.rows[0]._totalCount !== undefined) {
+              totalCount = Number(metaRes.rows[0]._totalCount);
+            } else {
+              const cRes = await safeQuery(
+                `SELECT COUNT(*)::int as total FROM font_app_project_data WHERE project_id = $1`,
+                [projectId]
+              );
+              totalCount = Number(cRes.rows[0]?.total ?? 0);
+            }
+          }
+
+          const metaList = metaRes.rows.map((r: any) => {
+            const rowValues: Record<string, string> = {};
+            metaKeys.forEach((k, idx) => {
+              const val = r[`m_${idx}`];
+              if (val !== undefined && val !== null) rowValues[k] = String(val);
+            });
+            return {
+              id: String(r.id),
+              sortOrder: r.sortOrder,
+              createdAt: r.createdAt,
+              rowValues,
+            };
+          });
+
+          const latestItemId = findLatestDataItemId(metaList);
+          const priceTotals = computeServerPriceTotals(metaList, priceLayerIds);
+          const sortedMeta = sortItemsByDateAscending(
+            metaList,
+            dateLayerIds,
+            useDateFilter ? activeFilterMonthDays : null
+          );
+          const matchedCount = sortedMeta.length;
+
+          let targetPage = 1;
+          let totalPages = 1;
+          let matchedGroupCount = 0;
+          let focusFound = false;
+          let pageIds: string[] = [];
+
+          if (groupByLayerId) {
+            const bucketsMap = new Map<string, { key: string; rawValue: string; ids: string[] }>();
+            for (const it of sortedMeta) {
+              const rawVal = String(it.rowValues?.[groupByLayerId] ?? "").trim();
+              const key = rawVal || "__empty__";
+              let b = bucketsMap.get(key);
+              if (!b) {
+                b = { key, rawValue: rawVal, ids: [] };
+                bucketsMap.set(key, b);
+              }
+              b.ids.push(it.id);
+            }
+            const buckets = Array.from(bucketsMap.values());
+            if (dateLayerIds.includes(groupByLayerId)) {
+              const mdRank = useDateFilter
+                ? new Map(activeFilterMonthDays.map((md, idx) => [md, idx]))
+                : null;
+              buckets.sort((a, b) => {
+                if (a.key === "__empty__" && b.key === "__empty__") return 0;
+                if (a.key === "__empty__") return 1;
+                if (b.key === "__empty__") return -1;
+                const infoA = parseDateSortInfo(a.rawValue);
+                const infoB = parseDateSortInfo(b.rawValue);
+                if (!infoA && !infoB) return a.rawValue.localeCompare(b.rawValue);
+                if (!infoA) return 1;
+                if (!infoB) return -1;
+                if (mdRank) {
+                  const rA = mdRank.get(infoA.monthDay) ?? 999;
+                  const rB = mdRank.get(infoB.monthDay) ?? 999;
+                  if (rA !== rB) return rA - rB;
+                }
+                if (infoA.timestamp !== infoB.timestamp) return infoA.timestamp - infoB.timestamp;
+                return a.rawValue.localeCompare(b.rawValue);
+              });
+            }
+
+            matchedGroupCount = buckets.length;
+            totalPages = Math.max(1, Math.ceil(matchedGroupCount / pageLimit));
+
+            const focusBucketIdx = focusId ? buckets.findIndex(b => b.ids.includes(focusId)) : -1;
+            if (focusBucketIdx >= 0) {
+              focusFound = true;
+              targetPage = Math.floor(focusBucketIdx / pageLimit) + 1;
+            } else if (rawPage === "latest" || !rawPage) {
+              const latestBucketIdx = latestItemId ? buckets.findIndex(b => b.ids.includes(latestItemId)) : -1;
+              targetPage = latestBucketIdx >= 0 ? Math.floor(latestBucketIdx / pageLimit) + 1 : totalPages;
+            } else {
+              targetPage = Math.min(Math.max(1, parseInt(rawPage, 10) || 1), totalPages);
+            }
+
+            const startG = (targetPage - 1) * pageLimit;
+            pageIds = buckets.slice(startG, startG + pageLimit).flatMap(b => b.ids);
+          } else {
+            totalPages = Math.max(1, Math.ceil(matchedCount / pageLimit));
+            const focusIdx = focusId ? sortedMeta.findIndex(it => it.id === focusId) : -1;
+            if (focusIdx >= 0) {
+              focusFound = true;
+              targetPage = Math.floor(focusIdx / pageLimit) + 1;
+            } else if (rawPage === "latest" || !rawPage) {
+              const latestIdx = latestItemId ? sortedMeta.findIndex(it => it.id === latestItemId) : -1;
+              targetPage = latestIdx >= 0 ? Math.floor(latestIdx / pageLimit) + 1 : totalPages;
+            } else {
+              targetPage = Math.min(Math.max(1, parseInt(rawPage, 10) || 1), totalPages);
+            }
+
+            const startIdx = (targetPage - 1) * pageLimit;
+            pageIds = sortedMeta.slice(startIdx, startIdx + pageLimit).map(it => it.id);
+          }
+
+          let orderedItems: any[] = [];
+          if (pageIds.length > 0) {
+            const fullRes = await safeQuery(
+              `SELECT id, project_id as "projectId", username, row_name as "rowName",
+                      row_values as "rowValues", sort_order as "sortOrder",
+                      created_at as "createdAt", updated_at as "updatedAt"
+               FROM font_app_project_data
+               WHERE project_id = $1 AND id = ANY($2::text[])`,
+              [projectId, pageIds]
+            );
+            const byId = new Map<string, any>(fullRes.rows.map((r: any) => [String(r.id), r]));
+            orderedItems = pageIds.map(id => byId.get(id)).filter(Boolean);
+          }
+
+          return res.json({
+            success: true,
+            items: orderedItems,
+            page: targetPage,
+            pageSize: pageLimit,
+            totalPages,
+            matchedCount,
+            matchedGroupCount,
+            totalCount,
+            latestItemId,
+            focusFound,
+            priceTotals,
+            filteredByDate: useDateFilter,
+          });
+        }
+
+        // Unpaged ("All") full fetch path (used by Export / Preview All / Page Size = All)
+        const needTotal = useDateFilter || searchQ !== "";
+        const rowsRes = await safeQuery(
+          `SELECT id, project_id as "projectId", username, row_name as "rowName",
+                  row_values as "rowValues", sort_order as "sortOrder",
+                  created_at as "createdAt", updated_at as "updatedAt"
+                  ${needTotal ? `, (SELECT COUNT(*)::int FROM font_app_project_data WHERE project_id = $1) as "_totalCount"` : ""}
+           FROM font_app_project_data
+           WHERE ${whereSql}
+           ORDER BY sort_order ASC, created_at ASC`,
+          params
+        );
+        let totalCount = rowsRes.rows.length;
+        if (needTotal) {
+          if (rowsRes.rows.length > 0 && rowsRes.rows[0]._totalCount !== undefined) {
+            totalCount = Number(rowsRes.rows[0]._totalCount);
+          } else {
             const countRes = await safeQuery(
               `SELECT COUNT(*)::int as total FROM font_app_project_data WHERE project_id = $1`,
               [projectId]
             );
             totalCount = Number(countRes.rows[0]?.total ?? 0);
           }
-          const cleanRows = rowsRes.rows.map(({ _totalCount, ...rest }: any) => rest);
-          const sortedRows = sortItemsByDateAscending(cleanRows, dateLayerIds, activeFilterMonthDays);
-          return res.json({
-            success: true,
-            items: sortedRows,
-            totalCount,
-            filteredByDate: true,
-          });
         }
-
-        const result = await safeQuery(
-          `SELECT id, project_id as "projectId", username, row_name as "rowName",
-                  row_values as "rowValues", sort_order as "sortOrder",
-                  created_at as "createdAt", updated_at as "updatedAt"
-           FROM font_app_project_data
-           WHERE project_id = $1
-           ORDER BY sort_order ASC, created_at ASC`,
-          [projectId]
+        const cleanRows = rowsRes.rows.map(({ _totalCount, ...rest }: any) => rest);
+        const sortedRows = sortItemsByDateAscending(
+          cleanRows,
+          dateLayerIds,
+          useDateFilter ? activeFilterMonthDays : null
         );
-        const sortedRows = sortItemsByDateAscending(result.rows, dateLayerIds, null);
         return res.json({
           success: true,
           items: sortedRows,
-          totalCount: sortedRows.length,
-          filteredByDate: false,
+          page: 1,
+          pageSize: 0,
+          totalPages: 1,
+          matchedCount: sortedRows.length,
+          matchedGroupCount: 0,
+          totalCount,
+          latestItemId: findLatestDataItemId(sortedRows),
+          focusFound: focusId ? sortedRows.some((r: any) => r.id === focusId) : false,
+          priceTotals: computeServerPriceTotals(sortedRows, priceLayerIds),
+          filteredByDate: useDateFilter,
         });
       } else {
         ensureFallbackDataFile();
@@ -2014,29 +2327,115 @@ cachedLocalFontFiles = null;
           .filter((item: any) => item.projectId === projectId)
           .sort((a: any, b: any) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
 
+        let matched = allItems;
         if (useDateFilter) {
           const mdSet = new Set(activeFilterMonthDays);
-          const filtered = allItems.filter((item: any) =>
+          matched = matched.filter((item: any) =>
             dateLayerIds.some((lid) => {
               const md = parseMonthDayFromDateValue(item.rowValues?.[lid]);
               return md !== null && mdSet.has(md);
             })
           );
-          const sortedFiltered = sortItemsByDateAscending(filtered, dateLayerIds, activeFilterMonthDays);
-          return res.json({
-            success: true,
-            items: sortedFiltered,
-            totalCount: allItems.length,
-            filteredByDate: true,
+        }
+        if (searchQ !== "") {
+          const qLower = searchQ.toLowerCase();
+          matched = matched.filter((item: any) => {
+            if (String(item.rowName || "").toLowerCase().includes(qLower)) return true;
+            return Object.values(item.rowValues || {}).some((v: any) =>
+              String(v ?? "").toLowerCase().includes(qLower)
+            );
           });
         }
 
-        const sortedAll = sortItemsByDateAscending(allItems, dateLayerIds, null);
+        const sortedMatched = sortItemsByDateAscending<any>(
+          matched,
+          dateLayerIds,
+          useDateFilter ? activeFilterMonthDays : null
+        );
+        const latestItemId = findLatestDataItemId(sortedMatched);
+        const priceTotals = computeServerPriceTotals(sortedMatched, priceLayerIds);
+
+        if (!isPaged) {
+          return res.json({
+            success: true,
+            items: sortedMatched,
+            page: 1,
+            pageSize: 0,
+            totalPages: 1,
+            matchedCount: sortedMatched.length,
+            matchedGroupCount: 0,
+            totalCount: allItems.length,
+            latestItemId,
+            focusFound: focusId ? sortedMatched.some((r: any) => r.id === focusId) : false,
+            priceTotals,
+            filteredByDate: useDateFilter,
+          });
+        }
+
+        let targetPage = 1;
+        let totalPages = 1;
+        let matchedGroupCount = 0;
+        let focusFound = false;
+        let pagedItems: any[] = [];
+
+        if (groupByLayerId) {
+          const bucketsMap = new Map<string, { key: string; rawValue: string; bucketItems: any[] }>();
+          for (const it of sortedMatched) {
+            const rawVal = String(it.rowValues?.[groupByLayerId] ?? "").trim();
+            const key = rawVal || "__empty__";
+            let b = bucketsMap.get(key);
+            if (!b) {
+              b = { key, rawValue: rawVal, bucketItems: [] };
+              bucketsMap.set(key, b);
+            }
+            b.bucketItems.push(it);
+          }
+          const buckets = Array.from(bucketsMap.values());
+          matchedGroupCount = buckets.length;
+          totalPages = Math.max(1, Math.ceil(matchedGroupCount / pageLimit));
+          const focusBucketIdx = focusId ? buckets.findIndex(b => b.bucketItems.some(it => it.id === focusId)) : -1;
+          if (focusBucketIdx >= 0) {
+            focusFound = true;
+            targetPage = Math.floor(focusBucketIdx / pageLimit) + 1;
+          } else if (rawPage === "latest" || !rawPage) {
+            const latestBucketIdx = latestItemId
+              ? buckets.findIndex(b => b.bucketItems.some(it => it.id === latestItemId))
+              : -1;
+            targetPage = latestBucketIdx >= 0 ? Math.floor(latestBucketIdx / pageLimit) + 1 : totalPages;
+          } else {
+            targetPage = Math.min(Math.max(1, parseInt(rawPage, 10) || 1), totalPages);
+          }
+          const startG = (targetPage - 1) * pageLimit;
+          pagedItems = buckets.slice(startG, startG + pageLimit).flatMap(b => b.bucketItems);
+        } else {
+          totalPages = Math.max(1, Math.ceil(sortedMatched.length / pageLimit));
+          const focusIdx = focusId ? sortedMatched.findIndex((it: any) => it.id === focusId) : -1;
+          if (focusIdx >= 0) {
+            focusFound = true;
+            targetPage = Math.floor(focusIdx / pageLimit) + 1;
+          } else if (rawPage === "latest" || !rawPage) {
+            const latestIdx = latestItemId ? sortedMatched.findIndex((it: any) => it.id === latestItemId) : -1;
+            targetPage = latestIdx >= 0 ? Math.floor(latestIdx / pageLimit) + 1 : totalPages;
+          } else {
+            targetPage = Math.min(Math.max(1, parseInt(rawPage, 10) || 1), totalPages);
+          }
+          const startIdx = (targetPage - 1) * pageLimit;
+          pagedItems = sortedMatched.slice(startIdx, startIdx + pageLimit);
+        }
+
         return res.json({
           success: true,
-          items: sortedAll,
-          totalCount: sortedAll.length,
-          filteredByDate: false,
+          items: pagedItems,
+          page: targetPage,
+          pageSize: pageLimit,
+          totalPages,
+          matchedCount: sortedMatched.length,
+          matchedGroupCount,
+          totalCount: allItems.length,
+          latestItemId,
+          focusFound,
+          priceTotals,
+          filteredByDate: useDateFilter,
         });
       }
     } catch (err) {

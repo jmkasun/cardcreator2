@@ -3,7 +3,7 @@ import {
   X, Plus, Trash2, Edit2, Upload, Download, FileSpreadsheet, FileJson,
   Database, Search, ArrowRight, ArrowLeft, ArrowLeftRight,
   RefreshCw, Share2, CheckCircle2, Save,
-  Wand2, Copy, ChevronRight, LayoutList, SlidersHorizontal,
+  Wand2, Copy, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, LayoutList, SlidersHorizontal,
   Eye, AlignLeft, AlignCenter, AlignRight, ArrowUp, ArrowDown,
   Image as ImageIcon, Check, ChevronDown, ChevronUp, Sparkles, Printer, Calendar, Globe, Lock, Tags, MoreVertical, Coins
 } from "lucide-react";
@@ -926,7 +926,35 @@ export function ProjectDataListModal({
   const [dateFilterMode, setDateFilterMode] = useState<DateFilterMode>("5days");
   const hasUserChangedFilterRef = useRef(false);
   const [totalRecordCount, setTotalRecordCount] = useState(0);
+  const [matchedRecordCount, setMatchedRecordCount] = useState(0);
+  const [matchedGroupCount, setMatchedGroupCount] = useState(0);
+  const [serverTotalPages, setServerTotalPages] = useState(1);
+  const [serverPriceTotals, setServerPriceTotals] = useState<Record<string, number> | null>(null);
+  const [latestRecordId, setLatestRecordId] = useState<string | null>(null);
+  const [highlightedRowId, setHighlightedRowId] = useState<string | null>(null);
   const [isDateFiltered, setIsDateFiltered] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState<number>(() => {
+    try {
+      const saved = Number(localStorage.getItem("project_data_list_page_size"));
+      if ([10, 25, 50, 100, 0].includes(saved)) return saved;
+    } catch {
+      // ignore localStorage read errors
+    }
+    return 25;
+  });
+  const tableScrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const pendingScrollRowIdRef = useRef<string | null>(null);
+  const highlightTimerRef = useRef<number | null>(null);
+  const pendingJumpToLatestLiveRef = useRef(false);
+  const dbFetchSeqRef = useRef(0);
+  const searchFetchMountedRef = useRef(false);
+  const skipNextSearchFetchRef = useRef(false);
+
+  const priceLayerIds = useMemo(
+    () => activeLayers.filter(l => isPriceLayer(l)).map(l => l.id),
+    [activeLayers]
+  );
 
   const resolveFilterDescriptor = (mode: DateFilterMode) => {
     if (mode === "all") {
@@ -1413,15 +1441,34 @@ export function ProjectDataListModal({
 
   const applyLiveApiDateFilter = (
     sourceItems: ProjectDataItem[],
-    filterModeInput?: DateFilterMode
+    filterModeInput?: DateFilterMode,
+    jumpToLatest = true
   ) => {
     const targetMode = filterModeInput !== undefined ? filterModeInput : dateFilterMode;
     const desc = resolveFilterDescriptor(targetMode);
 
     setTotalRecordCount(sourceItems.length);
+    setServerPriceTotals(null);
+
+    const pickLatestId = (list: ProjectDataItem[]): string | null => {
+      if (list.length === 0) return null;
+      let latest = list[0];
+      for (const it of list) {
+        if (Number(it.sortOrder ?? 0) >= Number(latest.sortOrder ?? 0)) {
+          latest = it;
+        }
+      }
+      return latest.id;
+    };
+
+    if (jumpToLatest) {
+      pendingJumpToLatestLiveRef.current = true;
+    }
 
     if (dateLayerIds.length === 0 || desc.kind === "all") {
       setItems(sourceItems);
+      setMatchedRecordCount(sourceItems.length);
+      setLatestRecordId(pickLatestId(sourceItems));
       setIsDateFiltered(false);
       return;
     }
@@ -1434,6 +1481,8 @@ export function ProjectDataListModal({
         })
       );
       setItems(filtered);
+      setMatchedRecordCount(filtered.length);
+      setLatestRecordId(pickLatestId(filtered));
       setIsDateFiltered(true);
       return;
     }
@@ -1446,6 +1495,8 @@ export function ProjectDataListModal({
       })
     );
     setItems(filtered);
+    setMatchedRecordCount(filtered.length);
+    setLatestRecordId(pickLatestId(filtered));
     setIsDateFiltered(true);
   };
 
@@ -1667,13 +1718,69 @@ export function ProjectDataListModal({
     setLiveApiUrlLabel("");
     const defaultFilter = normalizeDefaultDateFilter(groupConfig.defaultDateFilter);
     setDateFilterMode(defaultFilter);
-    fetchProjectDataList({ filterMode: defaultFilter, bypassLiveCheck: true });
+    fetchProjectDataList({ filterMode: defaultFilter, page: "latest", bypassLiveCheck: true });
   };
 
-  // Fetch project data list from DB OR handle filter / refresh in Live API mode
-  const fetchProjectDataList = async (
-    opts?: { filterMode?: DateFilterMode; bypassLiveCheck?: boolean }
-  ) => {
+  const buildDataListUrl = (opts: {
+    filterMode: DateFilterMode;
+    page?: number | "latest";
+    limit?: number;
+    search?: string;
+    focusId?: string;
+    groupBy?: string;
+  }) => {
+    const desc = resolveFilterDescriptor(opts.filterMode);
+    const params = new URLSearchParams();
+    params.set("mode", desc.kind === "all" ? "all" : desc.apiMode);
+    if (dateLayerIds.length > 0) {
+      params.set("dateLayerIds", dateLayerIds.join(","));
+    }
+    if (priceLayerIds.length > 0) {
+      params.set("priceLayerIds", priceLayerIds.join(","));
+    }
+    if (desc.kind === "month" && dateLayerIds.length > 0) {
+      params.set("month", desc.month);
+    } else if (desc.kind === "days" && dateLayerIds.length > 0) {
+      params.set("monthDays", desc.monthDays.join(","));
+    }
+    const effLimit = opts.limit !== undefined ? opts.limit : pageSize;
+    params.set("limit", effLimit > 0 ? String(effLimit) : "all");
+    if (effLimit > 0) {
+      params.set("page", opts.page !== undefined ? String(opts.page) : "latest");
+    }
+    const q = (opts.search !== undefined ? opts.search : searchQuery).trim();
+    if (q) {
+      params.set("q", q);
+    }
+    if (opts.focusId) {
+      params.set("focusId", opts.focusId);
+    }
+    const effGroup = opts.groupBy !== undefined ? opts.groupBy : groupByLayerId;
+    if (effGroup) {
+      params.set("groupByLayerId", effGroup);
+    }
+    return `/api/projects/${encodeURIComponent(project.id)}/data-list?${params.toString()}`;
+  };
+
+  // Fetch project data list from DB (paged) OR handle filter / refresh in Live API mode
+  const fetchProjectDataList = async (opts?: {
+    filterMode?: DateFilterMode;
+    bypassLiveCheck?: boolean;
+    page?: number | "latest";
+    limit?: number;
+    search?: string;
+    focusId?: string;
+    groupBy?: string;
+    silentLoading?: boolean;
+  }): Promise<{
+    items: ProjectDataItem[];
+    page: number;
+    totalPages: number;
+    matchedCount: number;
+    totalCount: number;
+    latestItemId: string | null;
+    focusFound: boolean;
+  } | null> => {
     const targetMode = opts?.filterMode !== undefined ? opts.filterMode : dateFilterMode;
     const bypassLiveCheck = Boolean(opts?.bypassLiveCheck);
 
@@ -1682,64 +1789,87 @@ export function ProjectDataListModal({
       if (opts === undefined) {
         await loadLiveDataFromApi(undefined, { filterMode: targetMode });
       } else {
-        applyLiveApiDateFilter(liveApiSourceItems, targetMode);
+        applyLiveApiDateFilter(liveApiSourceItems, targetMode, opts.page === undefined || opts.page === "latest");
       }
-      return;
+      return null;
     }
 
     if (!bypassLiveCheck && liveApiLoadError) {
       await loadLiveDataFromApi(undefined, { filterMode: targetMode });
-      return;
+      return null;
     }
 
-    if (!project.id || project.id === "temp") return;
+    if (!project.id || project.id === "temp") return null;
 
-    const desc = resolveFilterDescriptor(targetMode);
-
-    setIsLoading(true);
-    setIsLiveApiLoading(false);
+    const seq = ++dbFetchSeqRef.current;
+    if (!opts?.silentLoading) {
+      setIsLoading(true);
+      setIsLiveApiLoading(false);
+    }
     try {
-      let url = `/api/projects/${encodeURIComponent(project.id)}/data-list?mode=all${
-        dateLayerIds.length > 0 ? `&dateLayerIds=${encodeURIComponent(dateLayerIds.join(","))}` : ""
-      }`;
-      if (desc.kind === "month" && dateLayerIds.length > 0) {
-        const params = new URLSearchParams({
-          mode: "month",
-          month: desc.month,
-          dateLayerIds: dateLayerIds.join(","),
-        });
-        url = `/api/projects/${encodeURIComponent(project.id)}/data-list?${params.toString()}`;
-      } else if (desc.kind === "days" && dateLayerIds.length > 0) {
-        const params = new URLSearchParams({
-          mode: desc.apiMode,
-          dateLayerIds: dateLayerIds.join(","),
-          monthDays: desc.monthDays.join(","),
-        });
-        url = `/api/projects/${encodeURIComponent(project.id)}/data-list?${params.toString()}`;
-      }
+      const url = buildDataListUrl({
+        filterMode: targetMode,
+        page: opts?.page,
+        limit: opts?.limit,
+        search: opts?.search,
+        focusId: opts?.focusId,
+        groupBy: opts?.groupBy,
+      });
 
       const res = await fetch(url);
+      if (seq !== dbFetchSeqRef.current) return null;
       if (res.ok) {
         const data = await res.json();
-        const loaded = Array.isArray(data.items) ? data.items : [];
+        if (seq !== dbFetchSeqRef.current) return null;
+        const loaded: ProjectDataItem[] = Array.isArray(data.items) ? data.items : [];
+        const nextPage = typeof data.page === "number" && data.page >= 1 ? data.page : 1;
+        const nextTotalPages = typeof data.totalPages === "number" && data.totalPages >= 1 ? data.totalPages : 1;
+        const nextMatched = typeof data.matchedCount === "number" ? data.matchedCount : loaded.length;
+        const nextMatchedGroups = typeof data.matchedGroupCount === "number" ? data.matchedGroupCount : 0;
+        const nextTotal = typeof data.totalCount === "number" ? data.totalCount : nextMatched;
+        const nextLatestId = data.latestItemId ? String(data.latestItemId) : null;
+
         setItems(loaded);
-        setTotalRecordCount(typeof data.totalCount === "number" ? data.totalCount : loaded.length);
+        setCurrentPage(nextPage);
+        setServerTotalPages(nextTotalPages);
+        setMatchedRecordCount(nextMatched);
+        setMatchedGroupCount(nextMatchedGroups);
+        setTotalRecordCount(nextTotal);
+        setLatestRecordId(nextLatestId);
+        setServerPriceTotals(
+          data.priceTotals && typeof data.priceTotals === "object" ? data.priceTotals : null
+        );
         setIsDateFiltered(Boolean(data.filteredByDate));
+
+        return {
+          items: loaded,
+          page: nextPage,
+          totalPages: nextTotalPages,
+          matchedCount: nextMatched,
+          totalCount: nextTotal,
+          latestItemId: nextLatestId,
+          focusFound: Boolean(data.focusFound),
+        };
       } else {
         onNotification({ message: "Failed to load project saved data list", type: "error" });
       }
     } catch (err) {
-      console.error("Failed to fetch project data list:", err);
-      onNotification({ message: "Error loading saved data list", type: "error" });
+      if (seq === dbFetchSeqRef.current) {
+        console.error("Failed to fetch project data list:", err);
+        onNotification({ message: "Error loading saved data list", type: "error" });
+      }
     } finally {
-      setIsLoading(false);
+      if (seq === dbFetchSeqRef.current && !opts?.silentLoading) {
+        setIsLoading(false);
+      }
     }
+    return null;
   };
 
   const applyDateFilterSelection = (nextMode: DateFilterMode) => {
     hasUserChangedFilterRef.current = true;
     setDateFilterMode(nextMode);
-    fetchProjectDataList({ filterMode: nextMode });
+    fetchProjectDataList({ filterMode: nextMode, page: "latest" });
   };
 
   const savedDefaultDateFilter = normalizeDefaultDateFilter(groupConfig.defaultDateFilter);
@@ -1748,7 +1878,7 @@ export function ProjectDataListModal({
     hasUserChangedFilterRef.current = true;
     setGroupConfig(prev => ({ ...prev, defaultDateFilter: nextDefault }));
     setDateFilterMode(nextDefault);
-    fetchProjectDataList({ filterMode: nextDefault });
+    fetchProjectDataList({ filterMode: nextDefault, page: "latest" });
     const desc = resolveFilterDescriptor(nextDefault);
     onNotification({
       message: `Default filter saved: ${desc.fullLabel}`,
@@ -1782,7 +1912,9 @@ export function ProjectDataListModal({
   };
 
   const applyRestoredSettings = (rawSettings: { groupByLayerId?: string; groupConfig?: Partial<GroupConfigState> } | null | undefined) => {
-    if (!rawSettings || typeof rawSettings !== "object") return false;
+    if (!rawSettings || typeof rawSettings !== "object") {
+      return { restored: false, groupByLayerId: "" };
+    }
     const layerIds = new Set(activeLayers.map(l => l.id));
     const rawGroupId = typeof rawSettings.groupByLayerId === "string" ? rawSettings.groupByLayerId : "";
     const validGroupBy = rawGroupId && layerIds.has(rawGroupId) ? rawGroupId : "";
@@ -1825,7 +1957,7 @@ export function ProjectDataListModal({
 
     setGroupByLayerIdRaw(validGroupBy);
     setGroupConfigRaw(merged);
-    return true;
+    return { restored: true, groupByLayerId: validGroupBy };
   };
 
   const handleGroupByChange = (nextLayerId: string) => {
@@ -1833,23 +1965,45 @@ export function ProjectDataListModal({
     setGroupByLayerIdRaw(nextLayerId);
     if (!nextLayerId) {
       setPreviewGroupKey(null);
-      return;
+    } else {
+      const smart = getSmartGroupFieldDefaults(nextLayerId, activeLayers);
+      setGroupConfigRaw(prev => ({
+        ...prev,
+        ...smart,
+      }));
     }
-    const smart = getSmartGroupFieldDefaults(nextLayerId, activeLayers);
-    setGroupConfigRaw(prev => ({
-      ...prev,
-      ...smart,
-    }));
+    if (liveApiSourceItems === null) {
+      void fetchProjectDataList({ groupBy: nextLayerId, page: "latest", bypassLiveCheck: true });
+    } else {
+      pendingJumpToLatestLiveRef.current = true;
+    }
   };
 
   useEffect(() => {
     if (!isOpen) {
       liveFetchIdRef.current++;
+      dbFetchSeqRef.current++;
+      if (highlightTimerRef.current) {
+        window.clearTimeout(highlightTimerRef.current);
+        highlightTimerRef.current = null;
+      }
       return;
     }
     hasUserChangedFilterRef.current = false;
+    searchFetchMountedRef.current = false;
+    skipNextSearchFetchRef.current = false;
+    pendingScrollRowIdRef.current = null;
+    pendingJumpToLatestLiveRef.current = true;
     setIsDateFiltered(false);
     setTotalRecordCount(0);
+    setMatchedRecordCount(0);
+    setMatchedGroupCount(0);
+    setServerTotalPages(1);
+    setServerPriceTotals(null);
+    setLatestRecordId(null);
+    setHighlightedRowId(null);
+    setSearchQuery("");
+    setCurrentPage(1);
     setLiveApiSourceItems(null);
     setLiveApiLastSyncedAt(null);
     setLiveApiLoadError(null);
@@ -1880,12 +2034,15 @@ export function ProjectDataListModal({
 
     const storageKey = `project_data_list_settings_${project.id}`;
     let restoredFromLocal = false;
+    let initialGroupBy = "";
     let initialDefaultFilter: DefaultDateFilter = "5days";
     try {
       const localRaw = localStorage.getItem(storageKey);
       if (localRaw) {
         const parsedLocal = JSON.parse(localRaw);
-        restoredFromLocal = applyRestoredSettings(parsedLocal);
+        const res = applyRestoredSettings(parsedLocal);
+        restoredFromLocal = res.restored;
+        initialGroupBy = res.groupByLayerId;
         initialDefaultFilter = normalizeDefaultDateFilter(parsedLocal?.groupConfig?.defaultDateFilter);
       }
     } catch {
@@ -1906,7 +2063,13 @@ export function ProjectDataListModal({
       if (hasLocalAutoLoad && savedApi) {
         loadLiveDataFromApi(savedApi, { filterMode: initialDefaultFilter });
       } else {
-        fetchProjectDataList({ filterMode: initialDefaultFilter, bypassLiveCheck: true });
+        fetchProjectDataList({
+          filterMode: initialDefaultFilter,
+          page: "latest",
+          search: "",
+          groupBy: initialGroupBy,
+          bypassLiveCheck: true,
+        });
       }
     } else {
       // Wait for DB settings check when opening on a fresh browser (no localStorage settings cache yet)
@@ -1920,8 +2083,10 @@ export function ProjectDataListModal({
         .then(data => {
           if (cancelled) return;
           let effectiveFilter: DefaultDateFilter = initialDefaultFilter;
+          let effectiveGroupBy: string = initialGroupBy;
           if (data?.settings && !hasUserEditedPrefsRef.current) {
-            applyRestoredSettings(data.settings);
+            const res = applyRestoredSettings(data.settings);
+            effectiveGroupBy = res.groupByLayerId;
             effectiveFilter = normalizeDefaultDateFilter(data.settings.groupConfig?.defaultDateFilter);
             try {
               localStorage.setItem(storageKey, JSON.stringify({
@@ -1968,18 +2133,30 @@ export function ProjectDataListModal({
             if (activeApiCfg && hasValidApiAutoLoadConfig(activeApiCfg)) {
               loadLiveDataFromApi(activeApiCfg, { filterMode: targetFilter });
             } else {
-              fetchProjectDataList({ filterMode: targetFilter, bypassLiveCheck: true });
+              fetchProjectDataList({
+                filterMode: targetFilter,
+                page: "latest",
+                search: "",
+                groupBy: effectiveGroupBy,
+                bypassLiveCheck: true,
+              });
             }
           } else if (
             !hasUserChangedFilterRef.current &&
-            effectiveFilter !== initialDefaultFilter
+            (effectiveFilter !== initialDefaultFilter || effectiveGroupBy !== initialGroupBy)
           ) {
-            // DB had a newer default filter than local cache
+            // DB had a newer default filter or grouping than local cache
             setDateFilterMode(effectiveFilter);
             if (shouldUseDbApi && dbApi) {
               loadLiveDataFromApi(dbApi, { filterMode: effectiveFilter });
             } else {
-              fetchProjectDataList({ filterMode: effectiveFilter, bypassLiveCheck: !shouldUseDbApi });
+              fetchProjectDataList({
+                filterMode: effectiveFilter,
+                page: "latest",
+                search: "",
+                groupBy: effectiveGroupBy,
+                bypassLiveCheck: !shouldUseDbApi,
+              });
             }
           } else if (
             dbApi &&
@@ -1990,13 +2167,24 @@ export function ProjectDataListModal({
               loadLiveDataFromApi(dbApi, { filterMode: effectiveFilter });
             } else if (hasLocalAutoLoad) {
               setLiveApiSourceItems(null);
-              fetchProjectDataList({ filterMode: effectiveFilter, bypassLiveCheck: true });
+              fetchProjectDataList({
+                filterMode: effectiveFilter,
+                page: "latest",
+                search: "",
+                groupBy: effectiveGroupBy,
+                bypassLiveCheck: true,
+              });
             }
           }
         })
         .catch(() => {
           if (!cancelled && !restoredFromLocal) {
-            fetchProjectDataList({ filterMode: initialDefaultFilter, bypassLiveCheck: true });
+            fetchProjectDataList({
+              filterMode: initialDefaultFilter,
+              page: "latest",
+              search: "",
+              bypassLiveCheck: true,
+            });
           }
         })
         .finally(() => {
@@ -2074,8 +2262,14 @@ export function ProjectDataListModal({
     return null;
   }, [isDateFiltered, activeFilterMeta]);
 
-  // Filtered & date-ascending sorted items
+  const isServerPaged = liveApiSourceItems === null && pageSize > 0;
+
+  // Filtered & date-ascending sorted items (server already filters & sorts in DB mode)
   const filteredItems = useMemo(() => {
+    if (liveApiSourceItems === null) {
+      return items;
+    }
+
     const q = searchQuery.trim().toLowerCase();
     const matched = !q
       ? items
@@ -2106,22 +2300,26 @@ export function ProjectDataListModal({
         return cmp !== 0 ? cmp : a.idx - b.idx;
       })
       .map(entry => entry.item);
-  }, [items, searchQuery, dateLayerIds, groupByLayerId, activeMonthDaysRank]);
+  }, [liveApiSourceItems, items, searchQuery, dateLayerIds, groupByLayerId, activeMonthDaysRank]);
 
-  // Price column totals
+  // Price column totals (uses server-computed totals across all matching rows in DB paged mode)
   const priceTotals = useMemo(() => {
     const map: Record<string, { label: string; total: number }> = {};
     activeLayers.forEach(layer => {
       if (isPriceLayer(layer)) {
-        let sum = 0;
-        filteredItems.forEach(item => {
-          sum += parsePriceValue(item.rowValues?.[layer.id]);
-        });
-        map[layer.id] = { label: layer.name || "Price", total: sum };
+        if (liveApiSourceItems === null && serverPriceTotals && typeof serverPriceTotals[layer.id] === "number") {
+          map[layer.id] = { label: layer.name || "Price", total: serverPriceTotals[layer.id] };
+        } else {
+          let sum = 0;
+          filteredItems.forEach(item => {
+            sum += parsePriceValue(item.rowValues?.[layer.id]);
+          });
+          map[layer.id] = { label: layer.name || "Price", total: sum };
+        }
       }
     });
     return map;
-  }, [activeLayers, filteredItems]);
+  }, [activeLayers, filteredItems, liveApiSourceItems, serverPriceTotals]);
 
   const priceTotalEntries = useMemo(
     () =>
@@ -2205,6 +2403,214 @@ export function ProjectDataListModal({
 
     return list;
   }, [filteredItems, groupByLayerId, activeLayers, activeMonthDaysRank]);
+
+  // Total matching records across all pages (server count in DB mode, in-memory count in Live API mode)
+  const displayRecordCount = liveApiSourceItems === null ? matchedRecordCount : filteredItems.length;
+  const activeTotalForPaging = groupByLayerId
+    ? isServerPaged
+      ? matchedGroupCount
+      : groupedEntries.length
+    : isServerPaged
+    ? matchedRecordCount
+    : filteredItems.length;
+  const effectivePageSize = pageSize === 0 ? Math.max(1, activeTotalForPaging) : pageSize;
+  const totalPages = isServerPaged
+    ? Math.max(1, serverTotalPages)
+    : Math.max(1, Math.ceil(activeTotalForPaging / effectivePageSize));
+  const safeCurrentPage = Math.min(Math.max(1, currentPage), totalPages);
+  const pageStartIdx = (safeCurrentPage - 1) * effectivePageSize;
+  const pageEndIdx = isServerPaged
+    ? Math.min(
+        activeTotalForPaging,
+        pageStartIdx + (groupByLayerId ? groupedEntries.length : filteredItems.length)
+      )
+    : Math.min(activeTotalForPaging, pageStartIdx + effectivePageSize);
+
+  const paginatedItems = useMemo(() => {
+    if (isServerPaged || pageSize === 0) return filteredItems;
+    return filteredItems.slice(pageStartIdx, pageStartIdx + effectivePageSize);
+  }, [isServerPaged, filteredItems, pageSize, pageStartIdx, effectivePageSize]);
+
+  const paginatedGroups = useMemo(() => {
+    if (isServerPaged || pageSize === 0) return groupedEntries;
+    return groupedEntries.slice(pageStartIdx, pageStartIdx + effectivePageSize);
+  }, [isServerPaged, groupedEntries, pageSize, pageStartIdx, effectivePageSize]);
+
+  const isLatestRecordOnCurrentPage = useMemo(() => {
+    if (!latestRecordId) return true;
+    if (groupByLayerId) {
+      return paginatedGroups.some(g => g.items.some(it => it.id === latestRecordId));
+    }
+    return paginatedItems.some(it => it.id === latestRecordId);
+  }, [latestRecordId, groupByLayerId, paginatedGroups, paginatedItems]);
+
+  const visiblePageNumbers = useMemo(() => {
+    if (totalPages <= 7) {
+      return Array.from({ length: totalPages }, (_, i) => i + 1) as Array<number | "...">;
+    }
+    const pages: Array<number | "..."> = [1];
+    const start = Math.max(2, safeCurrentPage - 1);
+    const end = Math.min(totalPages - 1, safeCurrentPage + 1);
+    if (start > 2) pages.push("...");
+    for (let p = start; p <= end; p++) pages.push(p);
+    if (end < totalPages - 1) pages.push("...");
+    pages.push(totalPages);
+    return pages;
+  }, [totalPages, safeCurrentPage]);
+
+  // Debounced server-side search in DB mode, or jump page in Live API mode
+  useEffect(() => {
+    if (!isOpen) return;
+    if (!searchFetchMountedRef.current) {
+      searchFetchMountedRef.current = true;
+      return;
+    }
+    if (skipNextSearchFetchRef.current) {
+      skipNextSearchFetchRef.current = false;
+      return;
+    }
+
+    if (liveApiSourceItems !== null) {
+      if (searchQuery.trim() === "") {
+        pendingJumpToLatestLiveRef.current = true;
+      } else {
+        setCurrentPage(1);
+      }
+      return;
+    }
+
+    if (!isPrefsHydrated) return;
+
+    const timer = window.setTimeout(() => {
+      void fetchProjectDataList({
+        page: searchQuery.trim() === "" ? "latest" : 1,
+        search: searchQuery,
+        bypassLiveCheck: true,
+      });
+    }, 250);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [searchQuery, isOpen, isPrefsHydrated, liveApiSourceItems]);
+
+  // In Live API mode (in-memory), jump automatically to the page containing the latest record on initial load/filter change
+  useEffect(() => {
+    if (!isOpen || isLoading || liveApiSourceItems === null || !pendingJumpToLatestLiveRef.current) return;
+    pendingJumpToLatestLiveRef.current = false;
+
+    if (pageSize <= 0) {
+      setCurrentPage(1);
+      return;
+    }
+
+    if (groupByLayerId) {
+      const idx = latestRecordId
+        ? groupedEntries.findIndex(g => g.items.some(it => it.id === latestRecordId))
+        : -1;
+      const target = idx >= 0 ? Math.floor(idx / pageSize) + 1 : Math.max(1, Math.ceil(groupedEntries.length / pageSize));
+      setCurrentPage(target);
+    } else {
+      const idx = latestRecordId ? filteredItems.findIndex(it => it.id === latestRecordId) : -1;
+      const target = idx >= 0 ? Math.floor(idx / pageSize) + 1 : Math.max(1, Math.ceil(filteredItems.length / pageSize));
+      setCurrentPage(target);
+    }
+  }, [isOpen, isLoading, liveApiSourceItems, pageSize, groupByLayerId, latestRecordId, groupedEntries, filteredItems]);
+
+  // Automatically scroll to and highlight newly added record (works for both table & grouped views)
+  useEffect(() => {
+    const targetId = pendingScrollRowIdRef.current;
+    if (!isOpen || isLoading || !targetId) return;
+
+    // For in-memory / Live API paging, make sure we switch to the page containing targetId first
+    if (liveApiSourceItems !== null && pageSize > 0) {
+      const isVisible = groupByLayerId
+        ? paginatedGroups.some(g => g.items.some(it => it.id === targetId))
+        : paginatedItems.some(it => it.id === targetId);
+      if (!isVisible) {
+        if (groupByLayerId) {
+          const gIdx = groupedEntries.findIndex(g => g.items.some(it => it.id === targetId));
+          if (gIdx >= 0) {
+            setCurrentPage(Math.floor(gIdx / pageSize) + 1);
+            return;
+          }
+        } else {
+          const rIdx = filteredItems.findIndex(it => it.id === targetId);
+          if (rIdx >= 0) {
+            setCurrentPage(Math.floor(rIdx / pageSize) + 1);
+            return;
+          }
+        }
+      }
+    }
+
+    const container = tableScrollContainerRef.current;
+    if (!container) return;
+
+    const rafId = window.requestAnimationFrame(() => {
+      const escapedId =
+        typeof CSS !== "undefined" && typeof CSS.escape === "function"
+          ? CSS.escape(targetId)
+          : targetId.replace(/["\\]/g, "\\$&");
+      const rowEl = container.querySelector<HTMLElement>(`[data-row-id="${escapedId}"]`);
+      if (rowEl) {
+        pendingScrollRowIdRef.current = null;
+        rowEl.scrollIntoView({ behavior: "smooth", block: "center" });
+        setHighlightedRowId(targetId);
+        if (highlightTimerRef.current) {
+          window.clearTimeout(highlightTimerRef.current);
+        }
+        highlightTimerRef.current = window.setTimeout(() => {
+          setHighlightedRowId(prev => (prev === targetId ? null : prev));
+        }, 2600);
+      }
+    });
+
+    return () => {
+      window.cancelAnimationFrame(rafId);
+    };
+  }, [isOpen, isLoading, liveApiSourceItems, items, paginatedItems, paginatedGroups, groupedEntries, filteredItems, groupByLayerId, pageSize, currentPage]);
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
+
+  const handlePageSizeChange = (nextSize: number) => {
+    setPageSize(nextSize);
+    try {
+      localStorage.setItem("project_data_list_page_size", String(nextSize));
+    } catch {
+      // ignore localStorage write errors
+    }
+    if (tableScrollContainerRef.current) {
+      tableScrollContainerRef.current.scrollTo({ top: 0 });
+    }
+    if (liveApiSourceItems === null) {
+      void fetchProjectDataList({ limit: nextSize, page: "latest", bypassLiveCheck: true });
+    } else {
+      pendingJumpToLatestLiveRef.current = true;
+    }
+  };
+
+  const goToPage = (page: number | "latest") => {
+    setOpenRowMenu(null);
+    if (tableScrollContainerRef.current) {
+      tableScrollContainerRef.current.scrollTo({ top: 0, behavior: "smooth" });
+    }
+    if (liveApiSourceItems === null) {
+      const target = page === "latest" ? "latest" : Math.min(Math.max(1, page), totalPages);
+      void fetchProjectDataList({ page: target, bypassLiveCheck: true });
+      return;
+    }
+    if (page === "latest") {
+      pendingJumpToLatestLiveRef.current = true;
+      return;
+    }
+    const clamped = Math.min(Math.max(1, page), totalPages);
+    setCurrentPage(clamped);
+  };
 
   const activePreviewGroup = useMemo(() => {
     if (multiRowPreviewTarget) {
@@ -2395,9 +2801,10 @@ export function ProjectDataListModal({
         initialValues[`${l.id}__suffix`] = l.selectedSuffix || l.suffixList[0];
       }
     });
+    const nextNum = Math.max(items.length, totalRecordCount) + 1;
     setEditingItem({
       mode: "add",
-      rowName: `${project.name} ${items.length + 1}`,
+      rowName: `${project.name} ${nextNum}`,
       rowValues: initialValues,
     });
   };
@@ -2410,6 +2817,84 @@ export function ProjectDataListModal({
       rowName: item.rowName || "",
       rowValues: { ...(item.rowValues || {}) },
     });
+  };
+
+  // Ensure newly added record's page is shown and queued for smooth scroll + highlight
+  const focusCreatedRecord = async (
+    createdItem: ProjectDataItem,
+    isLiveMode: boolean,
+    opts?: { silentLoading?: boolean }
+  ) => {
+    pendingScrollRowIdRef.current = createdItem.id;
+    setLatestRecordId(createdItem.id);
+
+    if (isLiveMode) {
+      let effectiveMode = dateFilterMode;
+      const desc = resolveFilterDescriptor(effectiveMode);
+      if (dateLayerIds.length > 0 && desc.kind !== "all") {
+        const matchesDate =
+          desc.kind === "month"
+            ? dateLayerIds.some(lid => {
+                const info = parseDateSortInfo(createdItem.rowValues?.[lid]);
+                return info ? info.monthDay.startsWith(`${desc.month}-`) : false;
+              })
+            : (() => {
+                const daySet = new Set(desc.monthDays);
+                return dateLayerIds.some(lid => {
+                  const info = parseDateSortInfo(createdItem.rowValues?.[lid]);
+                  return info ? daySet.has(info.monthDay) : false;
+                });
+              })();
+        if (!matchesDate) {
+          effectiveMode = "all";
+          hasUserChangedFilterRef.current = true;
+          setDateFilterMode("all");
+          setLiveApiSourceItems(prev => {
+            const list = prev || [];
+            applyLiveApiDateFilter(list, "all", false);
+            return list;
+          });
+        }
+      }
+
+      const q = searchQuery.trim().toLowerCase();
+      if (q) {
+        const matchesSearch =
+          Boolean(createdItem.rowName?.toLowerCase().includes(q)) ||
+          Object.values(createdItem.rowValues || {}).some(v => String(v).toLowerCase().includes(q));
+        if (!matchesSearch) {
+          skipNextSearchFetchRef.current = true;
+          setSearchQuery("");
+        }
+      }
+      return;
+    }
+
+    const res = await fetchProjectDataList({
+      bypassLiveCheck: true,
+      focusId: createdItem.id,
+      silentLoading: opts?.silentLoading,
+    });
+
+    // If current date filter or search query hides the newly added record, clear them and focus the record
+    if (res && !res.focusFound) {
+      const hadSearch = searchQuery.trim() !== "";
+      if (hadSearch) {
+        skipNextSearchFetchRef.current = true;
+        setSearchQuery("");
+      }
+      if (dateFilterMode !== "all") {
+        hasUserChangedFilterRef.current = true;
+        setDateFilterMode("all");
+      }
+      await fetchProjectDataList({
+        filterMode: "all",
+        search: "",
+        focusId: createdItem.id,
+        bypassLiveCheck: true,
+        silentLoading: opts?.silentLoading,
+      });
+    }
   };
 
   // Save Add / Edit entry (in memory for Live API mode, or PostgreSQL DB otherwise)
@@ -2431,13 +2916,19 @@ export function ProjectDataListModal({
         ? `api_${Date.now()}_add`
         : `pd_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
 
+    const maxExistingSortOrder = Math.max(
+      totalRecordCount,
+      items.reduce((mx, it) => Math.max(mx, Number(it.sortOrder ?? 0) + 1), 0),
+      liveApiSourceItems ? liveApiSourceItems.length : 0
+    );
+
     const snapshotItem: ProjectDataItem = {
       id: clientItemId,
       projectId: project.id,
       username: user?.username || (isLiveMode ? "api" : "user"),
       rowName: targetEditing.rowName,
       rowValues: targetEditing.rowValues,
-      sortOrder: liveApiSourceItems ? liveApiSourceItems.length : items.length,
+      sortOrder: maxExistingSortOrder,
     };
 
     const applyOptimisticState = () => {
@@ -2446,6 +2937,8 @@ export function ProjectDataListModal({
           setLiveApiSourceItems(prev => (prev ? [...prev, snapshotItem] : [snapshotItem]));
           setItems(prev => [...prev, snapshotItem]);
           setTotalRecordCount(c => c + 1);
+          setMatchedRecordCount(c => c + 1);
+          setLatestRecordId(snapshotItem.id);
         } else if (targetEditing.mode === "edit" && targetEditing.id) {
           setLiveApiSourceItems(prev =>
             prev
@@ -2470,6 +2963,8 @@ export function ProjectDataListModal({
       if (targetEditing.mode === "add") {
         setItems(prev => [...prev, snapshotItem]);
         setTotalRecordCount(c => c + 1);
+        setMatchedRecordCount(c => c + 1);
+        setLatestRecordId(snapshotItem.id);
       } else if (targetEditing.mode === "edit" && targetEditing.id) {
         setItems(prev =>
           prev.map(it =>
@@ -2510,17 +3005,10 @@ export function ProjectDataListModal({
         });
         if (!res.ok) throw new Error("Failed to add entry");
         const data = await res.json();
-        let createdItem = snapshotItem;
-        if (Array.isArray(data.items) && data.items.length > 0) {
-          createdItem = data.items[0];
-          if (alreadyOptimistic) {
-            setItems(prev => prev.map(it => (it.id === clientItemId ? createdItem : it)));
-          } else {
-            setItems(prev => [...prev, ...data.items]);
-            setTotalRecordCount(c => c + data.items.length);
-          }
-        } else if (!alreadyOptimistic) {
-          await fetchProjectDataList();
+        const createdItem: ProjectDataItem =
+          Array.isArray(data.items) && data.items.length > 0 ? data.items[0] : snapshotItem;
+        if (alreadyOptimistic) {
+          setItems(prev => prev.map(it => (it.id === clientItemId ? createdItem : it)));
         }
         return { savedItem: createdItem, isLive: false, mode: "add" };
       } else if (targetEditing.mode === "edit" && targetEditing.id) {
@@ -2600,21 +3088,36 @@ export function ProjectDataListModal({
       // Apply optimistic local update & send DB save in the background
       const previousItemsSnapshot = items;
       applyOptimisticState();
+      if (targetEditing.mode === "add") {
+        pendingScrollRowIdRef.current = snapshotItem.id;
+      }
 
       if (!isLiveMode) {
-        void executeDbSave(true).catch((err) => {
-          console.error("Background save error:", err);
-          if (targetEditing.mode === "add") {
-            setItems(prev => prev.filter(it => it.id !== clientItemId));
-            setTotalRecordCount(c => Math.max(0, c - 1));
-          } else {
-            setItems(previousItemsSnapshot);
-          }
-          onNotification({
-            message: "Card copied, but failed to save record to database",
-            type: "error",
+        void executeDbSave(true)
+          .then(({ savedItem, mode }) => {
+            if (mode === "add") {
+              void focusCreatedRecord(savedItem, false, { silentLoading: true });
+            } else {
+              void fetchProjectDataList({ page: safeCurrentPage, bypassLiveCheck: true, silentLoading: true });
+            }
+          })
+          .catch((err) => {
+            console.error("Background save error:", err);
+            pendingScrollRowIdRef.current = null;
+            if (targetEditing.mode === "add") {
+              setItems(prev => prev.filter(it => it.id !== clientItemId));
+              setTotalRecordCount(c => Math.max(0, c - 1));
+              setMatchedRecordCount(c => Math.max(0, c - 1));
+            } else {
+              setItems(previousItemsSnapshot);
+            }
+            onNotification({
+              message: "Card copied, but failed to save record to database",
+              type: "error",
+            });
           });
-        });
+      } else if (targetEditing.mode === "add") {
+        void focusCreatedRecord(snapshotItem, true);
       }
 
       try {
@@ -2652,7 +3155,13 @@ export function ProjectDataListModal({
     setSavingAction("save");
 
     try {
-      const { isLive, mode } = await executeDbSave(false);
+      const { savedItem, isLive, mode } = await executeDbSave(false);
+      setEditingItem(null);
+      if (mode === "add") {
+        await focusCreatedRecord(savedItem, isLive, { silentLoading: true });
+      } else if (!isLive) {
+        await fetchProjectDataList({ page: safeCurrentPage, bypassLiveCheck: true, silentLoading: true });
+      }
       if (isLive) {
         onNotification({
           message:
@@ -2670,7 +3179,6 @@ export function ProjectDataListModal({
           type: "success",
         });
       }
-      setEditingItem(null);
     } catch (err) {
       console.error("Error saving entry:", err);
       onNotification({ message: "Failed to save record to database", type: "error" });
@@ -2706,6 +3214,7 @@ export function ProjectDataListModal({
         }
       );
       if (!res.ok) throw new Error("Save failed");
+      void fetchProjectDataList({ page: safeCurrentPage, bypassLiveCheck: true, silentLoading: true });
     } catch (err) {
       console.error("Inline save failed:", err);
       onNotification({ message: "Failed to save inline change to database", type: "error" });
@@ -2745,6 +3254,7 @@ export function ProjectDataListModal({
       setLiveApiSourceItems(prev => (prev ? prev.filter(it => it.id !== id) : prev));
       setItems(prev => prev.filter(it => it.id !== id));
       setTotalRecordCount(c => Math.max(0, c - 1));
+      setMatchedRecordCount(c => Math.max(0, c - 1));
       setSelectedIds(prev => {
         const next = new Set(prev);
         next.delete(id);
@@ -2762,12 +3272,14 @@ export function ProjectDataListModal({
       if (!res.ok) throw new Error("Failed to delete");
       setItems(prev => prev.filter(it => it.id !== id));
       setTotalRecordCount(c => Math.max(0, c - 1));
+      setMatchedRecordCount(c => Math.max(0, c - 1));
       setSelectedIds(prev => {
         const next = new Set(prev);
         next.delete(id);
         return next;
       });
       onNotification({ message: "Record deleted from database", type: "info" });
+      void fetchProjectDataList({ page: safeCurrentPage, bypassLiveCheck: true, silentLoading: true });
     } catch (err) {
       console.error("Delete failed:", err);
       onNotification({ message: "Failed to delete record", type: "error" });
@@ -2795,6 +3307,9 @@ export function ProjectDataListModal({
         setLiveApiSourceItems([]);
         setItems([]);
         setTotalRecordCount(0);
+        setMatchedRecordCount(0);
+        setMatchedGroupCount(0);
+        setLatestRecordId(null);
         setSelectedIds(new Set());
         setEditingCell(null);
         setPreviewGroupKey(null);
@@ -2804,6 +3319,7 @@ export function ProjectDataListModal({
         setLiveApiSourceItems(prev => (prev ? prev.filter(it => !removeSet.has(it.id)) : prev));
         setItems(prev => prev.filter(it => !removeSet.has(it.id)));
         setTotalRecordCount(c => Math.max(0, c - idsToDelete.length));
+        setMatchedRecordCount(c => Math.max(0, c - idsToDelete.length));
         setSelectedIds(new Set());
         onNotification({ message: `Removed ${idsToDelete.length} record(s) from live view`, type: "info" });
       }
@@ -2822,6 +3338,11 @@ export function ProjectDataListModal({
         const deletedTotal = Math.max(idsToDelete.length, totalRecordCount);
         setItems([]);
         setTotalRecordCount(0);
+        setMatchedRecordCount(0);
+        setMatchedGroupCount(0);
+        setServerTotalPages(1);
+        setServerPriceTotals({});
+        setLatestRecordId(null);
         setSelectedIds(new Set());
         setEditingCell(null);
         setPreviewGroupKey(null);
@@ -2830,8 +3351,10 @@ export function ProjectDataListModal({
         const removeSet = new Set(idsToDelete);
         setItems(prev => prev.filter(it => !removeSet.has(it.id)));
         setTotalRecordCount(c => Math.max(0, c - idsToDelete.length));
+        setMatchedRecordCount(c => Math.max(0, c - idsToDelete.length));
         setSelectedIds(new Set());
         onNotification({ message: `Deleted ${idsToDelete.length} record(s)`, type: "info" });
+        void fetchProjectDataList({ page: safeCurrentPage, bypassLiveCheck: true, silentLoading: true });
       }
     } catch (err) {
       console.error("Bulk delete error:", err);
@@ -3403,7 +3926,7 @@ export function ProjectDataListModal({
 
       setLiveApiSourceItems(null);
       setLiveApiLoadError(null);
-      await fetchProjectDataList({ bypassLiveCheck: true });
+      await fetchProjectDataList({ page: "latest", bypassLiveCheck: true });
       onNotification({
         message: `Imported and saved ${mappedImportPreviewRows.length} records to the database!`,
         type: "success",
@@ -3418,9 +3941,41 @@ export function ProjectDataListModal({
     }
   };
 
+  // Load full matching rows on-demand only when exporting or previewing across multiple pages
+  const fetchAllMatchingRowsForBulkAction = async (): Promise<ProjectDataItem[]> => {
+    if (liveApiSourceItems !== null) {
+      return selectedIds.size > 0
+        ? filteredItems.filter(i => selectedIds.has(i.id))
+        : filteredItems;
+    }
+
+    const allInMemory = !isServerPaged || (matchedRecordCount <= items.length && totalPages <= 1);
+    const allSelectedInMemory =
+      selectedIds.size > 0 && Array.from(selectedIds).every(id => items.some(it => it.id === id));
+
+    if ((allInMemory && selectedIds.size === 0) || allSelectedInMemory) {
+      return selectedIds.size > 0 ? items.filter(i => selectedIds.has(i.id)) : items;
+    }
+
+    const url = buildDataListUrl({ filterMode: dateFilterMode, limit: 0 });
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("Failed to load full record list");
+    const data = await res.json();
+    const allMatched: ProjectDataItem[] = Array.isArray(data.items) ? data.items : [];
+    return selectedIds.size > 0
+      ? allMatched.filter(i => selectedIds.has(i.id))
+      : allMatched;
+  };
+
   // Export saved list to CSV or JSON
-  const handleExportList = (format: "csv" | "json") => {
-    const targetList = selectedIds.size > 0 ? items.filter(i => selectedIds.has(i.id)) : items;
+  const handleExportList = async (format: "csv" | "json") => {
+    let targetList: ProjectDataItem[] = [];
+    try {
+      targetList = await fetchAllMatchingRowsForBulkAction();
+    } catch {
+      onNotification({ message: "Failed to load records for export", type: "error" });
+      return;
+    }
     if (targetList.length === 0) {
       onNotification({ message: "No records to export", type: "info" });
       return;
@@ -3614,15 +4169,22 @@ export function ProjectDataListModal({
   };
 
   // Open Preview & Print from toolbar (auto-routes to Single Record Preview or Multi-Row Preview)
-  const handleOpenPreviewAndPrint = () => {
-    const targetItems = selectedIds.size > 0
-      ? filteredItems.filter(i => selectedIds.has(i.id))
-      : filteredItems;
+  const handleOpenPreviewAndPrint = async () => {
+    let targetItems: ProjectDataItem[] = [];
+    try {
+      targetItems = await fetchAllMatchingRowsForBulkAction();
+    } catch {
+      onNotification({ message: "Failed to load records for preview", type: "error" });
+      return;
+    }
     if (targetItems.length === 0) {
       onNotification({ message: "No records to preview and print", type: "info" });
       return;
     }
     if (targetItems.length === 1) {
+      if (liveApiSourceItems === null && !items.some(i => i.id === targetItems[0].id)) {
+        setItems(prev => [...prev, targetItems[0]]);
+      }
       setPreviewSingleItemId(targetItems[0].id);
       return;
     }
@@ -4007,13 +4569,17 @@ export function ProjectDataListModal({
   };
 
   const toggleSelectAll = () => {
-    if (filteredItems.length === 0) return;
-    const allSelected = filteredItems.every(i => selectedIds.has(i.id));
-    if (allSelected) {
-      setSelectedIds(new Set());
-    } else {
-      setSelectedIds(new Set(filteredItems.map(i => i.id)));
-    }
+    if (paginatedItems.length === 0) return;
+    const allPageSelected = paginatedItems.every(i => selectedIds.has(i.id));
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (allPageSelected) {
+        paginatedItems.forEach(i => next.delete(i.id));
+      } else {
+        paginatedItems.forEach(i => next.add(i.id));
+      }
+      return next;
+    });
   };
 
   const toggleSelectRow = (id: string) => {
@@ -4434,7 +5000,7 @@ export function ProjectDataListModal({
                   </span>
                 )}
                 <span className="text-[11px] sm:text-xs text-slate-400 font-mono">
-                  ({items.length} {items.length === 1 ? "record" : "records"})
+                  ({displayRecordCount} {displayRecordCount === 1 ? "record" : "records"})
                 </span>
               </div>
               <p className="text-xs text-slate-400 hidden sm:block">
@@ -4548,10 +5114,10 @@ export function ProjectDataListModal({
                   <button
                     type="button"
                     role="menuitem"
-                    disabled={items.length === 0}
+                    disabled={displayRecordCount === 0}
                     onClick={() => {
                       setShowDataToolbarMenu(false);
-                      handleExportList("csv");
+                      void handleExportList("csv");
                     }}
                     className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-xs font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                   >
@@ -4562,10 +5128,10 @@ export function ProjectDataListModal({
                   <button
                     type="button"
                     role="menuitem"
-                    disabled={items.length === 0}
+                    disabled={displayRecordCount === 0}
                     onClick={() => {
                       setShowDataToolbarMenu(false);
-                      handleExportList("json");
+                      void handleExportList("json");
                     }}
                     className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-xs font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                   >
@@ -4601,7 +5167,7 @@ export function ProjectDataListModal({
                     </>
                   )}
 
-                  {(items.length > 0 || totalRecordCount > 0) && (
+                  {(displayRecordCount > 0 || totalRecordCount > 0) && (
                     <>
                       <div className="my-1 border-t border-slate-800" />
                       <button
@@ -4615,7 +5181,7 @@ export function ProjectDataListModal({
                       >
                         <Trash2 size={14} className="shrink-0" />
                         <span>
-                          {isDateFiltered && totalRecordCount > items.length
+                          {isDateFiltered && totalRecordCount > displayRecordCount
                             ? `Clear All (${totalRecordCount})`
                             : "Clear All"}
                         </span>
@@ -4689,22 +5255,22 @@ export function ProjectDataListModal({
           {/* Preview & Print Button (Top right on mobile Row 1, far right on desktop) */}
           <button
             type="button"
-            onClick={handleOpenPreviewAndPrint}
-            disabled={filteredItems.length === 0}
+            onClick={() => void handleOpenPreviewAndPrint()}
+            disabled={displayRecordCount === 0}
             className="order-2 sm:order-3 flex items-center gap-1 sm:gap-1.5 px-2.5 sm:px-3.5 py-1 sm:py-1.5 h-8 sm:h-auto rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-semibold shadow-md disabled:opacity-40 transition-all cursor-pointer shrink-0"
             title="Preview rendered card and select which image to print on"
           >
             <Eye size={13} className="text-white shrink-0" />
             <span className="sm:hidden">
-              Preview ({selectedIds.size > 0 ? selectedIds.size : filteredItems.length})
+              Preview ({selectedIds.size > 0 ? selectedIds.size : displayRecordCount})
             </span>
             <span className="hidden sm:inline">
               Preview & Print{" "}
               {selectedIds.size > 0
                 ? `(${selectedIds.size} Selected)`
-                : filteredItems.length === 1
+                : displayRecordCount === 1
                 ? "(1 Record)"
-                : `(${filteredItems.length} Records)`}
+                : `(${displayRecordCount} Records)`}
             </span>
           </button>
         </div>
@@ -4807,10 +5373,10 @@ export function ProjectDataListModal({
               {activeFilterMeta.kind === "all" ? (
                 <span className="truncate">
                   <span className="sm:hidden">
-                    <strong className="text-emerald-300">All {items.length}</strong> records
+                    <strong className="text-emerald-300">All {totalRecordCount || displayRecordCount}</strong> records
                   </span>
                   <span className="hidden sm:inline">
-                    Showing <strong className="text-emerald-300">All {items.length}</strong>{" "}
+                    Showing <strong className="text-emerald-300">All {totalRecordCount || displayRecordCount}</strong>{" "}
                     {liveApiSourceItems !== null ? "live API records" : "saved records"}
                   </span>
                 </span>
@@ -4819,12 +5385,12 @@ export function ProjectDataListModal({
                   <span className="sm:hidden">
                     <strong className="text-amber-300">{activeFilterMeta.shortLabel}</strong>
                     {activeFilterMeta.kind === "days" ? ` (${activeFilterMeta.rangeLabel})` : ""} •{" "}
-                    <strong className="text-white">{items.length}</strong>/{totalRecordCount}
+                    <strong className="text-white">{displayRecordCount}</strong>/{totalRecordCount}
                   </span>
                   <span className="hidden sm:inline">
                     Showing <strong className="text-amber-300">{activeFilterMeta.fullLabel}</strong> (any year)
                     {" • "}
-                    <strong className="text-white">{items.length}</strong> of{" "}
+                    <strong className="text-white">{displayRecordCount}</strong> of{" "}
                     <strong className="text-white">{totalRecordCount}</strong> total records
                   </span>
                 </span>
@@ -4910,6 +5476,7 @@ export function ProjectDataListModal({
 
         {/* Main Table / Grouped Cards Area */}
         <div
+          ref={tableScrollContainerRef}
           className="flex-1 overflow-auto bg-slate-900 relative"
           onScroll={() => {
             if (openRowMenu) setOpenRowMenu(null);
@@ -4931,6 +5498,38 @@ export function ProjectDataListModal({
                   ? `Loading ${activeFilterMeta.fullLabel}...`
                   : "Loading saved database records..."}
               </p>
+            </div>
+          ) : displayRecordCount === 0 && searchQuery.trim() !== "" && totalRecordCount > 0 ? (
+            <div className="flex flex-col items-center justify-center h-full p-8 text-center max-w-md mx-auto gap-3">
+              <div className="w-14 h-14 rounded-2xl bg-slate-800/80 border border-slate-700 flex items-center justify-center text-slate-400">
+                <Search size={24} />
+              </div>
+              <h3 className="text-base font-bold text-white">No Matching Records</h3>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                {isDateFiltered && totalRecordCount > 0
+                  ? `No records in ${activeFilterMeta.fullLabel} match "${searchQuery.trim()}".`
+                  : `No records match "${searchQuery.trim()}".`}
+              </p>
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery("")}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow"
+                >
+                  <X size={14} />
+                  <span>Clear Search</span>
+                </button>
+                {isDateFiltered && (
+                  <button
+                    type="button"
+                    onClick={() => applyDateFilterSelection("all")}
+                    className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 text-xs font-semibold"
+                  >
+                    <Database size={14} />
+                    <span>Load All {totalRecordCount} Records</span>
+                  </button>
+                )}
+              </div>
             </div>
           ) : items.length === 0 && isDateFiltered && totalRecordCount > 0 ? (
             <div className="flex flex-col items-center justify-center h-full p-8 text-center max-w-md mx-auto">
@@ -4963,7 +5562,7 @@ export function ProjectDataListModal({
                 </button>
               </div>
             </div>
-          ) : items.length === 0 ? (
+          ) : items.length === 0 && totalRecordCount === 0 ? (
             <div className="flex flex-col items-center justify-center h-full p-8 text-center max-w-md mx-auto">
               <div className="w-16 h-16 rounded-2xl bg-slate-800/80 border border-slate-700 flex items-center justify-center text-slate-400 mb-4">
                 <Database size={30} className="text-emerald-400" />
@@ -5012,8 +5611,8 @@ export function ProjectDataListModal({
                       {activeLayers.find(l => l.id === groupByLayerId)?.name || "Field"}
                     </strong>
                     {" • "}
-                    <strong className="text-white">{groupedEntries.length}</strong>{" "}
-                    {groupedEntries.length === 1 ? "group" : "groups"} ({filteredItems.length} total entries)
+                    <strong className="text-white">{isServerPaged ? matchedGroupCount : groupedEntries.length}</strong>{" "}
+                    {(isServerPaged ? matchedGroupCount : groupedEntries.length) === 1 ? "group" : "groups"} ({displayRecordCount} total entries)
                   </span>
                   {priceTotalEntries.map(pt => (
                     <span
@@ -5049,11 +5648,11 @@ export function ProjectDataListModal({
               {groupedEntries.length === 0 ? (
                 <div className="flex flex-col items-center justify-center gap-2.5 py-12 text-slate-400 text-xs">
                   <span>
-                    {isDateFiltered && totalRecordCount > items.length
+                    {isDateFiltered && totalRecordCount > displayRecordCount
                       ? `No matching records in ${activeFilterMeta.fullLabel}.`
                       : "No records match your search."}
                   </span>
-                  {isDateFiltered && totalRecordCount > items.length && (
+                  {isDateFiltered && totalRecordCount > displayRecordCount && (
                     <button
                       type="button"
                       onClick={() => applyDateFilterSelection("all")}
@@ -5065,7 +5664,7 @@ export function ProjectDataListModal({
                   )}
                 </div>
               ) : (
-                groupedEntries.map(group => {
+                paginatedGroups.map(group => {
                   const groupFieldLayer = activeLayers.find(l => l.id === groupByLayerId);
                   const isGenerating = processingGroupKey === group.key;
                   const visibleNonGroupLayers = otherDisplayLayers.filter(l =>
@@ -5175,7 +5774,13 @@ export function ProjectDataListModal({
                         {group.items.map((item, rIdx) => (
                           <div
                             key={item.id}
-                            className="flex flex-wrap sm:flex-nowrap items-center justify-between gap-3 px-4 py-2.5 hover:bg-slate-800/35 transition-colors text-xs"
+                            data-row-id={item.id}
+                            className={cn(
+                              "flex flex-wrap sm:flex-nowrap items-center justify-between gap-3 px-4 py-2.5 transition-colors text-xs",
+                              highlightedRowId === item.id
+                                ? "bg-emerald-500/20 ring-1 ring-inset ring-emerald-400/60"
+                                : "hover:bg-slate-800/35"
+                            )}
                           >
                             <div className="flex items-start sm:items-center gap-3 min-w-0 flex-1">
                               <span className="w-6 h-6 rounded-md bg-slate-800 border border-slate-700/70 flex items-center justify-center text-[11px] font-mono font-bold text-slate-300 shrink-0">
@@ -5281,10 +5886,10 @@ export function ProjectDataListModal({
                   <th className="w-10 px-2.5 py-3 text-center border-r border-slate-800/60">
                     <input
                       type="checkbox"
-                      checked={filteredItems.length > 0 && filteredItems.every(i => selectedIds.has(i.id))}
+                      checked={paginatedItems.length > 0 && paginatedItems.every(i => selectedIds.has(i.id))}
                       onChange={toggleSelectAll}
                       className="rounded bg-slate-900 border-slate-700 text-blue-600 focus:ring-0 cursor-pointer"
-                      title="Select all visible rows"
+                      title="Select all rows on this page"
                     />
                   </th>
                   <th className="w-12 px-2 py-3 text-center font-semibold text-slate-500 border-r border-slate-800/60">
@@ -5335,15 +5940,21 @@ export function ProjectDataListModal({
               </thead>
 
               <tbody className="divide-y divide-slate-800/60">
-                {filteredItems.map((item, idx) => {
+                {paginatedItems.map((item, idx) => {
+                  const globalIdx = pageStartIdx + idx;
                   const isSelected = selectedIds.has(item.id);
                   const isProcessing = processingRowId === item.id;
                   return (
                     <tr
                       key={item.id}
+                      data-row-id={item.id}
                       className={cn(
                         "transition-colors group",
-                        isSelected ? "bg-blue-600/10" : "hover:bg-slate-800/40"
+                        highlightedRowId === item.id
+                          ? "bg-emerald-500/20 ring-1 ring-inset ring-emerald-400/60"
+                          : isSelected
+                          ? "bg-blue-600/10"
+                          : "hover:bg-slate-800/40"
                       )}
                     >
                       <td className="px-2.5 py-2 text-center border-r border-slate-800/60">
@@ -5355,7 +5966,7 @@ export function ProjectDataListModal({
                         />
                       </td>
                       <td className="px-2 py-2 text-center text-slate-500 font-mono text-[11px] border-r border-slate-800/60">
-                        {idx + 1}
+                        {globalIdx + 1}
                       </td>
                       {activeLayers.map(layer => {
                         const val = item.rowValues?.[layer.id] ?? "";
@@ -5442,7 +6053,7 @@ export function ProjectDataListModal({
                           </button>
 
                           <button
-                            onClick={() => handleRowCardAction(item, idx, "copy")}
+                            onClick={() => handleRowCardAction(item, globalIdx, "copy")}
                             disabled={isProcessing}
                             className="p-1.5 rounded-lg bg-cyan-600/15 hover:bg-cyan-600/30 text-cyan-400 transition-colors disabled:opacity-40"
                             title="Copy card image to clipboard"
@@ -5455,7 +6066,7 @@ export function ProjectDataListModal({
                           </button>
 
                           <button
-                            onClick={() => handleRowCardAction(item, idx, "share")}
+                            onClick={() => handleRowCardAction(item, globalIdx, "share")}
                             disabled={isProcessing}
                             className="p-1.5 rounded-lg bg-indigo-600/15 hover:bg-indigo-600/30 text-indigo-400 transition-colors disabled:opacity-40"
                             title="Share card image"
@@ -5470,7 +6081,7 @@ export function ProjectDataListModal({
                           <button
                             type="button"
                             data-row-kebab-trigger="true"
-                            onClick={e => toggleRowKebabMenu(e, item, idx)}
+                            onClick={e => toggleRowKebabMenu(e, item, globalIdx)}
                             className={cn(
                               "p-1.5 rounded-lg transition-colors",
                               openRowMenu?.item.id === item.id
@@ -5497,11 +6108,11 @@ export function ProjectDataListModal({
                     <td colSpan={activeLayers.length + 3} className="px-4 py-12 text-center text-xs text-slate-400">
                       <div className="flex flex-col items-center justify-center gap-2.5">
                         <span>
-                          {isDateFiltered && totalRecordCount > items.length
+                          {isDateFiltered && totalRecordCount > displayRecordCount
                             ? `No matching records in ${activeFilterMeta.fullLabel}.`
                             : "No records match your search."}
                         </span>
-                        {isDateFiltered && totalRecordCount > items.length && (
+                        {isDateFiltered && totalRecordCount > displayRecordCount && (
                           <button
                             type="button"
                             onClick={() => applyDateFilterSelection("all")}
@@ -5549,7 +6160,7 @@ export function ProjectDataListModal({
                       );
                     })}
                     <td className="px-3 py-2.5 text-center text-[11px] text-slate-400">
-                      {filteredItems.length} {filteredItems.length === 1 ? "row" : "rows"}
+                      {displayRecordCount} {displayRecordCount === 1 ? "row" : "rows"}
                     </td>
                   </tr>
                 </tfoot>
@@ -5558,15 +6169,149 @@ export function ProjectDataListModal({
           )}
         </div>
 
+        {/* Pagination Bar */}
+        {!isLoading && activeTotalForPaging > 0 && (
+          <div className="px-3 sm:px-6 py-2 border-t border-slate-800/90 bg-slate-900/95 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-300 shrink-0">
+            <div className="flex items-center gap-2 sm:gap-3">
+              <span className="text-[11px] sm:text-xs text-slate-400 font-mono">
+                {groupByLayerId ? "Groups" : "Rows"}{" "}
+                <strong className="text-slate-100">
+                  {pageStartIdx + 1}–{pageEndIdx}
+                </strong>{" "}
+                of <strong className="text-slate-100">{activeTotalForPaging}</strong>
+              </span>
+
+              <div className="flex items-center gap-1.5">
+                <label htmlFor="data-list-page-size" className="text-[11px] text-slate-500 hidden sm:inline">
+                  Per page:
+                </label>
+                <select
+                  id="data-list-page-size"
+                  value={pageSize}
+                  onChange={e => handlePageSizeChange(Number(e.target.value))}
+                  aria-label="Rows per page"
+                  className="bg-slate-950 border border-slate-700/80 hover:border-slate-600 rounded-lg px-2 py-1 text-[11px] font-medium text-slate-200 outline-none focus:border-blue-500 cursor-pointer"
+                >
+                  <option value={10}>10 / page</option>
+                  <option value={25}>25 / page</option>
+                  <option value={50}>50 / page</option>
+                  <option value={100}>100 / page</option>
+                  <option value={0}>All ({activeTotalForPaging})</option>
+                </select>
+              </div>
+
+              {selectedIds.size > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedIds(new Set())}
+                  className="text-[11px] text-blue-400 hover:text-blue-300 underline"
+                >
+                  Clear {selectedIds.size} selected
+                </button>
+              )}
+            </div>
+
+            <div className="flex items-center gap-1 ml-auto">
+              {!isLatestRecordOnCurrentPage && latestRecordId && totalPages > 1 && (
+                <button
+                  type="button"
+                  onClick={() => goToPage("latest")}
+                  disabled={isLoading}
+                  title="Jump to the page containing the latest record"
+                  className="inline-flex items-center gap-1 px-2 h-7 mr-1 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/35 border border-emerald-500/35 text-emerald-300 text-[11px] font-semibold transition-colors disabled:opacity-40"
+                >
+                  <span>Latest</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => goToPage(1)}
+                disabled={safeCurrentPage <= 1 || isLoading}
+                title="First page"
+                aria-label="First page"
+                className="hidden sm:inline-flex items-center justify-center w-7 h-7 rounded-lg bg-slate-800/80 hover:bg-slate-700 border border-slate-700/80 text-slate-300 disabled:opacity-35 disabled:cursor-not-allowed transition-colors"
+              >
+                <ChevronsLeft size={14} />
+              </button>
+              <button
+                type="button"
+                onClick={() => goToPage(safeCurrentPage - 1)}
+                disabled={safeCurrentPage <= 1 || isLoading}
+                title="Previous page"
+                aria-label="Previous page"
+                className="inline-flex items-center justify-center gap-1 px-2 sm:px-2.5 h-7 rounded-lg bg-slate-800/80 hover:bg-slate-700 border border-slate-700/80 text-slate-200 text-[11px] font-medium disabled:opacity-35 disabled:cursor-not-allowed transition-colors"
+              >
+                <ChevronLeft size={14} />
+                <span className="hidden sm:inline">Prev</span>
+              </button>
+
+              <div className="hidden sm:flex items-center gap-1 px-0.5">
+                {visiblePageNumbers.map((p, idx) =>
+                  p === "..." ? (
+                    <span key={`ellipsis-${idx}`} className="px-1.5 text-slate-500 select-none">
+                      …
+                    </span>
+                  ) : (
+                    <button
+                      key={p}
+                      type="button"
+                      onClick={() => goToPage(p)}
+                      aria-current={p === safeCurrentPage ? "page" : undefined}
+                      className={cn(
+                        "min-w-[28px] h-7 px-2 rounded-lg text-[11px] font-mono font-semibold border transition-colors",
+                        p === safeCurrentPage
+                          ? "bg-blue-600 border-blue-500 text-white shadow-sm"
+                          : "bg-slate-800/60 hover:bg-slate-700 border-slate-700/70 text-slate-300"
+                      )}
+                    >
+                      {p}
+                    </button>
+                  )
+                )}
+              </div>
+
+              <span className="sm:hidden text-[11px] font-mono text-slate-300 px-2">
+                {safeCurrentPage} / {totalPages}
+              </span>
+
+              <button
+                type="button"
+                onClick={() => goToPage(safeCurrentPage + 1)}
+                disabled={safeCurrentPage >= totalPages || isLoading}
+                title="Next page"
+                aria-label="Next page"
+                className="inline-flex items-center justify-center gap-1 px-2 sm:px-2.5 h-7 rounded-lg bg-slate-800/80 hover:bg-slate-700 border border-slate-700/80 text-slate-200 text-[11px] font-medium disabled:opacity-35 disabled:cursor-not-allowed transition-colors"
+              >
+                <span className="hidden sm:inline">Next</span>
+                <ChevronRight size={14} />
+              </button>
+              <button
+                type="button"
+                onClick={() => goToPage(totalPages)}
+                disabled={safeCurrentPage >= totalPages || isLoading}
+                title="Last page"
+                aria-label="Last page"
+                className="hidden sm:inline-flex items-center justify-center w-7 h-7 rounded-lg bg-slate-800/80 hover:bg-slate-700 border border-slate-700/80 text-slate-300 disabled:opacity-35 disabled:cursor-not-allowed transition-colors"
+              >
+                <ChevronsRight size={14} />
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Footer Info */}
         <div className="px-4 sm:px-6 py-2.5 border-t border-slate-800 bg-slate-950 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400 shrink-0">
           <div className="flex flex-wrap items-center gap-3">
             <span>
-              Showing <strong className="text-slate-200">{filteredItems.length}</strong> of{" "}
+              Showing{" "}
               <strong className="text-slate-200">
-                {isDateFiltered && totalRecordCount > items.length
-                  ? `${items.length} (${activeFilterMeta.shortLabel}) / ${totalRecordCount} total`
-                  : items.length}
+                {displayRecordCount > 0 ? (isServerPaged ? items.length : paginatedItems.length) : 0}
+              </strong>{" "}
+              of{" "}
+              <strong className="text-slate-200">
+                {isDateFiltered && totalRecordCount > displayRecordCount
+                  ? `${displayRecordCount} (${activeFilterMeta.shortLabel}) / ${totalRecordCount} total`
+                  : displayRecordCount}
               </strong>{" "}
               {liveApiSourceItems !== null ? "live API records" : "database records"}
             </span>
