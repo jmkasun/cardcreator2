@@ -218,6 +218,25 @@ function setNoCacheHeaders(res: express.Response) {
   res.setHeader("Vercel-CDN-Cache-Control", "no-store");
 }
 
+function setEdgeImmutableHeaders(res: express.Response) {
+  res.setHeader("Cache-Control", "public, max-age=31536000, s-maxage=31536000, immutable");
+  res.setHeader("CDN-Cache-Control", "public, max-age=31536000, immutable");
+  res.setHeader("Vercel-CDN-Cache-Control", "public, max-age=31536000, immutable");
+}
+
+async function runWithSchema<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err: any) {
+    if (err?.code === "42P01" || err?.code === "42703") {
+      isDbInitialized = false;
+      await initDb();
+      return await fn();
+    }
+    throw err;
+  }
+}
+
 let isDbInitialized = false;
 let dbInitPromise: Promise<void> | null = null;
 let dbInitError: string | null = null;
@@ -596,7 +615,7 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
     const sendFontSuccess = (buffer: Buffer, resolvedName = name) => {
       const contentType = getFontContentType(resolvedName, buffer);
       res.setHeader("Content-Type", contentType);
-      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      setEdgeImmutableHeaders(res);
       res.setHeader("Content-Encoding", "identity");
       return res.status(200).send(buffer);
     };
@@ -604,7 +623,7 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
     if (fontCache.has(name)) {
       const cached = fontCache.get(name)!;
       res.setHeader("Content-Type", cached.contentType);
-      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      setEdgeImmutableHeaders(res);
       res.setHeader("Content-Encoding", "identity");
       return res.status(200).send(cached.buffer);
     }
@@ -794,19 +813,20 @@ app.post("/api/login", async (req, res) => {
     }
     
     if (HAS_POSTGRES) {
-      await initDb();
-      const result = await safeQuery(
-        `SELECT username, role,
-                selected_fonts as "selectedFonts",
-                default_font as "defaultFont",
-                default_font_size as "defaultFontSize",
-                default_font_color as "defaultFontColor"
-         FROM users
-         WHERE LOWER(TRIM(username)) = LOWER($1)
-           AND (password = $2 OR password = $3)
-         ORDER BY (username = $1) DESC
-         LIMIT 1`,
-        [cleanUsername, rawPassword, trimmedPassword]
+      const result = await runWithSchema(() =>
+        safeQuery(
+          `SELECT username, role,
+                  selected_fonts as "selectedFonts",
+                  default_font as "defaultFont",
+                  default_font_size as "defaultFontSize",
+                  default_font_color as "defaultFontColor"
+           FROM users
+           WHERE LOWER(TRIM(username)) = LOWER($1)
+             AND (password = $2 OR password = $3)
+           ORDER BY (username = $1) DESC
+           LIMIT 1`,
+          [cleanUsername, rawPassword, trimmedPassword]
+        )
       );
       
       if (result.rowCount && result.rowCount > 0) {
@@ -1314,7 +1334,7 @@ app.get("/api/images/:id/image", async (req, res) => {
     if (vParam) {
       const verEtag = `"${id}_v_${vParam}"`;
       if (req.headers["if-none-match"] === verEtag) {
-        res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+        setEdgeImmutableHeaders(res);
         res.setHeader("ETag", verEtag);
         return res.status(304).end();
       }
@@ -1323,7 +1343,11 @@ app.get("/api/images/:id/image", async (req, res) => {
     const sendCachedBuffer = (buffer: Buffer, contentType: string) => {
       const etag = vParam ? `"${id}_v_${vParam}"` : `"${id}_len_${buffer.length}"`;
       res.setHeader("Content-Type", contentType);
-      res.setHeader("Cache-Control", vParam ? "public, max-age=86400, immutable" : "public, no-cache");
+      if (vParam) {
+        setEdgeImmutableHeaders(res);
+      } else {
+        res.setHeader("Cache-Control", "public, no-cache");
+      }
       res.setHeader("ETag", etag);
       if (req.headers["if-none-match"] === etag) {
         return res.status(304).end();
@@ -1338,8 +1362,9 @@ app.get("/api/images/:id/image", async (req, res) => {
     }
 
     if (HAS_POSTGRES) {
-      await initDb();
-      const result = await safeQuery("SELECT image_url FROM font_app_images WHERE id = $1", [id]);
+      const result = await runWithSchema(() =>
+        safeQuery("SELECT image_url FROM font_app_images WHERE id = $1", [id])
+      );
       if (result.rowCount && result.rowCount > 0) {
         const rawUrl = result.rows[0].image_url;
         if (!rawUrl) return res.status(404).send("Image not found");
@@ -1382,15 +1407,16 @@ app.get("/api/images/:id", async (req, res) => {
   try {
     const { id } = req.params;
     if (HAS_POSTGRES) {
-      await initDb();
-      const result = await safeQuery(
-        `SELECT id, username, layers, name, is_locked as "isLocked", created_at as "createdAt",
-                COALESCE(image_updated_at, created_at) as "imageUpdatedAt",
-                COALESCE(copies_count, 0) as "copiesCount",
-                COALESCE(downloads_count, 0) as "downloadsCount",
-                COALESCE(shares_count, 0) as "sharesCount" 
-         FROM font_app_images WHERE id = $1`,
-        [id]
+      const result = await runWithSchema(() =>
+        safeQuery(
+          `SELECT id, username, layers, name, is_locked as "isLocked", created_at as "createdAt",
+                  COALESCE(image_updated_at, created_at) as "imageUpdatedAt",
+                  COALESCE(copies_count, 0) as "copiesCount",
+                  COALESCE(downloads_count, 0) as "downloadsCount",
+                  COALESCE(shares_count, 0) as "sharesCount" 
+           FROM font_app_images WHERE id = $1`,
+          [id]
+        )
       );
       if (result.rowCount && result.rowCount > 0) {
         const row = result.rows[0];
@@ -1426,7 +1452,6 @@ app.get("/api/images", async (req, res) => {
     const { username } = req.query;
     
     if (HAS_POSTGRES) {
-      await initDb();
       let query = `
         SELECT id, username, layers, name, is_locked as "isLocked", created_at as "createdAt",
                COALESCE(image_updated_at, created_at) as "imageUpdatedAt",
@@ -1435,7 +1460,7 @@ app.get("/api/images", async (req, res) => {
                COALESCE(shares_count, 0) as "sharesCount" 
         FROM font_app_images
       `;
-      const params = [];
+      const params: any[] = [];
       
       if (username) {
         query += " WHERE username = $1";
@@ -1443,7 +1468,7 @@ app.get("/api/images", async (req, res) => {
       }
       query += " ORDER BY created_at DESC";
       
-      const result = await safeQuery(query, params);
+      const result = await runWithSchema(() => safeQuery(query, params));
       const mapped = result.rows.map(row => {
         const copies = Number(row.copiesCount || 0);
         const downloads = Number(row.downloadsCount || 0);
@@ -2385,14 +2410,15 @@ app.get("/api/projects/:projectId/templates", async (req, res) => {
   try {
     const { projectId } = req.params;
     if (HAS_POSTGRES) {
-      await initDb();
-      const result = await safeQuery(
-        `SELECT id, project_id as "projectId", name, created_at as "createdAt",
-                COALESCE(updated_at, created_at) as "updatedAt"
-         FROM font_app_project_templates
-         WHERE project_id = $1
-         ORDER BY created_at ASC`,
-        [projectId]
+      const result = await runWithSchema(() =>
+        safeQuery(
+          `SELECT id, project_id as "projectId", name, created_at as "createdAt",
+                  COALESCE(updated_at, created_at) as "updatedAt"
+           FROM font_app_project_templates
+           WHERE project_id = $1
+           ORDER BY created_at ASC`,
+          [projectId]
+        )
       );
       const templates = result.rows.map(row => {
         const ver = row.updatedAt ? new Date(row.updatedAt).getTime() : "";
@@ -2433,7 +2459,7 @@ app.get("/api/projects/:projectId/templates/:tplId/image", async (req, res) => {
     if (vParam) {
       const verEtag = `"tpl_${tplId}_v_${vParam}"`;
       if (req.headers["if-none-match"] === verEtag) {
-        res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+        setEdgeImmutableHeaders(res);
         res.setHeader("ETag", verEtag);
         return res.status(304).end();
       }
@@ -2442,7 +2468,11 @@ app.get("/api/projects/:projectId/templates/:tplId/image", async (req, res) => {
     const sendCachedTpl = (buffer: Buffer, contentType: string) => {
       const etag = vParam ? `"tpl_${tplId}_v_${vParam}"` : `"tpl_${tplId}_len_${buffer.length}"`;
       res.setHeader("Content-Type", contentType);
-      res.setHeader("Cache-Control", vParam ? "public, max-age=86400, immutable" : "public, no-cache");
+      if (vParam) {
+        setEdgeImmutableHeaders(res);
+      } else {
+        res.setHeader("Cache-Control", "public, no-cache");
+      }
       res.setHeader("ETag", etag);
       if (req.headers["if-none-match"] === etag) {
         return res.status(304).end();
@@ -2457,10 +2487,11 @@ app.get("/api/projects/:projectId/templates/:tplId/image", async (req, res) => {
 
     let rawUrl = "";
     if (HAS_POSTGRES) {
-      await initDb();
-      const result = await safeQuery(
-        "SELECT image_data FROM font_app_project_templates WHERE id = $1 AND project_id = $2",
-        [tplId, projectId]
+      const result = await runWithSchema(() =>
+        safeQuery(
+          "SELECT image_data FROM font_app_project_templates WHERE id = $1 AND project_id = $2",
+          [tplId, projectId]
+        )
       );
       if (result.rowCount && result.rowCount > 0) {
         rawUrl = result.rows[0].image_data || "";

@@ -601,6 +601,12 @@ function setNoCacheHeaders(res: express.Response) {
   res.setHeader("Vercel-CDN-Cache-Control", "no-store");
 }
 
+function setEdgeImmutableHeaders(res: express.Response) {
+  res.setHeader("Cache-Control", "public, max-age=31536000, s-maxage=31536000, immutable");
+  res.setHeader("CDN-Cache-Control", "public, max-age=31536000, immutable");
+  res.setHeader("Vercel-CDN-Cache-Control", "public, max-age=31536000, immutable");
+}
+
 // Explicit font serving route
 app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
   try {
@@ -610,7 +616,7 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
     const sendFontSuccess = (buffer: Buffer, resolvedName = name) => {
       const contentType = getFontContentType(resolvedName, buffer);
       res.setHeader("Content-Type", contentType);
-      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      setEdgeImmutableHeaders(res);
       res.setHeader("Content-Encoding", "identity");
       return res.status(200).send(buffer);
     };
@@ -619,7 +625,7 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
     if (fontCache.has(name)) {
       const cached = fontCache.get(name)!;
       res.setHeader("Content-Type", cached.contentType);
-      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      setEdgeImmutableHeaders(res);
       res.setHeader("Content-Encoding", "identity");
       return res.status(200).send(cached.buffer);
     }
@@ -1298,7 +1304,7 @@ cachedLocalFontFiles = null;
       if (vParam) {
         const verEtag = `"${id}_v_${vParam}"`;
         if (req.headers["if-none-match"] === verEtag) {
-          res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+          setEdgeImmutableHeaders(res);
           res.setHeader("ETag", verEtag);
           return res.status(304).end();
         }
@@ -1307,7 +1313,11 @@ cachedLocalFontFiles = null;
       const sendCachedBuffer = (buffer: Buffer, contentType: string) => {
         const etag = vParam ? `"${id}_v_${vParam}"` : `"${id}_len_${buffer.length}"`;
         res.setHeader("Content-Type", contentType);
-        res.setHeader("Cache-Control", vParam ? "public, max-age=86400, immutable" : "public, no-cache");
+        if (vParam) {
+          setEdgeImmutableHeaders(res);
+        } else {
+          res.setHeader("Cache-Control", "public, no-cache");
+        }
         res.setHeader("ETag", etag);
         if (req.headers["if-none-match"] === etag) {
           return res.status(304).end();
@@ -2367,7 +2377,7 @@ cachedLocalFontFiles = null;
       if (vParam) {
         const verEtag = `"tpl_${tplId}_v_${vParam}"`;
         if (req.headers["if-none-match"] === verEtag) {
-          res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+          setEdgeImmutableHeaders(res);
           res.setHeader("ETag", verEtag);
           return res.status(304).end();
         }
@@ -2376,7 +2386,11 @@ cachedLocalFontFiles = null;
       const sendCachedTpl = (buffer: Buffer, contentType: string) => {
         const etag = vParam ? `"tpl_${tplId}_v_${vParam}"` : `"tpl_${tplId}_len_${buffer.length}"`;
         res.setHeader("Content-Type", contentType);
-        res.setHeader("Cache-Control", vParam ? "public, max-age=86400, immutable" : "public, no-cache");
+        if (vParam) {
+          setEdgeImmutableHeaders(res);
+        } else {
+          res.setHeader("Cache-Control", "public, no-cache");
+        }
         res.setHeader("ETag", etag);
         if (req.headers["if-none-match"] === etag) {
           return res.status(304).end();
