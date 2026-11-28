@@ -5,7 +5,7 @@ import { cn } from "@/src/lib/utils";
 import { motion, AnimatePresence } from "motion/react";
 import { convertNumberToSinhala, numberToSinhalaWords, formatNumberForCanvas, isUnicodeFont } from "./utils/sinhalaConverter";
 import { isPriceLayer } from "./utils/priceUtils";
-import { resolveDateDisplay, getSinhalaDateParts } from "./utils/cardRenderer";
+import { resolveDateDisplay, getSinhalaDateParts, computeLayerTextLayout } from "./utils/cardRenderer";
 import { ProjectDataListModal } from "./components/ProjectDataListModal";
 
 interface User {
@@ -220,6 +220,10 @@ interface TextLayer {
   suffixLines?: Record<string, SuffixLineConfig>;
   visible?: boolean;
   resetAfterCopy?: boolean;
+  maxWidthPercent?: number;
+  overflowMode?: 'shrink' | 'wrap';
+  wrapLineHeight?: number;
+  wrapLine2OffsetX?: number;
 }
 
 export interface SuffixLineConfig {
@@ -2930,6 +2934,30 @@ export default function App() {
       }
 
       const isEmptyContent = displayText.trim() === "";
+      const currentProjectForLock = projects.find(p => p.id === currentProjectId);
+      const isProjectLocked = currentProjectForLock?.isLocked;
+
+      const drawMaxWidthGuide = (lineCount = 1, lineGapPx = layer.fontSize * 1.35, effectiveFs = layer.fontSize) => {
+        const maxPct = Number(layer.maxWidthPercent || 0);
+        if (maxPct <= 0 || selectedLayerId !== layer.id || isProjectLocked || isPreviewMode || forExport) return;
+        const boxW = Math.max(20, (maxPct / 100) * canvas.width);
+        const align = layer.textAlign || "center";
+        let boxX = x - boxW / 2;
+        if (align === 'left') boxX = x;
+        else if (align === 'right') boxX = x - boxW;
+        const singleH = Math.max(24, effectiveFs * 1.25);
+        const boxY = y - singleH / 2;
+        const totalH = singleH + Math.max(0, lineCount - 1) * lineGapPx;
+
+        ctx.save();
+        ctx.globalAlpha = 0.85;
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = '#06b6d4';
+        ctx.lineWidth = Math.max(1.5, 2 * (canvas.width / 1000));
+        ctx.setLineDash([Math.max(5, 8 * (canvas.width / 1000)), Math.max(4, 6 * (canvas.width / 1000))]);
+        ctx.strokeRect(boxX, boxY, boxW, totalH);
+        ctx.restore();
+      };
 
       if (isEmptyContent) {
         if (!hideEmptyWatermarks && (layer.name || "").trim() !== "") {
@@ -2937,6 +2965,7 @@ export default function App() {
           ctx.fillStyle = layer.color;
           ctx.fillText(layer.name, x, y);
         }
+        drawMaxWidthGuide(1, layer.fontSize * (layer.wrapLineHeight || 1.35), layer.fontSize);
         ctx.restore();
       } else {
         if (layer.shadowBlur > 0) {
@@ -2945,6 +2974,9 @@ export default function App() {
         }
 
         let sinhalaTotalW = 0;
+        let renderedLinesCount = 1;
+        let renderedLineGap = layer.fontSize * (layer.wrapLineHeight || 1.35);
+        let renderedEffectiveFontSize = layer.fontSize;
 
         if (isSinhalaDate) {
           const monthFontSize = ((layer.sinhalaMonthFontSize || layer.fontSize) * (canvas.width / 1000));
@@ -2992,84 +3024,122 @@ export default function App() {
           ctx.font = originalFont;
 
           ctx.textAlign = originalAlign;
-        } else {
-          if (layer.strokeWidth > 0) {
-            ctx.strokeStyle = layer.strokeColor;
-            ctx.lineWidth = layer.strokeWidth * (canvas.width / 1000);
-            ctx.strokeText(displayText, x, y);
+
+          if (layer.isUnderline && displayText.trim() !== "") {
+            const width = sinhalaTotalW;
+            const height = layer.fontSize;
+            let underlineX = x;
+            if (ctx.textAlign === 'center') underlineX = x - width / 2;
+            if (ctx.textAlign === 'right') underlineX = x - width;
+
+            ctx.beginPath();
+            ctx.strokeStyle = layer.color;
+            ctx.lineWidth = Math.max(1, layer.fontSize / 15);
+            ctx.moveTo(underlineX, y + height / 2);
+            ctx.lineTo(underlineX + width, y + height / 2);
+            ctx.stroke();
           }
+        } else {
+          const baseFontSize = Math.max(8, layer.fontSize);
+          const layout = computeLayerTextLayout(ctx, canvas.width, layer, displayText, baseFontSize, fallbackAlias, fonts, 1);
+          const effectiveFontSize = layout.effectiveFontSize;
+          const effectiveScaleRatio = baseFontSize > 0 ? (effectiveFontSize / baseFontSize) : 1;
+          const lines = layout.lines;
+          const lineGapPx = effectiveFontSize * (layer.wrapLineHeight || 1.35);
+          const line2OffsetPx = ((layer.wrapLine2OffsetX || 0) / 100) * canvas.width;
 
-          ctx.fillStyle = layer.color;
-          ctx.fillText(displayText, x, y);
+          renderedLinesCount = lines.length;
+          renderedLineGap = lineGapPx;
+          renderedEffectiveFontSize = effectiveFontSize;
 
-          if (layer.hasSuffixList && layer.selectedSuffix) {
-            const mainMetrics = ctx.measureText(displayText);
-            const mainWidth = mainMetrics.width;
+          ctx.font = buildCanvasFontSpec(effectiveFontSize, fontFamily, layer.isBold, layer.isItalic, true, fallbackAlias);
 
-            let lastCharEndX = x;
-            if (ctx.textAlign === 'left') {
-              lastCharEndX = x + mainWidth;
-            } else if (ctx.textAlign === 'center') {
-              lastCharEndX = x + (mainWidth / 2);
-            } else if (ctx.textAlign === 'right') {
-              lastCharEndX = x;
-            }
-
-            const gap = (layer.suffixGap !== undefined ? layer.suffixGap : 4);
-            const suffixX = lastCharEndX + gap;
-
-            const prevFont = ctx.font;
-            const prevAlign = ctx.textAlign;
-
-            const suffixFontSize = layer.suffixFontSize || layer.fontSize;
-            const suffixFontFamily = layer.suffixFontFamily || layer.fontFamily;
-            const matchedSuffixFont = fonts.find(f => f.name === suffixFontFamily || normalizeFontLookup(f.name) === normalizeFontLookup(suffixFontFamily));
-            const suffixFallbackAlias = matchedSuffixFont && matchedSuffixFont.name !== suffixFontFamily ? matchedSuffixFont.name : undefined;
-            const suffixFontStr = buildCanvasFontSpec(suffixFontSize, suffixFontFamily, layer.isBold, layer.isItalic, true, suffixFallbackAlias);
-
-            ctx.font = suffixFontStr;
-            ctx.textAlign = 'left';
+          for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+            const lineText = lines[lineIdx];
+            const lineX = lineIdx === 0 ? x : x + line2OffsetPx;
+            const lineY = y + lineIdx * lineGapPx;
 
             if (layer.strokeWidth > 0) {
               ctx.strokeStyle = layer.strokeColor;
-              ctx.lineWidth = layer.strokeWidth * (canvas.width / 1000);
-              ctx.strokeText(layer.selectedSuffix, suffixX, y);
+              ctx.lineWidth = layer.strokeWidth * (canvas.width / 1000) * effectiveScaleRatio;
+              ctx.strokeText(lineText, lineX, lineY);
             }
 
-            ctx.fillStyle = layer.suffixColor || layer.color;
-            ctx.fillText(layer.selectedSuffix, suffixX, y);
+            ctx.fillStyle = layer.color;
+            ctx.fillText(lineText, lineX, lineY);
 
-            ctx.font = prevFont;
-            ctx.textAlign = prevAlign;
+            const isLastLine = lineIdx === lines.length - 1;
+            if (isLastLine && layer.hasSuffixList && layer.selectedSuffix) {
+              const mainMetrics = ctx.measureText(lineText);
+              const mainWidth = mainMetrics.width;
+
+              let lastCharEndX = lineX;
+              if (ctx.textAlign === 'left') {
+                lastCharEndX = lineX + mainWidth;
+              } else if (ctx.textAlign === 'center') {
+                lastCharEndX = lineX + (mainWidth / 2);
+              } else if (ctx.textAlign === 'right') {
+                lastCharEndX = lineX;
+              }
+
+              const gap = (layer.suffixGap !== undefined ? layer.suffixGap : 4) * effectiveScaleRatio;
+              const suffixX = lastCharEndX + gap;
+
+              const prevFont = ctx.font;
+              const prevAlign = ctx.textAlign;
+
+              const suffixFontSize = (layer.suffixFontSize || layer.fontSize) * effectiveScaleRatio;
+              const suffixFontFamily = layer.suffixFontFamily || layer.fontFamily;
+              const matchedSuffixFont = fonts.find(f => f.name === suffixFontFamily || normalizeFontLookup(f.name) === normalizeFontLookup(suffixFontFamily));
+              const suffixFallbackAlias = matchedSuffixFont && matchedSuffixFont.name !== suffixFontFamily ? matchedSuffixFont.name : undefined;
+              const suffixFontStr = buildCanvasFontSpec(suffixFontSize, suffixFontFamily, layer.isBold, layer.isItalic, true, suffixFallbackAlias);
+
+              ctx.font = suffixFontStr;
+              ctx.textAlign = 'left';
+
+              if (layer.strokeWidth > 0) {
+                ctx.strokeStyle = layer.strokeColor;
+                ctx.lineWidth = layer.strokeWidth * (canvas.width / 1000) * effectiveScaleRatio;
+                ctx.strokeText(layer.selectedSuffix, suffixX, lineY);
+              }
+
+              ctx.fillStyle = layer.suffixColor || layer.color;
+              ctx.fillText(layer.selectedSuffix, suffixX, lineY);
+
+              ctx.font = prevFont;
+              ctx.textAlign = prevAlign;
+            }
+
+            if (layer.isUnderline && lineText.trim() !== "") {
+              const width = ctx.measureText(lineText).width;
+              const height = effectiveFontSize;
+              let underlineX = lineX;
+              if (ctx.textAlign === 'center') underlineX = lineX - width / 2;
+              if (ctx.textAlign === 'right') underlineX = lineX - width;
+
+              let totalWidth = width;
+              if (isLastLine && layer.hasSuffixList && layer.selectedSuffix) {
+                const prevFont = ctx.font;
+                const suffixFontSize = (layer.suffixFontSize || layer.fontSize) * effectiveScaleRatio;
+                const suffixFontFamily = layer.suffixFontFamily || layer.fontFamily;
+                ctx.font = buildCanvasFontSpec(suffixFontSize, suffixFontFamily, layer.isBold, layer.isItalic, true);
+                const sufMetrics = ctx.measureText(layer.selectedSuffix);
+                const gap = (layer.suffixGap !== undefined ? layer.suffixGap : 4) * effectiveScaleRatio;
+                totalWidth += gap + sufMetrics.width;
+                ctx.font = prevFont;
+              }
+
+              ctx.beginPath();
+              ctx.strokeStyle = layer.color;
+              ctx.lineWidth = Math.max(1, effectiveFontSize / 15);
+              ctx.moveTo(underlineX, lineY + height / 2);
+              ctx.lineTo(underlineX + totalWidth, lineY + height / 2);
+              ctx.stroke();
+            }
           }
         }
 
-        if (layer.isUnderline && displayText.trim() !== "") {
-          const width = isSinhalaDate ? sinhalaTotalW : ctx.measureText(displayText).width;
-          const height = layer.fontSize;
-          let underlineX = x;
-          if (ctx.textAlign === 'center') underlineX = x - width / 2;
-          if (ctx.textAlign === 'right') underlineX = x - width;
-
-          let totalWidth = width;
-          if (layer.hasSuffixList && layer.selectedSuffix) {
-            const prevFont = ctx.font;
-            const suffixFontSize = layer.suffixFontSize || layer.fontSize;
-            const suffixFontFamily = layer.suffixFontFamily || layer.fontFamily;
-            ctx.font = buildCanvasFontSpec(suffixFontSize, suffixFontFamily, layer.isBold, layer.isItalic, true);
-            const sufMetrics = ctx.measureText(layer.selectedSuffix);
-            const gap = (layer.suffixGap !== undefined ? layer.suffixGap : 4);
-            totalWidth += gap + sufMetrics.width;
-            ctx.font = prevFont;
-          }
-
-          ctx.beginPath();
-          ctx.strokeStyle = layer.color;
-          ctx.lineWidth = Math.max(1, layer.fontSize / 15);
-          ctx.moveTo(underlineX, y + height / 2);
-          ctx.lineTo(underlineX + totalWidth, y + height / 2);
-          ctx.stroke();
-        }
+        drawMaxWidthGuide(renderedLinesCount, renderedLineGap, renderedEffectiveFontSize);
         ctx.restore();
       }
 
@@ -8295,6 +8365,127 @@ export default function App() {
                       ))}
                     </div>
                   </div>
+
+                  {selectedLayer.type !== 'date' && selectedLayer.type !== 'number' && !selectedLayer.isNumberLabel && (
+                  <div className="space-y-3 pt-2 border-t border-slate-800/50">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <label className="text-xs text-slate-400 font-medium block">Auto-Fit Width (Long Text)</label>
+                        <span className="text-[10px] text-slate-500">Shrink or wrap inside blank space</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => updateLayer(selectedLayer.id, {
+                          maxWidthPercent: (selectedLayer.maxWidthPercent || 0) > 0 ? 0 : 60,
+                          overflowMode: selectedLayer.overflowMode || 'shrink',
+                        })}
+                        className={cn(
+                          "w-10 h-5 rounded-full transition-colors relative shrink-0",
+                          (selectedLayer.maxWidthPercent || 0) > 0 ? "bg-cyan-600" : "bg-slate-700"
+                        )}
+                      >
+                        <span
+                          className={cn(
+                            "absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all",
+                            (selectedLayer.maxWidthPercent || 0) > 0 ? "left-[22px]" : "left-0.5"
+                          )}
+                        />
+                      </button>
+                    </div>
+
+                    {(selectedLayer.maxWidthPercent || 0) > 0 && (
+                      <div className="space-y-3 bg-slate-800/50 border border-slate-700/70 rounded-lg p-2.5">
+                        <div>
+                          <label className="text-[11px] text-slate-400 block mb-1.5">Overflow Behavior</label>
+                          <div className="grid grid-cols-2 gap-1 bg-slate-900/70 p-1 rounded-lg border border-slate-700/60">
+                            <button
+                              type="button"
+                              onClick={() => updateLayer(selectedLayer.id, { overflowMode: 'shrink' })}
+                              className={cn(
+                                "py-1.5 px-2 rounded-md text-xs font-medium transition-all",
+                                (selectedLayer.overflowMode || 'shrink') === 'shrink'
+                                  ? "bg-cyan-600 text-white shadow"
+                                  : "text-slate-400 hover:text-slate-200"
+                              )}
+                            >
+                              Shrink Font
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => updateLayer(selectedLayer.id, {
+                                overflowMode: 'wrap',
+                                wrapLineHeight: selectedLayer.wrapLineHeight ?? 1.35,
+                                wrapLine2OffsetX: selectedLayer.wrapLine2OffsetX ?? 0,
+                              })}
+                              className={cn(
+                                "py-1.5 px-2 rounded-md text-xs font-medium transition-all",
+                                selectedLayer.overflowMode === 'wrap'
+                                  ? "bg-cyan-600 text-white shadow"
+                                  : "text-slate-400 hover:text-slate-200"
+                              )}
+                            >
+                              Wrap Lines
+                            </button>
+                          </div>
+                        </div>
+
+                        <div>
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="text-[11px] text-slate-400">Max Width</label>
+                            <span className="text-[10px] font-mono text-cyan-300">{selectedLayer.maxWidthPercent}%</span>
+                          </div>
+                          <input
+                            type="range"
+                            min="15"
+                            max="95"
+                            step="1"
+                            value={selectedLayer.maxWidthPercent || 60}
+                            onChange={(e) => updateLayer(selectedLayer.id, { maxWidthPercent: parseInt(e.target.value, 10) })}
+                            className="w-full accent-cyan-500"
+                          />
+                        </div>
+
+                        {selectedLayer.overflowMode === 'wrap' && (
+                          <>
+                            <div>
+                              <div className="flex items-center justify-between mb-1">
+                                <label className="text-[11px] text-slate-400">Line Gap</label>
+                                <span className="text-[10px] font-mono text-cyan-300">{(selectedLayer.wrapLineHeight ?? 1.35).toFixed(2)}x</span>
+                              </div>
+                              <input
+                                type="range"
+                                min="1.0"
+                                max="3.5"
+                                step="0.05"
+                                value={selectedLayer.wrapLineHeight ?? 1.35}
+                                onChange={(e) => updateLayer(selectedLayer.id, { wrapLineHeight: parseFloat(e.target.value) })}
+                                className="w-full accent-cyan-500"
+                              />
+                            </div>
+
+                            <div>
+                              <div className="flex items-center justify-between mb-1">
+                                <label className="text-[11px] text-slate-400">Line 2 Shift X</label>
+                                <span className="text-[10px] font-mono text-cyan-300">
+                                  {(selectedLayer.wrapLine2OffsetX ?? 0) > 0 ? '+' : ''}{selectedLayer.wrapLine2OffsetX ?? 0}%
+                                </span>
+                              </div>
+                              <input
+                                type="range"
+                                min="-40"
+                                max="40"
+                                step="0.5"
+                                value={selectedLayer.wrapLine2OffsetX ?? 0}
+                                onChange={(e) => updateLayer(selectedLayer.id, { wrapLine2OffsetX: parseFloat(e.target.value) })}
+                                className="w-full accent-cyan-500"
+                              />
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  )}
 
                   <div className="space-y-3 pt-2 border-t border-slate-800/50">
                     <div className="flex items-center justify-between">

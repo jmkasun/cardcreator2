@@ -56,6 +56,10 @@ export interface TextLayer {
   suffixLines?: Record<string, SuffixLineConfig>;
   visible?: boolean;
   resetAfterCopy?: boolean;
+  maxWidthPercent?: number;
+  overflowMode?: 'shrink' | 'wrap';
+  wrapLineHeight?: number;
+  wrapLine2OffsetX?: number;
 }
 
 export interface Font {
@@ -345,6 +349,115 @@ export function resolveLayerText(
   return { displayText, isSinhalaDate: false, yearStr: "", monthStr: "", dayStr: "" };
 }
 
+export interface LayerTextLayoutResult {
+  effectiveFontSize: number;
+  lines: string[];
+  maxWidthPx: number;
+}
+
+/**
+ * Computes auto-shrunk font size or wrapped lines when `layer.maxWidthPercent` is set (> 0).
+ */
+export function computeLayerTextLayout(
+  ctx: CanvasRenderingContext2D,
+  canvasWidth: number,
+  layer: TextLayer,
+  displayText: string,
+  baseFontSize: number,
+  fallbackAlias: string | undefined,
+  fonts: Font[],
+  fontScale = 1
+): LayerTextLayoutResult {
+  const maxPct = Number(layer.maxWidthPercent || 0);
+  if (!maxPct || maxPct <= 0 || displayText.trim() === "") {
+    return { effectiveFontSize: baseFontSize, lines: [displayText], maxWidthPx: 0 };
+  }
+
+  const maxWidthPx = Math.max(20, (maxPct / 100) * canvasWidth);
+  const fontFamily = layer.fontFamily || "sans-serif";
+  const minFontSize = Math.max(10, baseFontSize * 0.35);
+
+  const measureSuffixWidth = (scaleRatio: number): number => {
+    if (!(layer.hasSuffixList && layer.selectedSuffix && displayText.trim() !== "")) return 0;
+    const prevFont = ctx.font;
+    const sufSize = (layer.suffixFontSize || layer.fontSize) * fontScale * scaleRatio;
+    const sufFam = layer.suffixFontFamily || fontFamily;
+    const matchedSuf = fonts.find(f => f.name === sufFam || normalizeFontLookup(f.name) === normalizeFontLookup(sufFam));
+    const sufAlias = matchedSuf && matchedSuf.name !== sufFam ? matchedSuf.name : undefined;
+    ctx.font = buildCanvasFontSpec(sufSize, sufFam, layer.isBold, layer.isItalic, true, sufAlias);
+    const gap = (layer.suffixGap !== undefined ? layer.suffixGap : 4) * fontScale * scaleRatio;
+    const w = gap + ctx.measureText(layer.selectedSuffix).width;
+    ctx.font = prevFont;
+    return w;
+  };
+
+  if (layer.overflowMode === 'wrap') {
+    const prevFont = ctx.font;
+    ctx.font = buildCanvasFontSpec(baseFontSize, fontFamily, layer.isBold, layer.isItalic, true, fallbackAlias);
+    const fullWidth = ctx.measureText(displayText).width + measureSuffixWidth(1);
+
+    if (fullWidth <= maxWidthPx) {
+      ctx.font = prevFont;
+      return { effectiveFontSize: baseFontSize, lines: [displayText], maxWidthPx };
+    }
+
+    // Wrap text greedily at natural word/comma boundaries
+    const rawLines = displayText.split(/\r?\n/);
+    const wrapped: string[] = [];
+
+    for (let rIdx = 0; rIdx < rawLines.length; rIdx++) {
+      const rawLine = rawLines[rIdx].trim();
+      if (!rawLine) {
+        wrapped.push("");
+        continue;
+      }
+      const words = rawLine.split(/\s+/);
+      let current = "";
+      for (let wIdx = 0; wIdx < words.length; wIdx++) {
+        const word = words[wIdx];
+        const candidate = current ? `${current} ${word}` : word;
+        const isPotentiallyLast = rIdx === rawLines.length - 1 && wIdx === words.length - 1;
+        const candidateW = ctx.measureText(candidate).width + (isPotentiallyLast ? measureSuffixWidth(1) : 0);
+        if (current && candidateW > maxWidthPx) {
+          wrapped.push(current);
+          current = word;
+        } else {
+          current = candidate;
+        }
+      }
+      if (current) wrapped.push(current);
+    }
+
+    const lines = wrapped.length > 0 ? wrapped : [displayText];
+
+    // If any single line (e.g. long unbreakable token or last line + suffix) still exceeds maxWidthPx, shrink gently
+    let widest = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const w = ctx.measureText(lines[i]).width + (i === lines.length - 1 ? measureSuffixWidth(1) : 0);
+      if (w > widest) widest = w;
+    }
+    ctx.font = prevFont;
+
+    const effectiveFontSize = widest > maxWidthPx && widest > 0
+      ? Math.max(minFontSize, baseFontSize * (maxWidthPx / widest))
+      : baseFontSize;
+
+    return { effectiveFontSize, lines, maxWidthPx };
+  }
+
+  // Default: 'shrink' mode — keep on single line and scale down font size to fit maxWidthPx
+  const prevFont = ctx.font;
+  ctx.font = buildCanvasFontSpec(baseFontSize, fontFamily, layer.isBold, layer.isItalic, true, fallbackAlias);
+  const totalWidth = ctx.measureText(displayText).width + measureSuffixWidth(1);
+  ctx.font = prevFont;
+
+  const effectiveFontSize = totalWidth > maxWidthPx && totalWidth > 0
+    ? Math.max(minFontSize, baseFontSize * (maxWidthPx / totalWidth))
+    : baseFontSize;
+
+  return { effectiveFontSize, lines: [displayText], maxWidthPx };
+}
+
 interface DrawSingleLayerOverride {
   x?: number; // absolute canvas pixels
   y?: number; // absolute canvas pixels
@@ -388,8 +501,8 @@ function drawSingleLayer(
   const fontFamily = layer.fontFamily || "sans-serif";
   const matchedFont = fonts.find(f => f.name === fontFamily || normalizeFontLookup(f.name) === normalizeFontLookup(fontFamily));
   const fallbackAlias = matchedFont && matchedFont.name !== fontFamily ? matchedFont.name : undefined;
-  const effectiveFontSize = Math.max(8, layer.fontSize * fontScale);
-  const fontStr = buildCanvasFontSpec(effectiveFontSize, fontFamily, layer.isBold, layer.isItalic, true, fallbackAlias);
+  const initialFontSize = Math.max(8, layer.fontSize * fontScale);
+  const fontStr = buildCanvasFontSpec(initialFontSize, fontFamily, layer.isBold, layer.isItalic, true, fallbackAlias);
 
   ctx.font = fontStr;
   ctx.textAlign = overrideAlign || layer.textAlign || "center";
@@ -414,6 +527,15 @@ function drawSingleLayer(
     ctx.restore();
     return;
   }
+
+  const baseFontSize = Math.max(8, layer.fontSize * fontScale);
+  const layout = isSinhalaDate
+    ? { effectiveFontSize: baseFontSize, lines: [displayText], maxWidthPx: 0 }
+    : computeLayerTextLayout(ctx, width, layer, displayText, baseFontSize, fallbackAlias, fonts, fontScale);
+
+  const effectiveFontSize = layout.effectiveFontSize;
+  const effectiveScaleRatio = baseFontSize > 0 ? (effectiveFontSize / baseFontSize) : 1;
+  ctx.font = buildCanvasFontSpec(effectiveFontSize, fontFamily, layer.isBold, layer.isItalic, true, fallbackAlias);
 
   if (layer.shadowBlur > 0) {
     ctx.shadowBlur = layer.shadowBlur * (width / 1000) * Math.min(1, fontScale);
@@ -469,81 +591,107 @@ function drawSingleLayer(
 
     ctx.textAlign = originalAlign;
   } else {
-    if (layer.strokeWidth > 0) {
-      ctx.strokeStyle = layer.strokeColor;
-      ctx.lineWidth = layer.strokeWidth * (width / 1000) * Math.min(1, fontScale);
-      ctx.strokeText(displayText, x, y);
-    }
+    const lines = layout.lines;
+    const lineGapPx = effectiveFontSize * (layer.wrapLineHeight || 1.35);
+    const line2OffsetPx = ((layer.wrapLine2OffsetX || 0) / 100) * width;
 
-    ctx.fillStyle = layer.color;
-    ctx.fillText(displayText, x, y);
-
-    if (layer.hasSuffixList && layer.selectedSuffix && displayText.trim() !== "") {
-      const mainMetrics = ctx.measureText(displayText);
-      const mainWidth = mainMetrics.width;
-
-      let lastCharEndX = x;
-      if (ctx.textAlign === 'left') {
-        lastCharEndX = x + mainWidth;
-      } else if (ctx.textAlign === 'center') {
-        lastCharEndX = x + (mainWidth / 2);
-      } else if (ctx.textAlign === 'right') {
-        lastCharEndX = x;
-      }
-
-      const gap = (layer.suffixGap !== undefined ? layer.suffixGap : 4) * fontScale;
-      const suffixX = lastCharEndX + gap;
-
-      const prevFont = ctx.font;
-      const prevAlign = ctx.textAlign;
-
-      const suffixFontSize = (layer.suffixFontSize || layer.fontSize) * fontScale;
-      const suffixFontFamily = layer.suffixFontFamily || layer.fontFamily;
-      const matchedSuffixFont = fonts.find(f => f.name === suffixFontFamily || normalizeFontLookup(f.name) === normalizeFontLookup(suffixFontFamily));
-      const suffixFallbackAlias = matchedSuffixFont && matchedSuffixFont.name !== suffixFontFamily ? matchedSuffixFont.name : undefined;
-      const suffixFontStr = buildCanvasFontSpec(suffixFontSize, suffixFontFamily, layer.isBold, layer.isItalic, true, suffixFallbackAlias);
-
-      ctx.font = suffixFontStr;
-      ctx.textAlign = 'left';
+    for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+      const lineText = lines[lineIdx];
+      const lineX = lineIdx === 0 ? x : x + line2OffsetPx;
+      const lineY = y + lineIdx * lineGapPx;
 
       if (layer.strokeWidth > 0) {
         ctx.strokeStyle = layer.strokeColor;
-        ctx.lineWidth = layer.strokeWidth * (width / 1000) * Math.min(1, fontScale);
-        ctx.strokeText(layer.selectedSuffix, suffixX, y);
+        ctx.lineWidth = layer.strokeWidth * (width / 1000) * Math.min(1, fontScale) * effectiveScaleRatio;
+        ctx.strokeText(lineText, lineX, lineY);
       }
 
-      ctx.fillStyle = layer.suffixColor || layer.color;
-      ctx.fillText(layer.selectedSuffix, suffixX, y);
+      ctx.fillStyle = layer.color;
+      ctx.fillText(lineText, lineX, lineY);
 
-      ctx.font = prevFont;
-      ctx.textAlign = prevAlign;
+      const isLastLine = lineIdx === lines.length - 1;
+      if (isLastLine && layer.hasSuffixList && layer.selectedSuffix && displayText.trim() !== "") {
+        const mainMetrics = ctx.measureText(lineText);
+        const mainWidth = mainMetrics.width;
+
+        let lastCharEndX = lineX;
+        if (ctx.textAlign === 'left') {
+          lastCharEndX = lineX + mainWidth;
+        } else if (ctx.textAlign === 'center') {
+          lastCharEndX = lineX + (mainWidth / 2);
+        } else if (ctx.textAlign === 'right') {
+          lastCharEndX = lineX;
+        }
+
+        const gap = (layer.suffixGap !== undefined ? layer.suffixGap : 4) * fontScale * effectiveScaleRatio;
+        const suffixX = lastCharEndX + gap;
+
+        const prevFont = ctx.font;
+        const prevAlign = ctx.textAlign;
+
+        const suffixFontSize = (layer.suffixFontSize || layer.fontSize) * fontScale * effectiveScaleRatio;
+        const suffixFontFamily = layer.suffixFontFamily || layer.fontFamily;
+        const matchedSuffixFont = fonts.find(f => f.name === suffixFontFamily || normalizeFontLookup(f.name) === normalizeFontLookup(suffixFontFamily));
+        const suffixFallbackAlias = matchedSuffixFont && matchedSuffixFont.name !== suffixFontFamily ? matchedSuffixFont.name : undefined;
+        const suffixFontStr = buildCanvasFontSpec(suffixFontSize, suffixFontFamily, layer.isBold, layer.isItalic, true, suffixFallbackAlias);
+
+        ctx.font = suffixFontStr;
+        ctx.textAlign = 'left';
+
+        if (layer.strokeWidth > 0) {
+          ctx.strokeStyle = layer.strokeColor;
+          ctx.lineWidth = layer.strokeWidth * (width / 1000) * Math.min(1, fontScale) * effectiveScaleRatio;
+          ctx.strokeText(layer.selectedSuffix, suffixX, lineY);
+        }
+
+        ctx.fillStyle = layer.suffixColor || layer.color;
+        ctx.fillText(layer.selectedSuffix, suffixX, lineY);
+
+        ctx.font = prevFont;
+        ctx.textAlign = prevAlign;
+      }
+
+      if (layer.isUnderline && lineText.trim() !== "") {
+        const mWidth = ctx.measureText(lineText).width;
+        const heightVal = effectiveFontSize;
+        let underlineX = lineX;
+        if (ctx.textAlign === 'center') underlineX = lineX - mWidth / 2;
+        if (ctx.textAlign === 'right') underlineX = lineX - mWidth;
+
+        let totalWidth = mWidth;
+        if (isLastLine && layer.hasSuffixList && layer.selectedSuffix) {
+          const prevFont = ctx.font;
+          const suffixFontSize = (layer.suffixFontSize || layer.fontSize) * fontScale * effectiveScaleRatio;
+          const suffixFontFamily = layer.suffixFontFamily || layer.fontFamily;
+          ctx.font = buildCanvasFontSpec(suffixFontSize, suffixFontFamily, layer.isBold, layer.isItalic, true);
+          const sufMetrics = ctx.measureText(layer.selectedSuffix);
+          const gap = (layer.suffixGap !== undefined ? layer.suffixGap : 4) * fontScale * effectiveScaleRatio;
+          totalWidth += gap + sufMetrics.width;
+          ctx.font = prevFont;
+        }
+
+        ctx.beginPath();
+        ctx.strokeStyle = layer.color;
+        ctx.lineWidth = Math.max(1, effectiveFontSize / 15);
+        ctx.moveTo(underlineX, lineY + heightVal / 2);
+        ctx.lineTo(underlineX + totalWidth, lineY + heightVal / 2);
+        ctx.stroke();
+      }
     }
   }
 
-  if (layer.isUnderline && displayText.trim() !== "") {
-    const mWidth = isSinhalaDate ? sinhalaTotalW : ctx.measureText(displayText).width;
+  if (isSinhalaDate && layer.isUnderline && displayText.trim() !== "") {
+    const mWidth = sinhalaTotalW;
     const heightVal = effectiveFontSize;
     let underlineX = x;
     if (ctx.textAlign === 'center') underlineX = x - mWidth / 2;
     if (ctx.textAlign === 'right') underlineX = x - mWidth;
 
-    let totalWidth = mWidth;
-    if (layer.hasSuffixList && layer.selectedSuffix) {
-      const prevFont = ctx.font;
-      const suffixFontSize = (layer.suffixFontSize || layer.fontSize) * fontScale;
-      const suffixFontFamily = layer.suffixFontFamily || layer.fontFamily;
-      ctx.font = buildCanvasFontSpec(suffixFontSize, suffixFontFamily, layer.isBold, layer.isItalic, true);
-      const sufMetrics = ctx.measureText(layer.selectedSuffix);
-      const gap = (layer.suffixGap !== undefined ? layer.suffixGap : 4) * fontScale;
-      totalWidth += gap + sufMetrics.width;
-      ctx.font = prevFont;
-    }
-
     ctx.beginPath();
     ctx.strokeStyle = layer.color;
     ctx.lineWidth = Math.max(1, effectiveFontSize / 15);
     ctx.moveTo(underlineX, y + heightVal / 2);
-    ctx.lineTo(underlineX + totalWidth, y + heightVal / 2);
+    ctx.lineTo(underlineX + mWidth, y + heightVal / 2);
     ctx.stroke();
   }
   ctx.restore();
