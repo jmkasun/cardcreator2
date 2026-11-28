@@ -1563,35 +1563,24 @@ cachedLocalFontFiles = null;
       else return res.status(400).json({ success: false, message: "Invalid creation type" });
 
       if (HAS_POSTGRES) {
-        // Log creation events with username
-        if (count === 1) {
-          safeQuery(
-            `INSERT INTO font_app_image_creations (image_id, type, username, created_at) 
-             VALUES ($1, $2, COALESCE($3, (SELECT username FROM font_app_images WHERE id = $1)), CURRENT_TIMESTAMP)`,
-            [id, type, username || null]
-          ).catch(err => console.error("Error inserting creation event:", err));
-        } else {
-          // Batch insert creation records
-          const valuesClauses: string[] = [];
-          const params: any[] = [id, type, username || null];
-          for (let i = 0; i < count; i++) {
-            valuesClauses.push(`($1, $2, COALESCE($3, (SELECT username FROM font_app_images WHERE id = $1)), CURRENT_TIMESTAMP)`);
-          }
-          safeQuery(
-            `INSERT INTO font_app_image_creations (image_id, type, username, created_at) VALUES ${valuesClauses.join(", ")}`,
-            params
-          ).catch(err => console.error("Error inserting bulk creation events:", err));
-        }
-
         const result = await safeQuery(
-          `UPDATE font_app_images 
-           SET ${column} = COALESCE(${column}, 0) + $2 
-           WHERE id = $1 
-           RETURNING id, 
-                     COALESCE(copies_count, 0) as "copiesCount", 
-                     COALESCE(downloads_count, 0) as "downloadsCount", 
-                     COALESCE(shares_count, 0) as "sharesCount"`,
-          [id, count]
+          `WITH updated AS (
+             UPDATE font_app_images
+             SET ${column} = COALESCE(${column}, 0) + $2::int
+             WHERE id = $1::text
+             RETURNING id,
+                       username,
+                       COALESCE(copies_count, 0) as "copiesCount",
+                       COALESCE(downloads_count, 0) as "downloadsCount",
+                       COALESCE(shares_count, 0) as "sharesCount"
+           ),
+           ins AS (
+             INSERT INTO font_app_image_creations (image_id, type, username, created_at)
+             SELECT $1::text, $3::text, COALESCE($4::text, (SELECT username FROM updated LIMIT 1)), CURRENT_TIMESTAMP
+             FROM generate_series(1, $2::int)
+           )
+           SELECT id, "copiesCount", "downloadsCount", "sharesCount" FROM updated`,
+          [id, count, type, username || null]
         );
         if (result.rowCount && result.rowCount > 0) {
           const row = result.rows[0];
@@ -1609,8 +1598,11 @@ cachedLocalFontFiles = null;
         }
       }
       res.json({ success: true, message: "Tracked" });
-    } catch (err) {
+    } catch (err: any) {
       console.error("Error tracking image creation:", err);
+      if (isSlotExhaustedError(err)) {
+        return res.status(503).json({ success: false, message: "Database is temporarily busy. Please try again in a moment." });
+      }
       res.status(500).json({ success: false, message: "Internal server error" });
     }
   });
@@ -1964,21 +1956,27 @@ cachedLocalFontFiles = null;
           const rowsRes = await safeQuery(
             `SELECT id, project_id as "projectId", username, row_name as "rowName",
                     row_values as "rowValues", sort_order as "sortOrder",
-                    created_at as "createdAt", updated_at as "updatedAt"
+                    created_at as "createdAt", updated_at as "updatedAt",
+                    (SELECT COUNT(*)::int FROM font_app_project_data WHERE project_id = $1) as "_totalCount"
              FROM font_app_project_data
              WHERE project_id = $1 AND (${layerPredicates.join(" OR ")})
              ORDER BY sort_order ASC, created_at ASC`,
             params
           );
-          const countRes = await safeQuery(
-            `SELECT COUNT(*)::int as total FROM font_app_project_data WHERE project_id = $1`,
-            [projectId]
-          );
-          const sortedRows = sortItemsByDateAscending(rowsRes.rows, dateLayerIds, activeFilterMonthDays);
+          let totalCount = rowsRes.rows.length > 0 ? Number(rowsRes.rows[0]._totalCount ?? rowsRes.rows.length) : null;
+          if (totalCount === null) {
+            const countRes = await safeQuery(
+              `SELECT COUNT(*)::int as total FROM font_app_project_data WHERE project_id = $1`,
+              [projectId]
+            );
+            totalCount = Number(countRes.rows[0]?.total ?? 0);
+          }
+          const cleanRows = rowsRes.rows.map(({ _totalCount, ...rest }: any) => rest);
+          const sortedRows = sortItemsByDateAscending(cleanRows, dateLayerIds, activeFilterMonthDays);
           return res.json({
             success: true,
             items: sortedRows,
-            totalCount: Number(countRes.rows[0]?.total ?? sortedRows.length),
+            totalCount,
             filteredByDate: true,
           });
         }
@@ -2051,6 +2049,30 @@ cachedLocalFontFiles = null;
       const now = new Date().toISOString();
 
       if (HAS_POSTGRES) {
+        if (mode !== "replace" && inputList.length === 1) {
+          const entry = inputList[0];
+          const rowId = entry.id || `pd_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+          const rowName = String(entry.rowName ?? "");
+          const rowValues = entry.rowValues || {};
+          const insRes = await safeQuery(
+            `INSERT INTO font_app_project_data (id, project_id, username, row_name, row_values, sort_order, created_at, updated_at)
+             VALUES (
+               $1, $2, $3, $4, $5,
+               (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM font_app_project_data WHERE project_id = $2),
+               CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+             )
+             ON CONFLICT (id) DO UPDATE SET
+               row_name = EXCLUDED.row_name,
+               row_values = EXCLUDED.row_values,
+               updated_at = CURRENT_TIMESTAMP
+             RETURNING id, project_id as "projectId", username, row_name as "rowName",
+                       row_values as "rowValues", sort_order as "sortOrder",
+                       created_at as "createdAt", updated_at as "updatedAt"`,
+            [rowId, projectId, username || "user", rowName, JSON.stringify(rowValues)]
+          );
+          return res.json({ success: true, items: insRes.rows });
+        }
+
         if (mode === "replace") {
           await safeQuery("DELETE FROM font_app_project_data WHERE project_id = $1", [projectId]);
         }

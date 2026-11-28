@@ -395,6 +395,8 @@ export default function App() {
 
   const sidebarRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const userMenuRef = useRef<HTMLDivElement>(null);
+  const mainContainerRef = useRef<HTMLElement>(null);
   const isDraggingRef = useRef(false);
   const dragStartPos = useRef({ x: 0, y: 0 });
   const dragTargetRef = useRef<'layer' | 'line-p1' | 'line-p2' | 'line-move' | null>(null);
@@ -455,11 +457,32 @@ export default function App() {
   }, [user]);
 
   useEffect(() => {
+    setShowUserMenu(false);
     if (user?.username) {
       fetchProjects();
       fetchFonts();
     }
   }, [user?.username]);
+
+  useEffect(() => {
+    if (!showUserMenu) return;
+    const handleOutsidePointerDown = (e: PointerEvent) => {
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target as Node)) {
+        setShowUserMenu(false);
+      }
+    };
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setShowUserMenu(false);
+      }
+    };
+    document.addEventListener("pointerdown", handleOutsidePointerDown, true);
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("pointerdown", handleOutsidePointerDown, true);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [showUserMenu]);
 
   // Track mobile visual viewport (keyboard height changes)
   useEffect(() => {
@@ -736,29 +759,65 @@ export default function App() {
 
   const imageCacheRef = useRef<HTMLImageElement | null>(null);
 
+  const fitImageToScreen = (targetImg?: HTMLImageElement | null) => {
+    const img = targetImg || imageCacheRef.current;
+    if (!img || !img.width || !img.height || typeof window === "undefined") return;
+    const mainElement = mainContainerRef.current || document.querySelector("main");
+    const isMobile = window.innerWidth < 768;
+    const containerWidth = mainElement && mainElement.clientWidth > 0 ? mainElement.clientWidth : window.innerWidth;
+    const containerHeight = mainElement && mainElement.clientHeight > 0 ? mainElement.clientHeight : Math.max(240, window.innerHeight - 64);
+    const padX = isMobile ? 24 : 64;
+    const padY = isMobile ? (isPreviewMode ? 24 : 116) : (isPreviewMode ? 24 : 64);
+    const maxWidth = Math.max(120, containerWidth - padX);
+    const maxHeight = Math.max(120, containerHeight - padY);
+    const scaleX = maxWidth / img.width;
+    const scaleY = maxHeight / img.height;
+    const newZoom = Math.max(0.05, Math.min(scaleX, scaleY, 1));
+    setZoom(newZoom);
+  };
+
   useEffect(() => {
     if (image) {
+      let cancelled = false;
       const img = new Image();
       img.crossOrigin = "anonymous";
       img.src = image;
       img.onload = () => {
+        if (cancelled) return;
         imageCacheRef.current = img;
-        drawCanvas();
-        
-        const mainElement = document.querySelector('main');
-        if (mainElement) {
-          const padding = 64;
-          const maxWidth = mainElement.clientWidth - padding;
-          const maxHeight = mainElement.clientHeight - padding;
-          const scaleX = maxWidth / img.width;
-          const newZoom = Math.min(scaleX, 1);
-          setZoom(newZoom);
+        if (canvasRef.current && (canvasRef.current.width !== img.width || canvasRef.current.height !== img.height)) {
+          canvasRef.current.width = img.width;
+          canvasRef.current.height = img.height;
         }
+        setCanvasSize({ width: img.width, height: img.height });
+        drawCanvas();
+        fitImageToScreen(img);
+        requestAnimationFrame(() => {
+          if (!cancelled) fitImageToScreen(img);
+        });
+      };
+      return () => {
+        cancelled = true;
       };
     } else {
       imageCacheRef.current = null;
     }
   }, [image]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handleMobileFitResize = () => {
+      if (window.innerWidth < 768 && imageCacheRef.current) {
+        fitImageToScreen(imageCacheRef.current);
+      }
+    };
+    window.addEventListener("resize", handleMobileFitResize);
+    window.addEventListener("orientationchange", handleMobileFitResize);
+    return () => {
+      window.removeEventListener("resize", handleMobileFitResize);
+      window.removeEventListener("orientationchange", handleMobileFitResize);
+    };
+  }, [isPreviewMode]);
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
@@ -2268,6 +2327,66 @@ export default function App() {
     });
   };
 
+  const duplicateLayer = (id: string) => {
+    const idx = layers.findIndex((l) => l.id === id);
+    if (idx === -1) return;
+    const target = layers[idx];
+
+    const baseName = (target.name || "Layer").replace(/\s*\(Copy(?:\s+\d+)?\)$/i, "");
+    const existingNames = new Set(layers.map((l) => l.name));
+    let copyName = `${baseName} (Copy)`;
+    let copyNum = 2;
+    while (existingNames.has(copyName)) {
+      copyName = `${baseName} (Copy ${copyNum})`;
+      copyNum += 1;
+    }
+
+    const newX = Math.min(98, Math.round((target.x + 2) * 100) / 100);
+    const newY = Math.min(98, Math.round((target.y + 4) * 100) / 100);
+    const dx = newX - target.x;
+    const dy = newY - target.y;
+
+    let clonedSuffixLines: Record<string, SuffixLineConfig> | undefined;
+    if (target.suffixLines) {
+      clonedSuffixLines = {};
+      for (const [key, cfg] of Object.entries(target.suffixLines) as Array<[string, SuffixLineConfig]>) {
+        clonedSuffixLines[key] = {
+          x1: Math.min(98, Math.max(0, Math.round((cfg.x1 + dx) * 100) / 100)),
+          y1: Math.min(98, Math.max(0, Math.round((cfg.y1 + dy) * 100) / 100)),
+          x2: Math.min(98, Math.max(0, Math.round((cfg.x2 + dx) * 100) / 100)),
+          y2: Math.min(98, Math.max(0, Math.round((cfg.y2 + dy) * 100) / 100)),
+        };
+      }
+    }
+
+    const newId = Math.random().toString(36).substr(2, 9);
+    const duplicated: TextLayer = {
+      ...target,
+      id: newId,
+      name: copyName,
+      x: newX,
+      y: newY,
+      options: target.options ? [...target.options] : undefined,
+      optionLabels: target.optionLabels ? [...target.optionLabels] : undefined,
+      sinhalaMonths: target.sinhalaMonths ? [...target.sinhalaMonths] : undefined,
+      suffixList: target.suffixList ? [...target.suffixList] : undefined,
+      suffixLines: clonedSuffixLines,
+      hasOptionLabel: false,
+      hasNumberLabel: false,
+      isListLabel: false,
+      linkedListId: undefined,
+      isNumberLabel: false,
+      linkedNumberId: undefined,
+      type: (target.isListLabel || target.isNumberLabel) ? 'label' : target.type,
+    };
+
+    const nextLayers = [...layers];
+    nextLayers.splice(idx + 1, 0, duplicated);
+    setLayers(nextLayers);
+    setSelectedLayerId(newId);
+    setNotification({ message: `Duplicated "${target.name}"`, type: 'success' });
+  };
+
   const toggleListOptionLabel = (listLayerId: string) => {
     const listLayer = layers.find(l => l.id === listLayerId);
     if (!listLayer) return;
@@ -3544,7 +3663,7 @@ export default function App() {
   const selectedLayer = layers.find((l) => l.id === selectedLayerId);
 
   return (
-    <div className="h-screen bg-slate-950 text-slate-200 flex flex-col overflow-hidden">
+    <div className="h-screen supports-[height:100dvh]:h-dvh bg-slate-950 text-slate-200 flex flex-col overflow-hidden">
       {/* Notification Toast */}
       <AnimatePresence>
         {notification && (
@@ -3658,16 +3777,23 @@ export default function App() {
             {showSidebar ? <X className="w-4 h-4 sm:w-5 sm:h-5" /> : <Menu className="w-4 h-4 sm:w-5 sm:h-5" />}
           </button>
           <div className="hidden md:flex items-center gap-1.5 bg-slate-800 rounded-lg px-2 sm:px-2.5 py-1 sm:py-1.5 shrink-0">
-            <button onClick={() => setZoom(Math.max(0.1, zoom - 0.1))} className="hover:text-blue-400 p-0.5" title="Zoom Out">
+            <button onClick={() => setZoom(Math.max(0.05, Number((zoom - 0.1).toFixed(2))))} className="hover:text-blue-400 p-0.5" title="Zoom Out">
               <Minus size={14} />
             </button>
-            <span className="text-[10px] sm:text-xs font-mono w-9 sm:w-11 text-center">{Math.round(zoom * 100)}%</span>
-            <button onClick={() => setZoom(Math.min(3, zoom + 0.1))} className="hover:text-blue-400 p-0.5" title="Zoom In">
+            <button
+              type="button"
+              onClick={() => fitImageToScreen()}
+              className="text-[10px] sm:text-xs font-mono w-9 sm:w-11 text-center hover:text-blue-400 transition-colors"
+              title="Fit to Screen"
+            >
+              {Math.round(zoom * 100)}%
+            </button>
+            <button onClick={() => setZoom(Math.min(3, Number((zoom + 0.1).toFixed(2))))} className="hover:text-blue-400 p-0.5" title="Zoom In">
               <Plus size={14} />
             </button>
           </div>
           
-          <div className="relative shrink-0">
+          <div ref={userMenuRef} className="relative shrink-0">
             <button 
               onClick={() => setShowUserMenu(!showUserMenu)}
               className="flex items-center gap-1.5 sm:gap-2 bg-slate-800 hover:bg-slate-700 rounded-lg px-2 sm:px-3 py-1.5 transition-all shrink-0"
@@ -3680,14 +3806,12 @@ export default function App() {
 
             <AnimatePresence>
               {showUserMenu && (
-                <>
-                  <div className="fixed inset-0 z-[110]" onClick={() => setShowUserMenu(false)} />
-                  <motion.div
-                    initial={{ opacity: 0, y: 10, scale: 0.95 }}
-                    animate={{ opacity: 1, y: 0, scale: 1 }}
-                    exit={{ opacity: 0, y: 10, scale: 0.95 }}
-                    className="absolute right-0 mt-2 w-56 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-[120] overflow-hidden"
-                  >
+                <motion.div
+                  initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                  className="absolute right-0 mt-2 w-56 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-[120] overflow-hidden"
+                >
                     <div className="p-3 border-b border-slate-800">
                       <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Account</p>
                       <div className="flex items-center gap-2">
@@ -3761,7 +3885,10 @@ export default function App() {
                     
                     <div className="p-1 border-t border-slate-800">
                       <button 
-                        onClick={() => setUser(null)}
+                        onClick={() => {
+                          setShowUserMenu(false);
+                          setUser(null);
+                        }}
                         className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-400 hover:bg-red-400/10 rounded-lg transition-colors"
                       >
                         <LogOut size={16} />
@@ -3769,7 +3896,6 @@ export default function App() {
                       </button>
                     </div>
                   </motion.div>
-                </>
               )}
             </AnimatePresence>
           </div>
@@ -5970,6 +6096,19 @@ export default function App() {
                                   </button>
                                 </div>
                                 <button
+                                  type="button"
+                                  tabIndex={-1}
+                                  disabled={isProjectLocked}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    duplicateLayer(layer.id);
+                                  }}
+                                  className="p-1 hover:text-blue-400 transition-all disabled:opacity-30"
+                                  title="Duplicate Layer"
+                                >
+                                  <Copy size={13} />
+                                </button>
+                                <button
                                   tabIndex={-1}
                                   disabled={isProjectLocked}
                                   onClick={(e) => {
@@ -5977,6 +6116,7 @@ export default function App() {
                                     deleteLayer(layer.id);
                                   }}
                                   className="p-1 hover:text-red-400 transition-all disabled:opacity-30"
+                                  title="Delete Layer"
                                 >
                                   <Trash2 size={14} />
                                 </button>
@@ -8097,13 +8237,22 @@ export default function App() {
                   </div>
                   </>
                   )}
-                  <button
-                    onClick={() => deleteLayer(selectedLayer.id)}
-                    disabled={projects.find(p => p.id === currentProjectId)?.isLocked}
-                    className="w-full mt-6 py-2.5 bg-red-600/10 hover:bg-red-600 border border-red-600/20 text-red-500 hover:text-white rounded-xl transition-all flex items-center justify-center gap-2 font-bold text-sm disabled:opacity-30 disabled:cursor-not-allowed"
-                  >
-                    <Trash2 size={14} /> Delete Layer
-                  </button>
+                  <div className="grid grid-cols-2 gap-2 mt-6">
+                    <button
+                      onClick={() => duplicateLayer(selectedLayer.id)}
+                      disabled={projects.find(p => p.id === currentProjectId)?.isLocked}
+                      className="w-full py-2.5 bg-blue-600/10 hover:bg-blue-600 border border-blue-600/20 text-blue-400 hover:text-white rounded-xl transition-all flex items-center justify-center gap-2 font-bold text-sm disabled:opacity-30 disabled:cursor-not-allowed"
+                    >
+                      <Copy size={14} /> Duplicate
+                    </button>
+                    <button
+                      onClick={() => deleteLayer(selectedLayer.id)}
+                      disabled={projects.find(p => p.id === currentProjectId)?.isLocked}
+                      className="w-full py-2.5 bg-red-600/10 hover:bg-red-600 border border-red-600/20 text-red-500 hover:text-white rounded-xl transition-all flex items-center justify-center gap-2 font-bold text-sm disabled:opacity-30 disabled:cursor-not-allowed"
+                    >
+                      <Trash2 size={14} /> Delete
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -8112,10 +8261,13 @@ export default function App() {
       </aside>
 
         {/* Main Editor Area */}
-        <main className={cn(
-          "flex-1 bg-slate-950 relative overflow-auto custom-scrollbar flex flex-col transition-all duration-300",
-          isPreviewMode ? "p-0" : "p-4 sm:p-8"
-        )}>
+        <main
+          ref={mainContainerRef}
+          className={cn(
+            "flex-1 bg-slate-950 relative overflow-auto custom-scrollbar flex flex-col transition-all duration-300",
+            isPreviewMode ? "p-0" : "p-2 sm:p-8"
+          )}
+        >
           {/* Mobile Sidebar Overlay */}
           <AnimatePresence>
             {showSidebar && (
@@ -8130,42 +8282,44 @@ export default function App() {
           </AnimatePresence>
           {/* Mobile Quick Actions */}
           {!isPreviewMode && image && (
-            <div className="md:hidden fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 bg-slate-900/90 backdrop-blur-md border border-slate-800 p-2 rounded-2xl shadow-2xl">
+            <div className="md:hidden fixed bottom-4 left-1/2 -translate-x-1/2 z-50 flex items-center gap-1.5 bg-slate-900/95 backdrop-blur-md border border-slate-800 px-2.5 py-1.5 rounded-2xl shadow-2xl max-w-[calc(100vw-16px)]">
               <button 
                 onClick={addLayer}
-                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-xl text-xs font-bold"
+                className="flex items-center gap-1.5 px-3 py-2 bg-blue-600 text-white rounded-xl text-xs font-bold shrink-0"
               >
-                <Plus size={16} /> Text
+                <Plus size={15} /> Text
               </button>
               <button 
                 onClick={addLabelLayer}
-                className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-xl text-xs font-bold"
+                className="flex items-center gap-1.5 px-3 py-2 bg-indigo-600 text-white rounded-xl text-xs font-bold shrink-0"
               >
-                <Plus size={16} /> Label
+                <Plus size={15} /> Label
               </button>
               <button 
                 onClick={addDateLayer}
-                className="flex items-center gap-2 px-4 py-2 bg-slate-800 text-slate-200 rounded-xl text-xs font-bold"
+                className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 text-slate-200 rounded-xl text-xs font-bold shrink-0"
               >
-                <Calendar size={16} /> Date
+                <Calendar size={15} /> Date
               </button>
-              <div className="w-px h-6 bg-slate-800 mx-1" />
+              <div className="w-px h-6 bg-slate-800 mx-0.5 shrink-0" />
               <button 
                 onClick={shareImage}
-                className="p-2 text-blue-400"
+                className="p-2 text-blue-400 shrink-0"
+                title="Share Image"
               >
-                <Share2 size={20} />
+                <Share2 size={18} />
               </button>
               <button 
                 onClick={() => setShowSidebar(true)}
-                className="p-2 text-slate-400"
+                className="p-2 text-slate-300 shrink-0"
+                title="Open Layers & Settings"
               >
-                <Settings size={20} />
+                <Settings size={18} />
               </button>
             </div>
           )}
           {!image ? (
-            <div className="min-h-full w-full flex items-center justify-center p-8">
+            <div className="min-h-full w-full flex items-center justify-center p-4 sm:p-8">
               <div
                 {...getMainRootProps()}
                 className={cn(
@@ -8182,7 +8336,7 @@ export default function App() {
               </div>
             </div>
           ) : (
-            <div className="min-h-full min-w-full flex p-8">
+            <div className={cn("min-h-full min-w-full flex", isPreviewMode ? "p-2 sm:p-4" : "p-2 pb-28 sm:p-8")}>
               <div 
                 className="relative group m-auto" 
                 style={{ 
@@ -8217,38 +8371,38 @@ export default function App() {
           )}
 
           {/* Floating Mobile Zoom Controls (hidden on desktop md:) */}
-          {image && !isPreviewMode && (
-            <div className="md:hidden fixed bottom-4 right-4 z-40 bg-slate-900/90 backdrop-blur-md border border-slate-700/80 rounded-full px-2.5 py-1.5 flex items-center gap-2 shadow-2xl">
+          {image && (
+            <div
+              className={cn(
+                "md:hidden fixed right-3 z-50 bg-slate-900/95 backdrop-blur-md border border-slate-700/90 rounded-full px-2.5 py-1.5 flex items-center gap-1.5 shadow-2xl",
+                isPreviewMode ? "bottom-4" : "bottom-[76px]"
+              )}
+            >
               <button
-                onClick={() => setZoom(Math.max(0.1, zoom - 0.1))}
-                className="p-1 hover:text-blue-400 text-slate-300 active:scale-95 transition-transform"
+                type="button"
+                onClick={() => setZoom(Math.max(0.05, Number((zoom - 0.1).toFixed(2))))}
+                className="p-1.5 hover:text-blue-400 text-slate-200 active:scale-95 transition-transform"
                 title="Zoom Out"
+                aria-label="Zoom Out"
               >
-                <Minus size={13} />
+                <Minus size={14} />
               </button>
               <button
-                onClick={() => {
-                  const mainElement = document.querySelector('main');
-                  if (mainElement && imageCacheRef.current) {
-                    const padding = 32;
-                    const maxWidth = mainElement.clientWidth - padding;
-                    const scaleX = maxWidth / imageCacheRef.current.width;
-                    setZoom(Math.min(scaleX, 1));
-                  } else {
-                    setZoom(1);
-                  }
-                }}
-                className="text-[10px] font-mono font-medium text-slate-200 hover:text-blue-400 px-1"
+                type="button"
+                onClick={() => fitImageToScreen()}
+                className="text-[11px] font-mono font-semibold text-slate-100 hover:text-blue-400 px-1.5 py-0.5 rounded bg-slate-800/80"
                 title="Fit to Screen"
               >
                 {Math.round(zoom * 100)}%
               </button>
               <button
-                onClick={() => setZoom(Math.min(3, zoom + 0.1))}
-                className="p-1 hover:text-blue-400 text-slate-300 active:scale-95 transition-transform"
+                type="button"
+                onClick={() => setZoom(Math.min(3, Number((zoom + 0.1).toFixed(2))))}
+                className="p-1.5 hover:text-blue-400 text-slate-200 active:scale-95 transition-transform"
                 title="Zoom In"
+                aria-label="Zoom In"
               >
-                <Plus size={13} />
+                <Plus size={14} />
               </button>
             </div>
           )}

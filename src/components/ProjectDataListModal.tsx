@@ -2424,8 +2424,15 @@ export function ProjectDataListModal({
     const copyAfterSave = Boolean(options?.copyAfterSave);
     const targetEditing = editingItem;
     const isLiveMode = liveApiSourceItems !== null || Boolean(targetEditing.id?.startsWith("api_"));
+    const clientItemId =
+      targetEditing.mode === "edit" && targetEditing.id
+        ? targetEditing.id
+        : isLiveMode
+        ? `api_${Date.now()}_add`
+        : `pd_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+
     const snapshotItem: ProjectDataItem = {
-      id: targetEditing.id || `temp_${Date.now()}`,
+      id: clientItemId,
       projectId: project.id,
       username: user?.username || (isLiveMode ? "api" : "user"),
       rowName: targetEditing.rowName,
@@ -2433,30 +2440,13 @@ export function ProjectDataListModal({
       sortOrder: liveApiSourceItems ? liveApiSourceItems.length : items.length,
     };
 
-    const executeSave = async (): Promise<{
-      savedItem: ProjectDataItem;
-      isLive: boolean;
-      mode: "add" | "edit";
-    }> => {
+    const applyOptimisticState = () => {
       if (isLiveMode) {
         if (targetEditing.mode === "add") {
-          const newItem: ProjectDataItem = {
-            id: `api_${Date.now()}_add`,
-            projectId: project.id,
-            username: user?.username || "api",
-            rowName: targetEditing.rowName,
-            rowValues: targetEditing.rowValues,
-            sortOrder: liveApiSourceItems ? liveApiSourceItems.length : items.length,
-          };
-          setLiveApiSourceItems(prev => (prev ? [...prev, newItem] : [newItem]));
-          setItems(prev => [...prev, newItem]);
+          setLiveApiSourceItems(prev => (prev ? [...prev, snapshotItem] : [snapshotItem]));
+          setItems(prev => [...prev, snapshotItem]);
           setTotalRecordCount(c => c + 1);
-          return { savedItem: newItem, isLive: true, mode: "add" };
         } else if (targetEditing.mode === "edit" && targetEditing.id) {
-          const updatedItem: ProjectDataItem = {
-            ...snapshotItem,
-            id: targetEditing.id,
-          };
           setLiveApiSourceItems(prev =>
             prev
               ? prev.map(it =>
@@ -2473,7 +2463,33 @@ export function ProjectDataListModal({
                 : it
             )
           );
-          return { savedItem: updatedItem, isLive: true, mode: "edit" };
+        }
+        return { savedItem: snapshotItem, isLive: true, mode: targetEditing.mode };
+      }
+
+      if (targetEditing.mode === "add") {
+        setItems(prev => [...prev, snapshotItem]);
+        setTotalRecordCount(c => c + 1);
+      } else if (targetEditing.mode === "edit" && targetEditing.id) {
+        setItems(prev =>
+          prev.map(it =>
+            it.id === targetEditing.id
+              ? { ...it, rowName: targetEditing.rowName, rowValues: targetEditing.rowValues }
+              : it
+          )
+        );
+      }
+      return { savedItem: snapshotItem, isLive: false, mode: targetEditing.mode };
+    };
+
+    const executeDbSave = async (alreadyOptimistic: boolean): Promise<{
+      savedItem: ProjectDataItem;
+      isLive: boolean;
+      mode: "add" | "edit";
+    }> => {
+      if (isLiveMode) {
+        if (!alreadyOptimistic) {
+          return applyOptimisticState();
         }
         return { savedItem: snapshotItem, isLive: true, mode: targetEditing.mode };
       }
@@ -2486,6 +2502,7 @@ export function ProjectDataListModal({
             username: user?.username || "user",
             mode: "append",
             item: {
+              id: clientItemId,
               rowName: targetEditing.rowName,
               rowValues: targetEditing.rowValues,
             },
@@ -2496,9 +2513,13 @@ export function ProjectDataListModal({
         let createdItem = snapshotItem;
         if (Array.isArray(data.items) && data.items.length > 0) {
           createdItem = data.items[0];
-          setItems(prev => [...prev, ...data.items]);
-          setTotalRecordCount(c => c + data.items.length);
-        } else {
+          if (alreadyOptimistic) {
+            setItems(prev => prev.map(it => (it.id === clientItemId ? createdItem : it)));
+          } else {
+            setItems(prev => [...prev, ...data.items]);
+            setTotalRecordCount(c => c + data.items.length);
+          }
+        } else if (!alreadyOptimistic) {
           await fetchProjectDataList();
         }
         return { savedItem: createdItem, isLive: false, mode: "add" };
@@ -2525,28 +2546,24 @@ export function ProjectDataListModal({
       return { savedItem: snapshotItem, isLive: false, mode: targetEditing.mode };
     };
 
-    setIsSaving(true);
-    setSavingAction(copyAfterSave ? "save_copy" : "save");
-
-    // Start saving right away
-    const savePromise = executeSave();
-
-    // Initiate clipboard write synchronously inside the click gesture so Safari/iOS/Chrome keep activation valid
-    let clipboardPromise: Promise<"copied" | "unsupported" | "failed"> | null = null;
     if (copyAfterSave) {
+      setIsSaving(true);
+      setSavingAction("save_copy");
+
+      // Initiate clipboard write synchronously inside the click gesture using local snapshot data (no waiting for DB)
       const canClipboard =
         typeof navigator !== "undefined" &&
         Boolean(navigator.clipboard) &&
         typeof (window as any).ClipboardItem !== "undefined";
 
+      let clipboardPromise: Promise<"copied" | "unsupported" | "failed">;
       if (!canClipboard) {
         clipboardPromise = Promise.resolve("unsupported");
       } else {
         const pngPromise = (async () => {
-          const { savedItem } = await savePromise;
           const selection = resolveGroupOrRowImage({
-            items: [savedItem],
-            overrideKey: `row_${savedItem.id}`,
+            items: [snapshotItem],
+            overrideKey: `row_${snapshotItem.id}`,
             groupConfig,
             activeLayers,
             groupByLayerId: "",
@@ -2554,7 +2571,7 @@ export function ProjectDataListModal({
             defaultImageUrl: effectiveDefaultImageUrl,
           });
           const img = await getLoadedImageForUrl(selection.url);
-          const rowLayers = prepareLayersForRow(activeLayers, savedItem.rowValues || {});
+          const rowLayers = prepareLayersForRow(activeLayers, snapshotItem.rowValues || {});
           const blob = await generateCardBlob(img, rowLayers, fonts);
           return await ensurePngBlobForClipboard(blob);
         })();
@@ -2579,61 +2596,80 @@ export function ProjectDataListModal({
           }
         })();
       }
-    }
 
-    try {
-      const { isLive, mode } = await savePromise;
+      // Apply optimistic local update & send DB save in the background
+      const previousItemsSnapshot = items;
+      applyOptimisticState();
 
-      if (copyAfterSave && clipboardPromise) {
+      if (!isLiveMode) {
+        void executeDbSave(true).catch((err) => {
+          console.error("Background save error:", err);
+          if (targetEditing.mode === "add") {
+            setItems(prev => prev.filter(it => it.id !== clientItemId));
+            setTotalRecordCount(c => Math.max(0, c - 1));
+          } else {
+            setItems(previousItemsSnapshot);
+          }
+          onNotification({
+            message: "Card copied, but failed to save record to database",
+            type: "error",
+          });
+        });
+      }
+
+      try {
         const copyStatus = await clipboardPromise;
         if (copyStatus === "copied") {
-          onRecordCreationEvents(1, "copy").catch(() => {});
-          if (isLive) {
-            onNotification({
-              message:
-                mode === "add"
-                  ? "Record added to live session & card image copied to clipboard!"
-                  : "Record updated in live session & card image copied to clipboard!",
-              type: "success",
-            });
-          } else {
-            onNotification({
-              message:
-                mode === "add"
-                  ? "Record saved & card image copied to clipboard!"
-                  : "Record updated & card image copied to clipboard!",
-              type: "success",
-            });
-          }
+          void onRecordCreationEvents(1, "copy").catch(() => {});
+          onNotification({
+            message: isLiveMode
+              ? targetEditing.mode === "add"
+                ? "Card image copied & record added to live session!"
+                : "Card image copied & record updated in live session!"
+              : targetEditing.mode === "add"
+              ? "Card image copied! Saving record in background..."
+              : "Card image copied! Updating record in background...",
+            type: "success",
+          });
         } else {
           onNotification({
             message:
               copyStatus === "unsupported"
-                ? "Record saved, but clipboard image copy is not supported in this browser"
-                : "Record saved, but could not copy card image to clipboard",
+                ? "Clipboard image copy is not supported in this browser (saving record...)"
+                : "Could not copy card image to clipboard (saving record...)",
             type: "info",
           });
         }
-      } else {
-        if (isLive) {
-          onNotification({
-            message:
-              mode === "add"
-                ? "Record added to live session (not saved to database)"
-                : "Record updated in live session",
-            type: "success",
-          });
-        } else {
-          onNotification({
-            message:
-              mode === "add"
-                ? "Record added and saved to database!"
-                : "Record updated in database!",
-            type: "success",
-          });
-        }
+        setEditingItem(null);
+      } finally {
+        setIsSaving(false);
+        setSavingAction(null);
       }
+      return;
+    }
 
+    setIsSaving(true);
+    setSavingAction("save");
+
+    try {
+      const { isLive, mode } = await executeDbSave(false);
+      if (isLive) {
+        onNotification({
+          message:
+            mode === "add"
+              ? "Record added to live session (not saved to database)"
+              : "Record updated in live session",
+          type: "success",
+        });
+      } else {
+        onNotification({
+          message:
+            mode === "add"
+              ? "Record added and saved to database!"
+              : "Record updated in database!",
+          type: "success",
+        });
+      }
       setEditingItem(null);
     } catch (err) {
       console.error("Error saving entry:", err);
