@@ -37,6 +37,9 @@ export interface TextLayer {
   useSinhalaMonth?: boolean;
   sinhalaMonths?: string[];
   dateSuffix?: string;
+  showDateYear?: boolean;
+  showDateMonth?: boolean;
+  showDateDay?: boolean;
   isBold?: boolean;
   isItalic?: boolean;
   isUnderline?: boolean;
@@ -191,6 +194,116 @@ export interface ResolvedLayerText {
   dayStr: string;
 }
 
+export function getSinhalaDateParts(
+  yearStr: string,
+  monthStr: string,
+  dayStr: string
+): Array<{ text: string; isMonth: boolean }> {
+  const parts: Array<{ text: string; isMonth: boolean }> = [];
+  if (yearStr) parts.push({ text: yearStr, isMonth: false });
+  if (monthStr) parts.push({ text: monthStr, isMonth: true });
+  if (dayStr) parts.push({ text: dayStr, isMonth: false });
+  return parts.map((p, idx) => ({
+    text: idx < parts.length - 1 ? `${p.text} ` : p.text,
+    isMonth: p.isMonth,
+  }));
+}
+
+export function resolveDateDisplay(
+  layer: TextLayer,
+  baseDisplayText: string
+): ResolvedLayerText {
+  let displayText = baseDisplayText;
+  let isSinhalaDate = false;
+  let yearStr = "";
+  let monthStr = "";
+  let dayStr = "";
+
+  if (layer.type !== 'date') {
+    return { displayText, isSinhalaDate, yearStr, monthStr, dayStr };
+  }
+
+  const showYear = layer.showDateYear !== false;
+  const showMonth = layer.showDateMonth !== false;
+  const showDay = layer.showDateDay !== false;
+
+  const rawDateSuffix = layer.dateSuffix || "";
+  const dateSuffixAppend = rawDateSuffix.trim() !== ""
+    ? (/^\s/.test(rawDateSuffix) ? rawDateSuffix : ` ${rawDateSuffix}`)
+    : "";
+
+  if (layer.useSinhalaMonth && layer.sinhalaMonths) {
+    try {
+      const d = new Date(layer.text);
+      if (!isNaN(d.getTime())) {
+        yearStr = showYear ? d.getFullYear().toString() : "";
+        monthStr = showMonth ? (layer.sinhalaMonths[d.getMonth()] || "") : "";
+        const rawDay = showDay ? d.getDate().toString().padStart(2, '0') : "";
+        if (rawDay) {
+          dayStr = `${rawDay}${dateSuffixAppend}`;
+        } else if ((yearStr || monthStr) && rawDateSuffix.trim() !== "") {
+          dayStr = rawDateSuffix.trim();
+        }
+        isSinhalaDate = true;
+        displayText = [yearStr, monthStr, dayStr].filter(Boolean).join(" ");
+        return { displayText, isSinhalaDate, yearStr, monthStr, dayStr };
+      }
+    } catch (e) {
+      console.error("Failed to format date with Sinhala month", e);
+    }
+  }
+
+  const rawText = (layer.text || "").trim();
+  if (!showYear && !showMonth && !showDay) {
+    return { displayText: "", isSinhalaDate: false, yearStr: "", monthStr: "", dayStr: "" };
+  }
+
+  if (rawText !== "") {
+    if (!showYear || !showMonth || !showDay) {
+      let yyyy = "";
+      let mm = "";
+      let dd = "";
+      let sep = "-";
+      let isDmy = false;
+
+      const isoMatch = rawText.match(/^(\d{4})([-/.])(\d{1,2})\2(\d{1,2})$/);
+      const dmyMatch = !isoMatch ? rawText.match(/^(\d{1,2})([-/.])(\d{1,2})\2(\d{4})$/) : null;
+      if (isoMatch) {
+        yyyy = isoMatch[1];
+        sep = isoMatch[2];
+        mm = isoMatch[3].padStart(2, '0');
+        dd = isoMatch[4].padStart(2, '0');
+      } else if (dmyMatch) {
+        dd = dmyMatch[1].padStart(2, '0');
+        sep = dmyMatch[2];
+        mm = dmyMatch[3].padStart(2, '0');
+        yyyy = dmyMatch[4];
+        isDmy = true;
+      } else {
+        const d = new Date(rawText);
+        if (!isNaN(d.getTime())) {
+          yyyy = d.getFullYear().toString();
+          mm = (d.getMonth() + 1).toString().padStart(2, '0');
+          dd = d.getDate().toString().padStart(2, '0');
+        }
+      }
+
+      if (yyyy || mm || dd) {
+        const ordered = isDmy
+          ? [showDay ? dd : "", showMonth ? mm : "", showYear ? yyyy : ""]
+          : [showYear ? yyyy : "", showMonth ? mm : "", showDay ? dd : ""];
+        displayText = ordered.filter(Boolean).join(sep);
+      }
+    }
+
+    if (displayText.trim() !== "" && dateSuffixAppend) {
+      displayText = `${displayText}${dateSuffixAppend}`;
+    }
+  }
+
+  return { displayText, isSinhalaDate, yearStr, monthStr, dayStr };
+}
+
 /**
  * Resolves the formatted text for a layer, including number formatting,
  * linked Sinhala number words, linked list labels, and Sinhala date months.
@@ -225,34 +338,11 @@ export function resolveLayerText(
     }
   }
 
-  let isSinhalaDate = false;
-  let yearStr = "";
-  let monthStr = "";
-  let dayStr = "";
-
-  const rawDateSuffix = layer.type === 'date' ? (layer.dateSuffix || "") : "";
-  const dateSuffixAppend = rawDateSuffix.trim() !== ""
-    ? (/^\s/.test(rawDateSuffix) ? rawDateSuffix : ` ${rawDateSuffix}`)
-    : "";
-
-  if (layer.type === 'date' && layer.useSinhalaMonth && layer.sinhalaMonths) {
-    try {
-      const d = new Date(layer.text);
-      if (!isNaN(d.getTime())) {
-        yearStr = d.getFullYear().toString();
-        monthStr = layer.sinhalaMonths[d.getMonth()] || "";
-        dayStr = `${d.getDate().toString().padStart(2, '0')}${dateSuffixAppend}`;
-        isSinhalaDate = true;
-        displayText = `${yearStr} ${monthStr} ${dayStr}`;
-      }
-    } catch (e) {
-      console.error("Failed to format date with Sinhala month", e);
-    }
-  } else if (layer.type === 'date' && (layer.text || "").trim() !== "" && dateSuffixAppend) {
-    displayText = `${displayText}${dateSuffixAppend}`;
+  if (layer.type === 'date') {
+    return resolveDateDisplay(layer, displayText);
   }
 
-  return { displayText, isSinhalaDate, yearStr, monthStr, dayStr };
+  return { displayText, isSinhalaDate: false, yearStr: "", monthStr: "", dayStr: "" };
 }
 
 interface DrawSingleLayerOverride {
@@ -311,25 +401,43 @@ function drawSingleLayer(
   const { displayText, isSinhalaDate, yearStr, monthStr, dayStr } = resolveLayerText(
     layer,
     allLayers,
-    fallbackToName
+    false
   );
+  const isEmptyContent = displayText.trim() === "";
+
+  if (isEmptyContent) {
+    if (fallbackToName && !isPreviewMode && !isExporting && (layer.name || "").trim() !== "") {
+      ctx.globalAlpha = 0.3;
+      ctx.fillStyle = layer.color;
+      ctx.fillText(layer.name, x, y);
+    }
+    ctx.restore();
+    return;
+  }
 
   if (layer.shadowBlur > 0) {
     ctx.shadowBlur = layer.shadowBlur * (width / 1000) * Math.min(1, fontScale);
     ctx.shadowColor = layer.shadowColor;
   }
 
+  let sinhalaTotalW = 0;
+
   if (isSinhalaDate) {
     const monthFontSize = ((layer.sinhalaMonthFontSize || layer.fontSize) * (width / 1000) * fontScale);
     const monthFontStr = buildCanvasFontSpec(monthFontSize, layer.fontFamily, layer.isBold, layer.isItalic, true, fallbackAlias);
-
-    const w1 = ctx.measureText(yearStr + " ").width;
     const originalFont = ctx.font;
-    ctx.font = monthFontStr;
-    const w2 = ctx.measureText(monthStr + " ").width;
+    const parts = getSinhalaDateParts(yearStr, monthStr, dayStr);
+    const measuredParts = parts.map((p) => {
+      ctx.font = p.isMonth ? monthFontStr : originalFont;
+      return {
+        ...p,
+        width: ctx.measureText(p.text).width,
+      };
+    });
     ctx.font = originalFont;
-    const w3 = ctx.measureText(dayStr).width;
-    const totalW = w1 + w2 + w3;
+
+    const totalW = measuredParts.reduce((sum, p) => sum + p.width, 0);
+    sinhalaTotalW = totalW;
 
     let startX = x;
     if (ctx.textAlign === 'center') startX = x - totalW / 2;
@@ -341,20 +449,23 @@ function drawSingleLayer(
     if (layer.strokeWidth > 0) {
       ctx.strokeStyle = layer.strokeColor;
       ctx.lineWidth = layer.strokeWidth * (width / 1000) * Math.min(1, fontScale);
-
-      ctx.strokeText(yearStr + " ", startX, y);
-      ctx.font = monthFontStr;
-      ctx.strokeText(monthStr + " ", startX + w1, y);
+      let curX = startX;
+      for (const part of measuredParts) {
+        ctx.font = part.isMonth ? monthFontStr : originalFont;
+        ctx.strokeText(part.text, curX, y);
+        curX += part.width;
+      }
       ctx.font = originalFont;
-      ctx.strokeText(dayStr, startX + w1 + w2, y);
     }
 
     ctx.fillStyle = layer.color;
-    ctx.fillText(yearStr + " ", startX, y);
-    ctx.font = monthFontStr;
-    ctx.fillText(monthStr + " ", startX + w1, y);
+    let curX = startX;
+    for (const part of measuredParts) {
+      ctx.font = part.isMonth ? monthFontStr : originalFont;
+      ctx.fillText(part.text, curX, y);
+      curX += part.width;
+    }
     ctx.font = originalFont;
-    ctx.fillText(dayStr, startX + w1 + w2, y);
 
     ctx.textAlign = originalAlign;
   } else {
@@ -410,8 +521,7 @@ function drawSingleLayer(
   }
 
   if (layer.isUnderline && displayText.trim() !== "") {
-    const metrics = ctx.measureText(displayText);
-    const mWidth = metrics.width;
+    const mWidth = isSinhalaDate ? sinhalaTotalW : ctx.measureText(displayText).width;
     const heightVal = effectiveFontSize;
     let underlineX = x;
     if (ctx.textAlign === 'center') underlineX = x - mWidth / 2;
@@ -507,7 +617,7 @@ export async function renderLayersOnCanvas(
       isPreviewMode,
       isExporting,
       drawSuffixLine: true,
-      fallbackToName: true,
+      fallbackToName: !isPreviewMode && !isExporting,
     });
   }
 }
@@ -1179,45 +1289,22 @@ function buildGroupedInlinePlans(
       if (isSinhalaDate) {
         const baseFS = Math.max(8, resolved.fontSize * effectiveFontScale);
         const monthFS = Math.max(8, (resolved.sinhalaMonthFontSize || resolved.fontSize) * (width / 1000) * effectiveFontScale);
-        segments.push({
-          text: `${yearStr} `,
-          fontSize: baseFS,
-          fontFamily: resolved.fontFamily || "sans-serif",
-          color: resolved.color,
-          strokeColor: resolved.strokeColor,
-          strokeWidth: resolved.strokeWidth,
-          shadowBlur: resolved.shadowBlur,
-          shadowColor: resolved.shadowColor,
-          isBold: resolved.isBold,
-          isItalic: resolved.isItalic,
-          isUnderline: resolved.isUnderline,
-        });
-        segments.push({
-          text: `${monthStr} `,
-          fontSize: monthFS,
-          fontFamily: resolved.fontFamily || "sans-serif",
-          color: resolved.color,
-          strokeColor: resolved.strokeColor,
-          strokeWidth: resolved.strokeWidth,
-          shadowBlur: resolved.shadowBlur,
-          shadowColor: resolved.shadowColor,
-          isBold: resolved.isBold,
-          isItalic: resolved.isItalic,
-          isUnderline: resolved.isUnderline,
-        });
-        segments.push({
-          text: dayStr,
-          fontSize: baseFS,
-          fontFamily: resolved.fontFamily || "sans-serif",
-          color: resolved.color,
-          strokeColor: resolved.strokeColor,
-          strokeWidth: resolved.strokeWidth,
-          shadowBlur: resolved.shadowBlur,
-          shadowColor: resolved.shadowColor,
-          isBold: resolved.isBold,
-          isItalic: resolved.isItalic,
-          isUnderline: resolved.isUnderline,
-        });
+        const parts = getSinhalaDateParts(yearStr, monthStr, dayStr);
+        for (const part of parts) {
+          segments.push({
+            text: part.text,
+            fontSize: part.isMonth ? monthFS : baseFS,
+            fontFamily: resolved.fontFamily || "sans-serif",
+            color: resolved.color,
+            strokeColor: resolved.strokeColor,
+            strokeWidth: resolved.strokeWidth,
+            shadowBlur: resolved.shadowBlur,
+            shadowColor: resolved.shadowColor,
+            isBold: resolved.isBold,
+            isItalic: resolved.isItalic,
+            isUnderline: resolved.isUnderline,
+          });
+        }
       } else {
         segments.push({
           text: displayText,

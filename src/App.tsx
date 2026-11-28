@@ -5,6 +5,7 @@ import { cn } from "@/src/lib/utils";
 import { motion, AnimatePresence } from "motion/react";
 import { convertNumberToSinhala, numberToSinhalaWords, formatNumberForCanvas, isUnicodeFont } from "./utils/sinhalaConverter";
 import { isPriceLayer } from "./utils/priceUtils";
+import { resolveDateDisplay, getSinhalaDateParts } from "./utils/cardRenderer";
 import { ProjectDataListModal } from "./components/ProjectDataListModal";
 
 interface User {
@@ -200,6 +201,9 @@ interface TextLayer {
   useSinhalaMonth?: boolean;
   sinhalaMonths?: string[];
   dateSuffix?: string;
+  showDateYear?: boolean;
+  showDateMonth?: boolean;
+  showDateDay?: boolean;
   isBold?: boolean;
   isItalic?: boolean;
   isUnderline?: boolean;
@@ -2023,6 +2027,9 @@ export default function App() {
       sinhalaMonthFontSize: user?.defaultFontSize || 60,
       sinhalaMonths: ["ckjdß", "fmnrjdß", "ud¾;=", "wfma%,a", "uehs", "cQks", "cQ,s", "wf.daia;=", "iema;eïn¾", "Tlaf;dan¾", "fkdjeïn¾", "foieïn¾"],
       dateSuffix: "",
+      showDateYear: true,
+      showDateMonth: true,
+      showDateDay: true,
       isBold: false,
       isItalic: false,
       isUnderline: false,
@@ -2627,50 +2634,50 @@ export default function App() {
         localStorage.setItem(`prev_layers_${currentProjectId}`, JSON.stringify(layers));
       }
 
-      // 2. Hide editing handles for clean export
+      // 2. Hide editing handles & empty watermarks for clean export
       isExportingRef.current = true;
-      drawCanvas();
+      await renderCanvasNow(true);
 
-      setTimeout(() => {
-        // Copy to clipboard
-        canvas.toBlob(async (blob) => {
-          if (!blob) return;
-          try {
-            const item = new ClipboardItem({ "image/png": blob });
-            await navigator.clipboard.write([item]);
-            setNotification({ message: "Image copied to clipboard!", type: 'success' });
-            if (currentProjectId) {
-              recordCreationEvent(currentProjectId, 'copy');
-            }
-          } catch (clipErr) {
-            console.error("Clipboard copy error:", clipErr);
-            setNotification({ message: "Failed to copy image to clipboard", type: 'error' });
+      const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve));
+      isExportingRef.current = false;
+
+      if (blob) {
+        try {
+          const item = new ClipboardItem({ "image/png": blob });
+          await navigator.clipboard.write([item]);
+          setNotification({ message: "Image copied to clipboard!", type: 'success' });
+          if (currentProjectId) {
+            recordCreationEvent(currentProjectId, 'copy');
           }
-        });
+        } catch (clipErr) {
+          console.error("Clipboard copy error:", clipErr);
+          setNotification({ message: "Failed to copy image to clipboard", type: 'error' });
+        }
+      }
 
-        isExportingRef.current = false;
-        // 3. Reset content ONLY for layers where resetAfterCopy is ticked. Otherwise stay unchanged!
-        setLayers(prev => {
-          const resettingParentIds = new Set(
-            prev.filter(l => !!l.resetAfterCopy).map(l => l.id)
+      // 3. Reset content ONLY for layers where resetAfterCopy is ticked. Otherwise stay unchanged!
+      setLayers(prev => {
+        const resettingParentIds = new Set(
+          prev.filter(l => !!l.resetAfterCopy).map(l => l.id)
+        );
+
+        return prev.map(layer => {
+          const shouldReset = !!layer.resetAfterCopy;
+          const parentIsResetting = Boolean(
+            (layer.linkedListId && resettingParentIds.has(layer.linkedListId)) ||
+            (layer.linkedNumberId && resettingParentIds.has(layer.linkedNumberId))
           );
 
-          return prev.map(layer => {
-            const shouldReset = !!layer.resetAfterCopy;
-            const parentIsResetting = Boolean(
-              (layer.linkedListId && resettingParentIds.has(layer.linkedListId)) ||
-              (layer.linkedNumberId && resettingParentIds.has(layer.linkedNumberId))
-            );
-
-            if (shouldReset || parentIsResetting) {
-              return { ...layer, text: "" };
-            }
-            return layer;
-          });
+          if (shouldReset || parentIsResetting) {
+            return { ...layer, text: "" };
+          }
+          return layer;
         });
-      }, 50);
+      });
+      drawCanvas();
     } catch (err) {
       isExportingRef.current = false;
+      drawCanvas();
       console.error("Failed to copy image", err);
       setNotification({ message: "Failed to copy image", type: 'error' });
     }
@@ -2695,300 +2702,312 @@ export default function App() {
   const drawCanvasRef = useRef<number | null>(null);
   const drawTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-  const drawCanvas = () => {
-    if (drawTimerRef.current) clearTimeout(drawTimerRef.current);
-    
-    drawTimerRef.current = setTimeout(() => {
-      if (drawCanvasRef.current) cancelAnimationFrame(drawCanvasRef.current);
-      
-      drawCanvasRef.current = requestAnimationFrame(async () => {
-        const canvas = canvasRef.current;
-        if (!canvas || !imageCacheRef.current) return;
+  const renderCanvasNow = async (forExport = isExportingRef.current) => {
+    const canvas = canvasRef.current;
+    if (!canvas || !imageCacheRef.current) return;
 
-        const ctx = canvas.getContext("2d", { alpha: false });
-        if (!ctx) return;
+    const ctx = canvas.getContext("2d", { alpha: false });
+    if (!ctx) return;
 
-        const img = imageCacheRef.current;
-        if (canvas.width !== img.width || canvas.height !== img.height) {
-          canvas.width = img.width;
-          canvas.height = img.height;
-          setCanvasSize({ width: img.width, height: img.height });
+    const img = imageCacheRef.current;
+    if (canvas.width !== img.width || canvas.height !== img.height) {
+      canvas.width = img.width;
+      canvas.height = img.height;
+      setCanvasSize({ width: img.width, height: img.height });
+    }
+
+    ctx.drawImage(img, 0, 0);
+
+    const hideEmptyWatermarks = isPreviewMode || forExport;
+
+    for (const layer of layers) {
+      if (layer.visible === false) continue;
+      ctx.save();
+      const fontFamily = layer.fontFamily || "sans-serif";
+      const matchedFont = fonts.find(f => f.name === fontFamily || normalizeFontLookup(f.name) === normalizeFontLookup(fontFamily));
+      const fallbackAlias = matchedFont && matchedFont.name !== fontFamily ? matchedFont.name : undefined;
+      const fontStr = buildCanvasFontSpec(layer.fontSize, fontFamily, layer.isBold, layer.isItalic, true, fallbackAlias);
+      const checkFontStr = buildCanvasFontSpec(layer.fontSize, fontFamily, layer.isBold, layer.isItalic, false);
+
+      if (!isGenericCssFont(fontFamily)) {
+        try {
+          if (!document.fonts.check(checkFontStr)) {
+            await document.fonts.load(checkFontStr);
+          }
+          if (fallbackAlias) {
+            const aliasCheckStr = buildCanvasFontSpec(layer.fontSize, fallbackAlias, layer.isBold, layer.isItalic, false);
+            if (!document.fonts.check(aliasCheckStr)) {
+              await document.fonts.load(aliasCheckStr);
+            }
+          }
+        } catch (e) {
+          console.warn(`Failed to load font for canvas: ${checkFontStr}`, e);
         }
-        
-        ctx.drawImage(img, 0, 0);
+      }
 
-        for (const layer of layers) {
-          if (layer.visible === false) continue;
-          ctx.save();
-          const fontFamily = layer.fontFamily || "sans-serif";
-          const matchedFont = fonts.find(f => f.name === fontFamily || normalizeFontLookup(f.name) === normalizeFontLookup(fontFamily));
-          const fallbackAlias = matchedFont && matchedFont.name !== fontFamily ? matchedFont.name : undefined;
-          const fontStr = buildCanvasFontSpec(layer.fontSize, fontFamily, layer.isBold, layer.isItalic, true, fallbackAlias);
-          const checkFontStr = buildCanvasFontSpec(layer.fontSize, fontFamily, layer.isBold, layer.isItalic, false);
-          
-          if (!isGenericCssFont(fontFamily)) {
+      if (layer.hasSuffixList && layer.selectedSuffix && layer.suffixFontFamily && !isGenericCssFont(layer.suffixFontFamily) && layer.suffixFontFamily !== fontFamily) {
+        const matchedSuf = fonts.find(f => f.name === layer.suffixFontFamily || normalizeFontLookup(f.name) === normalizeFontLookup(layer.suffixFontFamily));
+        const sufCheckStr = buildCanvasFontSpec(layer.suffixFontSize || layer.fontSize, layer.suffixFontFamily, layer.isBold, layer.isItalic, false);
+        if (!document.fonts.check(sufCheckStr)) {
+          try {
+            await document.fonts.load(sufCheckStr);
+          } catch (_) {}
+        }
+        if (matchedSuf && matchedSuf.name !== layer.suffixFontFamily) {
+          const matchedSufCheck = buildCanvasFontSpec(layer.suffixFontSize || layer.fontSize, matchedSuf.name, layer.isBold, layer.isItalic, false);
+          if (!document.fonts.check(matchedSufCheck)) {
             try {
-              if (!document.fonts.check(checkFontStr)) {
-                await document.fonts.load(checkFontStr);
-              }
-              if (fallbackAlias) {
-                const aliasCheckStr = buildCanvasFontSpec(layer.fontSize, fallbackAlias, layer.isBold, layer.isItalic, false);
-                if (!document.fonts.check(aliasCheckStr)) {
-                  await document.fonts.load(aliasCheckStr);
-                }
-              }
-            } catch (e) {
-              console.warn(`Failed to load font for canvas: ${checkFontStr}`, e);
-            }
+              await document.fonts.load(matchedSufCheck);
+            } catch (_) {}
           }
+        }
+      }
 
-          if (layer.hasSuffixList && layer.selectedSuffix && layer.suffixFontFamily && !isGenericCssFont(layer.suffixFontFamily) && layer.suffixFontFamily !== fontFamily) {
-            const matchedSuf = fonts.find(f => f.name === layer.suffixFontFamily || normalizeFontLookup(f.name) === normalizeFontLookup(layer.suffixFontFamily));
-            const sufCheckStr = buildCanvasFontSpec(layer.suffixFontSize || layer.fontSize, layer.suffixFontFamily, layer.isBold, layer.isItalic, false);
-            if (!document.fonts.check(sufCheckStr)) {
-              try {
-                await document.fonts.load(sufCheckStr);
-              } catch (_) {}
-            }
-            if (matchedSuf && matchedSuf.name !== layer.suffixFontFamily) {
-              const matchedSufCheck = buildCanvasFontSpec(layer.suffixFontSize || layer.fontSize, matchedSuf.name, layer.isBold, layer.isItalic, false);
-              if (!document.fonts.check(matchedSufCheck)) {
-                try {
-                  await document.fonts.load(matchedSufCheck);
-                } catch (_) {}
-              }
-            }
+      ctx.font = fontStr;
+      ctx.textAlign = layer.textAlign || "center";
+      ctx.textBaseline = "middle";
+
+      const x = (layer.x / 100) * canvas.width;
+      const y = (layer.y / 100) * canvas.height;
+
+      let displayText = layer.text || "";
+      if (layer.type === 'number') {
+        const linkedLabel = layers.find(l => l.linkedNumberId === layer.id);
+        const effectiveMode = linkedLabel?.numberFontMode || layer.numberFontMode;
+        displayText = formatNumberForCanvas(layer.text, layer.numberSuffix, layer.fontFamily, effectiveMode);
+      } else if (layer.isListLabel && layer.linkedListId) {
+        const parentList = layers.find(l => l.id === layer.linkedListId);
+        if (parentList) {
+          const optIndex = parentList.options ? parentList.options.indexOf(parentList.text) : -1;
+          if (optIndex >= 0 && parentList.optionLabels && parentList.optionLabels[optIndex] !== undefined && parentList.optionLabels[optIndex] !== "") {
+            displayText = parentList.optionLabels[optIndex];
+          } else if (layer.text) {
+            displayText = layer.text;
+          } else if (parentList.text === "") {
+            displayText = "";
           }
+        }
+      } else if (layer.isNumberLabel && layer.linkedNumberId) {
+        const parentNumber = layers.find(l => l.id === layer.linkedNumberId);
+        if (parentNumber) {
+          const mode = parentNumber.numberFontMode || layer.numberFontMode || 'fm';
+          displayText = convertNumberToSinhala(parentNumber.text, mode) || layer.text || "";
+        }
+      }
+      let isSinhalaDate = false;
+      let yearStr = "";
+      let monthStr = "";
+      let dayStr = "";
 
-          ctx.font = fontStr;
-          ctx.textAlign = layer.textAlign || "center";
-          ctx.textBaseline = "middle";
-          
-          const x = (layer.x / 100) * canvas.width;
-          const y = (layer.y / 100) * canvas.height;
-          
-          let displayText = layer.text || layer.name || "";
-          if (layer.type === 'number') {
-            const linkedLabel = layers.find(l => l.linkedNumberId === layer.id);
-            const effectiveMode = linkedLabel?.numberFontMode || layer.numberFontMode;
-            displayText = formatNumberForCanvas(layer.text, layer.numberSuffix, layer.fontFamily, effectiveMode);
-          } else if (layer.isListLabel && layer.linkedListId) {
-            const parentList = layers.find(l => l.id === layer.linkedListId);
-            if (parentList) {
-              const optIndex = parentList.options ? parentList.options.indexOf(parentList.text) : -1;
-              if (optIndex >= 0 && parentList.optionLabels && parentList.optionLabels[optIndex] !== undefined && parentList.optionLabels[optIndex] !== "") {
-                displayText = parentList.optionLabels[optIndex];
-              } else if (layer.text) {
-                displayText = layer.text;
-              } else if (parentList.text === "") {
-                displayText = "";
-              }
+      if (layer.type === 'date' && displayText.trim() !== "") {
+        const resolvedDate = resolveDateDisplay(layer, displayText);
+        displayText = resolvedDate.displayText;
+        isSinhalaDate = resolvedDate.isSinhalaDate;
+        yearStr = resolvedDate.yearStr;
+        monthStr = resolvedDate.monthStr;
+        dayStr = resolvedDate.dayStr;
+      }
+
+      const isEmptyContent = displayText.trim() === "";
+
+      if (isEmptyContent) {
+        if (!hideEmptyWatermarks && (layer.name || "").trim() !== "") {
+          ctx.globalAlpha = 0.3;
+          ctx.fillStyle = layer.color;
+          ctx.fillText(layer.name, x, y);
+        }
+        ctx.restore();
+      } else {
+        if (layer.shadowBlur > 0) {
+          ctx.shadowBlur = layer.shadowBlur * (canvas.width / 1000);
+          ctx.shadowColor = layer.shadowColor;
+        }
+
+        let sinhalaTotalW = 0;
+
+        if (isSinhalaDate) {
+          const monthFontSize = ((layer.sinhalaMonthFontSize || layer.fontSize) * (canvas.width / 1000));
+          const monthFontStr = buildCanvasFontSpec(monthFontSize, layer.fontFamily, layer.isBold, layer.isItalic, true, fallbackAlias);
+          const originalFont = ctx.font;
+          const parts = getSinhalaDateParts(yearStr, monthStr, dayStr);
+          const measuredParts = parts.map((p) => {
+            ctx.font = p.isMonth ? monthFontStr : originalFont;
+            return {
+              ...p,
+              width: ctx.measureText(p.text).width,
+            };
+          });
+          ctx.font = originalFont;
+
+          const totalW = measuredParts.reduce((sum, p) => sum + p.width, 0);
+          sinhalaTotalW = totalW;
+
+          let startX = x;
+          if (ctx.textAlign === 'center') startX = x - totalW / 2;
+          else if (ctx.textAlign === 'right') startX = x - totalW;
+
+          const originalAlign = ctx.textAlign;
+          ctx.textAlign = 'left';
+
+          if (layer.strokeWidth > 0) {
+            ctx.strokeStyle = layer.strokeColor;
+            ctx.lineWidth = layer.strokeWidth * (canvas.width / 1000);
+            let curX = startX;
+            for (const part of measuredParts) {
+              ctx.font = part.isMonth ? monthFontStr : originalFont;
+              ctx.strokeText(part.text, curX, y);
+              curX += part.width;
             }
-          } else if (layer.isNumberLabel && layer.linkedNumberId) {
-            const parentNumber = layers.find(l => l.id === layer.linkedNumberId);
-            if (parentNumber) {
-              const mode = parentNumber.numberFontMode || layer.numberFontMode || 'fm';
-              displayText = convertNumberToSinhala(parentNumber.text, mode) || layer.text || "";
-            }
-          }
-          let isSinhalaDate = false;
-          let yearStr = "";
-          let monthStr = "";
-          let dayStr = "";
-
-          const rawDateSuffix = layer.type === 'date' ? (layer.dateSuffix || "") : "";
-          const dateSuffixAppend = rawDateSuffix.trim() !== ""
-            ? (/^\s/.test(rawDateSuffix) ? rawDateSuffix : ` ${rawDateSuffix}`)
-            : "";
-
-          if (layer.type === 'date' && layer.useSinhalaMonth && layer.sinhalaMonths) {
-            try {
-              const d = new Date(layer.text);
-              if (!isNaN(d.getTime())) {
-                yearStr = d.getFullYear().toString();
-                monthStr = layer.sinhalaMonths[d.getMonth()] || "";
-                dayStr = `${d.getDate().toString().padStart(2, '0')}${dateSuffixAppend}`;
-                isSinhalaDate = true;
-                displayText = `${yearStr} ${monthStr} ${dayStr}`;
-              }
-            } catch (e) {
-              console.error("Failed to format date with Sinhala month", e);
-            }
-          } else if (layer.type === 'date' && (layer.text || "").trim() !== "" && dateSuffixAppend) {
-            displayText = `${displayText}${dateSuffixAppend}`;
-          }
-
-          if (layer.shadowBlur > 0) {
-            ctx.shadowBlur = layer.shadowBlur * (canvas.width / 1000);
-            ctx.shadowColor = layer.shadowColor;
-          }
-
-          if (isSinhalaDate) {
-            const monthFontSize = ((layer.sinhalaMonthFontSize || layer.fontSize) * (canvas.width / 1000));
-            const monthFontStr = buildCanvasFontSpec(monthFontSize, layer.fontFamily, layer.isBold, layer.isItalic, true, fallbackAlias);
-            
-            // Calculate total width
-            const w1 = ctx.measureText(yearStr + " ").width;
-            const originalFont = ctx.font;
-            ctx.font = monthFontStr;
-            const w2 = ctx.measureText(monthStr + " ").width;
             ctx.font = originalFont;
-            const w3 = ctx.measureText(dayStr).width;
-            const totalW = w1 + w2 + w3;
-            
-            let startX = x;
-            if (ctx.textAlign === 'center') startX = x - totalW / 2;
-            else if (ctx.textAlign === 'right') startX = x - totalW;
-            
-            const originalAlign = ctx.textAlign;
+          }
+
+          ctx.fillStyle = layer.color;
+          let curX = startX;
+          for (const part of measuredParts) {
+            ctx.font = part.isMonth ? monthFontStr : originalFont;
+            ctx.fillText(part.text, curX, y);
+            curX += part.width;
+          }
+          ctx.font = originalFont;
+
+          ctx.textAlign = originalAlign;
+        } else {
+          if (layer.strokeWidth > 0) {
+            ctx.strokeStyle = layer.strokeColor;
+            ctx.lineWidth = layer.strokeWidth * (canvas.width / 1000);
+            ctx.strokeText(displayText, x, y);
+          }
+
+          ctx.fillStyle = layer.color;
+          ctx.fillText(displayText, x, y);
+
+          if (layer.hasSuffixList && layer.selectedSuffix) {
+            const mainMetrics = ctx.measureText(displayText);
+            const mainWidth = mainMetrics.width;
+
+            let lastCharEndX = x;
+            if (ctx.textAlign === 'left') {
+              lastCharEndX = x + mainWidth;
+            } else if (ctx.textAlign === 'center') {
+              lastCharEndX = x + (mainWidth / 2);
+            } else if (ctx.textAlign === 'right') {
+              lastCharEndX = x;
+            }
+
+            const gap = (layer.suffixGap !== undefined ? layer.suffixGap : 4);
+            const suffixX = lastCharEndX + gap;
+
+            const prevFont = ctx.font;
+            const prevAlign = ctx.textAlign;
+
+            const suffixFontSize = layer.suffixFontSize || layer.fontSize;
+            const suffixFontFamily = layer.suffixFontFamily || layer.fontFamily;
+            const matchedSuffixFont = fonts.find(f => f.name === suffixFontFamily || normalizeFontLookup(f.name) === normalizeFontLookup(suffixFontFamily));
+            const suffixFallbackAlias = matchedSuffixFont && matchedSuffixFont.name !== suffixFontFamily ? matchedSuffixFont.name : undefined;
+            const suffixFontStr = buildCanvasFontSpec(suffixFontSize, suffixFontFamily, layer.isBold, layer.isItalic, true, suffixFallbackAlias);
+
+            ctx.font = suffixFontStr;
             ctx.textAlign = 'left';
-            
+
             if (layer.strokeWidth > 0) {
               ctx.strokeStyle = layer.strokeColor;
               ctx.lineWidth = layer.strokeWidth * (canvas.width / 1000);
-              
-              ctx.strokeText(yearStr + " ", startX, y);
-              ctx.font = monthFontStr;
-              ctx.strokeText(monthStr + " ", startX + w1, y);
-              ctx.font = originalFont;
-              ctx.strokeText(dayStr, startX + w1 + w2, y);
-            }
-            
-            ctx.fillStyle = layer.color;
-            ctx.fillText(yearStr + " ", startX, y);
-            ctx.font = monthFontStr;
-            ctx.fillText(monthStr + " ", startX + w1, y);
-            ctx.font = originalFont;
-            ctx.fillText(dayStr, startX + w1 + w2, y);
-            
-            ctx.textAlign = originalAlign;
-          } else {
-            if (layer.strokeWidth > 0) {
-              ctx.strokeStyle = layer.strokeColor;
-              ctx.lineWidth = layer.strokeWidth * (canvas.width / 1000);
-              ctx.strokeText(displayText, x, y);
+              ctx.strokeText(layer.selectedSuffix, suffixX, y);
             }
 
-            ctx.fillStyle = layer.color;
-            ctx.fillText(displayText, x, y);
+            ctx.fillStyle = layer.suffixColor || layer.color;
+            ctx.fillText(layer.selectedSuffix, suffixX, y);
 
-            if (layer.hasSuffixList && layer.selectedSuffix) {
-              const mainMetrics = ctx.measureText(displayText);
-              const mainWidth = mainMetrics.width;
+            ctx.font = prevFont;
+            ctx.textAlign = prevAlign;
+          }
+        }
 
-              let lastCharEndX = x;
-              if (ctx.textAlign === 'left') {
-                lastCharEndX = x + mainWidth;
-              } else if (ctx.textAlign === 'center') {
-                lastCharEndX = x + (mainWidth / 2);
-              } else if (ctx.textAlign === 'right') {
-                lastCharEndX = x;
-              }
+        if (layer.isUnderline && displayText.trim() !== "") {
+          const width = isSinhalaDate ? sinhalaTotalW : ctx.measureText(displayText).width;
+          const height = layer.fontSize;
+          let underlineX = x;
+          if (ctx.textAlign === 'center') underlineX = x - width / 2;
+          if (ctx.textAlign === 'right') underlineX = x - width;
 
-              const gap = (layer.suffixGap !== undefined ? layer.suffixGap : 4);
-              const suffixX = lastCharEndX + gap;
-
-              const prevFont = ctx.font;
-              const prevAlign = ctx.textAlign;
-
-              const suffixFontSize = layer.suffixFontSize || layer.fontSize;
-              const suffixFontFamily = layer.suffixFontFamily || layer.fontFamily;
-              const matchedSuffixFont = fonts.find(f => f.name === suffixFontFamily || normalizeFontLookup(f.name) === normalizeFontLookup(suffixFontFamily));
-              const suffixFallbackAlias = matchedSuffixFont && matchedSuffixFont.name !== suffixFontFamily ? matchedSuffixFont.name : undefined;
-              const suffixFontStr = buildCanvasFontSpec(suffixFontSize, suffixFontFamily, layer.isBold, layer.isItalic, true, suffixFallbackAlias);
-
-              ctx.font = suffixFontStr;
-              ctx.textAlign = 'left';
-
-              if (layer.strokeWidth > 0) {
-                ctx.strokeStyle = layer.strokeColor;
-                ctx.lineWidth = layer.strokeWidth * (canvas.width / 1000);
-                ctx.strokeText(layer.selectedSuffix, suffixX, y);
-              }
-
-              ctx.fillStyle = layer.suffixColor || layer.color;
-              ctx.fillText(layer.selectedSuffix, suffixX, y);
-
-              ctx.font = prevFont;
-              ctx.textAlign = prevAlign;
-            }
+          let totalWidth = width;
+          if (layer.hasSuffixList && layer.selectedSuffix) {
+            const prevFont = ctx.font;
+            const suffixFontSize = layer.suffixFontSize || layer.fontSize;
+            const suffixFontFamily = layer.suffixFontFamily || layer.fontFamily;
+            ctx.font = buildCanvasFontSpec(suffixFontSize, suffixFontFamily, layer.isBold, layer.isItalic, true);
+            const sufMetrics = ctx.measureText(layer.selectedSuffix);
+            const gap = (layer.suffixGap !== undefined ? layer.suffixGap : 4);
+            totalWidth += gap + sufMetrics.width;
+            ctx.font = prevFont;
           }
 
-          if (layer.isUnderline) {
-            const metrics = ctx.measureText(displayText);
-            const width = metrics.width;
-            const height = layer.fontSize;
-            let underlineX = x;
-            if (ctx.textAlign === 'center') underlineX = x - width / 2;
-            if (ctx.textAlign === 'right') underlineX = x - width;
-            
-            let totalWidth = width;
-            if (layer.hasSuffixList && layer.selectedSuffix) {
-              const prevFont = ctx.font;
-              const suffixFontSize = layer.suffixFontSize || layer.fontSize;
-              const suffixFontFamily = layer.suffixFontFamily || layer.fontFamily;
-              ctx.font = buildCanvasFontSpec(suffixFontSize, suffixFontFamily, layer.isBold, layer.isItalic, true);
-              const sufMetrics = ctx.measureText(layer.selectedSuffix);
-              const gap = (layer.suffixGap !== undefined ? layer.suffixGap : 4);
-              totalWidth += gap + sufMetrics.width;
-              ctx.font = prevFont;
-            }
+          ctx.beginPath();
+          ctx.strokeStyle = layer.color;
+          ctx.lineWidth = Math.max(1, layer.fontSize / 15);
+          ctx.moveTo(underlineX, y + height / 2);
+          ctx.lineTo(underlineX + totalWidth, y + height / 2);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
 
+      // Draw suffix line if enabled and has selected suffix
+      if (layer.hasSuffixList && layer.showSuffixLine && layer.selectedSuffix) {
+        const lineCfg = getSuffixLineConfig(layer, layer.selectedSuffix, layer.suffixList?.indexOf(layer.selectedSuffix));
+        if (lineCfg) {
+          const lx1 = (lineCfg.x1 / 100) * canvas.width;
+          const ly1 = (lineCfg.y1 / 100) * canvas.height;
+          const lx2 = (lineCfg.x2 / 100) * canvas.width;
+          const ly2 = (lineCfg.y2 / 100) * canvas.height;
+
+          ctx.save();
+          ctx.beginPath();
+          ctx.strokeStyle = layer.suffixLineColor || layer.color;
+          const lineThickness = (layer.suffixLineWidth || 3) * (canvas.width / 1000);
+          ctx.lineWidth = Math.max(1, lineThickness);
+          ctx.lineCap = 'round';
+          ctx.moveTo(lx1, ly1);
+          ctx.lineTo(lx2, ly2);
+          ctx.stroke();
+
+          const currentProject = projects.find(p => p.id === currentProjectId);
+          const isLocked = currentProject?.isLocked;
+          if (selectedLayerId === layer.id && !isLocked && !isPreviewMode && !forExport) {
+            const handleR = Math.max(5, 7 * (canvas.width / 1000));
+
+            // Endpoint 1 Handle
             ctx.beginPath();
-            ctx.strokeStyle = layer.color;
-            ctx.lineWidth = Math.max(1, layer.fontSize / 15);
-            ctx.moveTo(underlineX, y + height / 2);
-            ctx.lineTo(underlineX + totalWidth, y + height / 2);
+            ctx.arc(lx1, ly1, handleR, 0, Math.PI * 2);
+            ctx.fillStyle = '#0284c7';
+            ctx.fill();
+            ctx.lineWidth = Math.max(1.5, 2 * (canvas.width / 1000));
+            ctx.strokeStyle = '#ffffff';
+            ctx.stroke();
+
+            // Endpoint 2 Handle
+            ctx.beginPath();
+            ctx.arc(lx2, ly2, handleR, 0, Math.PI * 2);
+            ctx.fillStyle = '#0284c7';
+            ctx.fill();
+            ctx.lineWidth = Math.max(1.5, 2 * (canvas.width / 1000));
+            ctx.strokeStyle = '#ffffff';
             ctx.stroke();
           }
           ctx.restore();
-
-          // Draw suffix line if enabled and has selected suffix
-          if (layer.hasSuffixList && layer.showSuffixLine && layer.selectedSuffix) {
-            const lineCfg = getSuffixLineConfig(layer, layer.selectedSuffix, layer.suffixList?.indexOf(layer.selectedSuffix));
-            if (lineCfg) {
-              const lx1 = (lineCfg.x1 / 100) * canvas.width;
-              const ly1 = (lineCfg.y1 / 100) * canvas.height;
-              const lx2 = (lineCfg.x2 / 100) * canvas.width;
-              const ly2 = (lineCfg.y2 / 100) * canvas.height;
-
-              ctx.save();
-              ctx.beginPath();
-              ctx.strokeStyle = layer.suffixLineColor || layer.color;
-              const lineThickness = (layer.suffixLineWidth || 3) * (canvas.width / 1000);
-              ctx.lineWidth = Math.max(1, lineThickness);
-              ctx.lineCap = 'round';
-              ctx.moveTo(lx1, ly1);
-              ctx.lineTo(lx2, ly2);
-              ctx.stroke();
-
-              const currentProject = projects.find(p => p.id === currentProjectId);
-              const isLocked = currentProject?.isLocked;
-              if (selectedLayerId === layer.id && !isLocked && !isPreviewMode && !isExportingRef.current) {
-                const handleR = Math.max(5, 7 * (canvas.width / 1000));
-                
-                // Endpoint 1 Handle
-                ctx.beginPath();
-                ctx.arc(lx1, ly1, handleR, 0, Math.PI * 2);
-                ctx.fillStyle = '#0284c7';
-                ctx.fill();
-                ctx.lineWidth = Math.max(1.5, 2 * (canvas.width / 1000));
-                ctx.strokeStyle = '#ffffff';
-                ctx.stroke();
-
-                // Endpoint 2 Handle
-                ctx.beginPath();
-                ctx.arc(lx2, ly2, handleR, 0, Math.PI * 2);
-                ctx.fillStyle = '#0284c7';
-                ctx.fill();
-                ctx.lineWidth = Math.max(1.5, 2 * (canvas.width / 1000));
-                ctx.strokeStyle = '#ffffff';
-                ctx.stroke();
-              }
-              ctx.restore();
-            }
-          }
         }
+      }
+    }
+  };
+
+  const drawCanvas = () => {
+    if (drawTimerRef.current) clearTimeout(drawTimerRef.current);
+
+    drawTimerRef.current = setTimeout(() => {
+      if (drawCanvasRef.current) cancelAnimationFrame(drawCanvasRef.current);
+
+      drawCanvasRef.current = requestAnimationFrame(() => {
+        void renderCanvasNow();
       });
     }, 16);
   };
@@ -3048,33 +3067,24 @@ export default function App() {
       const hitFallback = matchedHitFont && matchedHitFont.name !== layer.fontFamily ? matchedHitFont.name : undefined;
       ctx.font = buildCanvasFontSpec(layer.fontSize, layer.fontFamily, layer.isBold, layer.isItalic, true, hitFallback);
 
-      const rawHitDateSuffix = layer.type === 'date' ? (layer.dateSuffix || "") : "";
-      const hitDateSuffixAppend = rawHitDateSuffix.trim() !== ""
-        ? (/^\s/.test(rawHitDateSuffix) ? rawHitDateSuffix : ` ${rawHitDateSuffix}`)
-        : "";
       let width = 0;
-      if (layer.type === 'date' && layer.useSinhalaMonth && layer.sinhalaMonths) {
-        const d = new Date(layer.text);
-        if (!isNaN(d.getTime())) {
-          const yStr = d.getFullYear().toString();
-          const mStr = layer.sinhalaMonths[d.getMonth()] || "";
-          const dStr = `${d.getDate().toString().padStart(2, '0')}${hitDateSuffixAppend}`;
+      if (layer.type === 'date') {
+        const resolvedDate = resolveDateDisplay(layer, displayText);
+        if (resolvedDate.isSinhalaDate) {
           const monthFontSize = ((layer.sinhalaMonthFontSize || layer.fontSize) * (canvas.width / 1000));
           const monthFontStr = buildCanvasFontSpec(monthFontSize, layer.fontFamily, layer.isBold, layer.isItalic, true, hitFallback);
           const origFont = ctx.font;
-          const w1 = ctx.measureText(yStr + " ").width;
-          ctx.font = monthFontStr;
-          const w2 = ctx.measureText(mStr + " ").width;
+          const parts = getSinhalaDateParts(resolvedDate.yearStr, resolvedDate.monthStr, resolvedDate.dayStr);
+          width = parts.reduce((sum, p) => {
+            ctx.font = p.isMonth ? monthFontStr : origFont;
+            return sum + ctx.measureText(p.text).width;
+          }, 0);
           ctx.font = origFont;
-          const w3 = ctx.measureText(dStr).width;
-          width = w1 + w2 + w3;
         } else {
+          displayText = resolvedDate.displayText;
           width = ctx.measureText(displayText).width;
         }
       } else {
-        if (layer.type === 'date' && (layer.text || "").trim() !== "" && hitDateSuffixAppend) {
-          displayText = `${displayText}${hitDateSuffixAppend}`;
-        }
         width = ctx.measureText(displayText).width;
       }
 
@@ -3302,25 +3312,25 @@ export default function App() {
     dragTargetRef.current = null;
   };
 
-  const downloadImage = () => {
+  const downloadImage = async () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
     isExportingRef.current = true;
-    drawCanvas();
-
-    setTimeout(() => {
+    try {
+      await renderCanvasNow(true);
       const link = document.createElement("a");
       link.download = "overlay-image.jpg";
       link.href = canvas.toDataURL("image/jpeg", 0.95);
       link.click();
-      isExportingRef.current = false;
-      drawCanvas();
       if (currentProjectId) {
         recordCreationEvent(currentProjectId, 'download');
       }
       setNotification({ message: "Image downloaded successfully!", type: 'success' });
-    }, 50);
+    } finally {
+      isExportingRef.current = false;
+      drawCanvas();
+    }
   };
 
   const shareImage = async () => {
@@ -3328,34 +3338,31 @@ export default function App() {
     if (!canvas) return;
 
     isExportingRef.current = true;
-    drawCanvas();
-    
-    setTimeout(async () => {
-      try {
-        const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.95));
-        if (!blob) return;
-        
-        const file = new File([blob], 'shared-image.jpg', { type: 'image/jpeg' });
-        
-        if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
-          await navigator.share({
-            files: [file],
-            title: '',
-            text: '',
-          });
-          if (currentProjectId) {
-            recordCreationEvent(currentProjectId, 'share');
-          }
-        } else {
-          setNotification({ message: "Sharing is not supported on this browser. You can download the image instead.", type: 'error' });
+    try {
+      await renderCanvasNow(true);
+      const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.95));
+      if (!blob) return;
+
+      const file = new File([blob], 'shared-image.jpg', { type: 'image/jpeg' });
+
+      if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({
+          files: [file],
+          title: '',
+          text: '',
+        });
+        if (currentProjectId) {
+          recordCreationEvent(currentProjectId, 'share');
         }
-      } catch (err) {
-        console.error("Error sharing image:", err);
-      } finally {
-        isExportingRef.current = false;
-        drawCanvas();
+      } else {
+        setNotification({ message: "Sharing is not supported on this browser. You can download the image instead.", type: 'error' });
       }
-    }, 50);
+    } catch (err) {
+      console.error("Error sharing image:", err);
+    } finally {
+      isExportingRef.current = false;
+      drawCanvas();
+    }
   };
 
   const shareWhatsApp = () => {
@@ -7679,6 +7686,37 @@ export default function App() {
 
                   {selectedLayer.type === 'date' && (
                     <div className="space-y-4 bg-slate-900/30 p-3 rounded-xl border border-slate-800/50">
+                      <div>
+                        <label className="text-[10px] uppercase tracking-wider font-bold text-slate-500 block mb-2">
+                          Show Date Parts
+                        </label>
+                        <div className="grid grid-cols-3 gap-2">
+                          {[
+                            { key: 'showDateYear' as const, label: 'Year', checked: selectedLayer.showDateYear !== false },
+                            { key: 'showDateMonth' as const, label: 'Month', checked: selectedLayer.showDateMonth !== false },
+                            { key: 'showDateDay' as const, label: 'Day', checked: selectedLayer.showDateDay !== false },
+                          ].map((part) => (
+                            <label
+                              key={part.key}
+                              className={cn(
+                                "flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-semibold cursor-pointer select-none transition-colors",
+                                part.checked
+                                  ? "bg-teal-600/20 border-teal-500/60 text-teal-200"
+                                  : "bg-slate-800/70 border-slate-700 text-slate-400 hover:border-slate-600"
+                              )}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={part.checked}
+                                onChange={(e) => updateLayer(selectedLayer.id, { [part.key]: e.target.checked })}
+                                className="accent-teal-500 h-3.5 w-3.5 rounded cursor-pointer"
+                              />
+                              <span>{part.label}</span>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+
                       {!projects.find(p => p.id === currentProjectId)?.isLocked && (
                         <div>
                           <label className="text-[10px] uppercase tracking-wider font-bold text-slate-500 block mb-1.5">

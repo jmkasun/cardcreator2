@@ -166,8 +166,8 @@ async function safeQuery(text: string, params: any[] = [], retriesValue = 3): Pr
     } catch (err: any) {
       const errMsg = err?.message?.toLowerCase() || '';
       const slotBusy = isSlotExhaustedError(err);
-      if (slotBusy && effectiveMaxRetries < 5) {
-        effectiveMaxRetries = 5;
+      if (slotBusy && effectiveMaxRetries < 6) {
+        effectiveMaxRetries = 6;
       }
       const isConnError =
         isTransientDbDisconnect(err) ||
@@ -178,8 +178,8 @@ async function safeQuery(text: string, params: any[] = [], retriesValue = 3): Pr
         errMsg.includes('econnreset');
 
       if (isConnError && i < effectiveMaxRetries) {
-        const baseDelay = slotBusy ? 450 * (i + 1) : 400 * (i + 1);
-        const delay = baseDelay + Math.random() * 350;
+        const baseDelay = slotBusy ? 500 * (i + 1) : 400 * (i + 1);
+        const delay = baseDelay + Math.random() * 400;
         await new Promise(resolve => setTimeout(resolve, delay));
         continue;
       }
@@ -191,6 +191,8 @@ async function safeQuery(text: string, params: any[] = [], retriesValue = 3): Pr
 
 // In-memory cache for custom font binaries and font list in warm serverless instances
 const fontCache = new Map<string, { buffer: Buffer; contentType: string }>();
+const missingFontCache = new Map<string, number>();
+const MISSING_FONT_TTL_MS = 30000;
 let cachedDbFontNames: string[] | null = null;
 let lastFontNamesFetch = 0;
 const FONT_NAMES_CACHE_TTL = 60000;
@@ -642,11 +644,17 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
     }
 
     if (HAS_POSTGRES) {
+      const missingUntil = missingFontCache.get(name);
+      if (missingUntil && Date.now() < missingUntil) {
+        setNoCacheHeaders(res);
+        return res.status(404).send("Font not found");
+      }
       try {
         const result = await safeQuery("SELECT data, name FROM custom_fonts WHERE name = $1", [name]);
         if (result.rowCount && result.rowCount > 0) {
           const fontData: Buffer = result.rows[0].data;
           const dbName: string = result.rows[0].name || name;
+          missingFontCache.delete(name);
           fontCache.set(name, { buffer: fontData, contentType: getFontContentType(dbName, fontData) });
           return sendFontSuccess(fontData, dbName);
         }
@@ -664,11 +672,15 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
         if (fuzzyResult.rowCount && fuzzyResult.rowCount > 0) {
           const fuzzyData: Buffer = fuzzyResult.rows[0].data;
           const dbName: string = fuzzyResult.rows[0].name || name;
+          missingFontCache.delete(name);
           fontCache.set(name, { buffer: fuzzyData, contentType: getFontContentType(dbName, fuzzyData) });
           return sendFontSuccess(fuzzyData, dbName);
         }
+        missingFontCache.set(name, Date.now() + MISSING_FONT_TTL_MS);
       } catch (err) {
-        console.error(`Error fetching font ${name} from DB:`, err);
+        if (!isSlotExhaustedError(err)) {
+          console.error(`Error fetching font ${name} from DB:`, err);
+        }
         // CRITICAL: Never return 404 or cacheable headers on transient DB errors!
         setNoCacheHeaders(res);
         return res.status(503).send("Temporary database error while loading font");
@@ -690,6 +702,86 @@ for (const dir of getExistingFontDirs()) {
 }
 
 // Auth
+app.post("/api/register", async (req, res) => {
+  try {
+    const { username, password } = req.body || {};
+    if (!username || !password) {
+      return res.status(400).json({ success: false, message: "Username and password are required" });
+    }
+    const cleanUsername = String(username).trim();
+    if (cleanUsername.length < 2) {
+      return res.status(400).json({ success: false, message: "Username must be at least 2 characters long" });
+    }
+    if (String(password).length < 4) {
+      return res.status(400).json({ success: false, message: "Password must be at least 4 characters long" });
+    }
+
+    if (HAS_POSTGRES) {
+      await initDb();
+      const existing = await safeQuery(
+        "SELECT username FROM users WHERE LOWER(TRIM(username)) = LOWER($1)",
+        [cleanUsername]
+      );
+      if (existing.rowCount && existing.rowCount > 0) {
+        return res.status(400).json({ success: false, message: "Username is already taken" });
+      }
+
+      await safeQuery(
+        "INSERT INTO users (username, password, role) VALUES ($1, $2, 'user')",
+        [cleanUsername, String(password)]
+      );
+
+      return res.json({
+        success: true,
+        username: cleanUsername,
+        role: "user",
+        selectedFonts: [],
+        defaultFont: null,
+        defaultFontSize: null,
+        defaultFontColor: null,
+      });
+    }
+
+    const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
+    const existingFallback = (data.users || []).find(
+      (u: any) => String(u.username || "").trim().toLowerCase() === cleanUsername.toLowerCase()
+    );
+    if (existingFallback) {
+      return res.status(400).json({ success: false, message: "Username is already taken" });
+    }
+    data.users = data.users || [];
+    data.users.push({
+      username: cleanUsername,
+      password: String(password),
+      role: "user",
+      selectedFonts: [],
+      defaultFont: null,
+      defaultFontSize: null,
+      defaultFontColor: null,
+    });
+    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+
+    return res.json({
+      success: true,
+      username: cleanUsername,
+      role: "user",
+      selectedFonts: [],
+      defaultFont: null,
+      defaultFontSize: null,
+      defaultFontColor: null,
+    });
+  } catch (err) {
+    if (isSlotExhaustedError(err)) {
+      return res.status(503).json({
+        success: false,
+        message: "Database is temporarily busy. Please try creating your account again in a moment.",
+      });
+    }
+    console.error("Register error:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
 app.post("/api/login", async (req, res) => {
   try {
     const { username, password } = req.body || {};

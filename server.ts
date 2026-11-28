@@ -86,8 +86,8 @@ const pool =
     ssl: {
       rejectUnauthorized: false,
     },
-    max: 2,
-    idleTimeoutMillis: 2500,
+    max: 1,
+    idleTimeoutMillis: 1500,
     connectionTimeoutMillis: 15000,
     allowExitOnIdle: true,
   });
@@ -162,8 +162,8 @@ async function safeQuery(text: string, params: any[] = [], retriesValue = 3): Pr
     } catch (err: any) {
       const errMsg = err?.message?.toLowerCase() || '';
       const slotBusy = isSlotExhaustedError(err);
-      if (slotBusy && effectiveMaxRetries < 5) {
-        effectiveMaxRetries = 5;
+      if (slotBusy && effectiveMaxRetries < 6) {
+        effectiveMaxRetries = 6;
       }
       const isConnError =
         isTransientDbDisconnect(err) ||
@@ -173,8 +173,8 @@ async function safeQuery(text: string, params: any[] = [], retriesValue = 3): Pr
         errMsg.includes('terminated');
 
       if (isConnError && i < effectiveMaxRetries) {
-        const baseDelay = slotBusy ? 450 * (i + 1) : 400 * (i + 1);
-        const delay = baseDelay + Math.random() * 350;
+        const baseDelay = slotBusy ? 500 * (i + 1) : 400 * (i + 1);
+        const delay = baseDelay + Math.random() * 400;
         await new Promise(resolve => setTimeout(resolve, delay));
         continue;
       }
@@ -185,9 +185,14 @@ async function safeQuery(text: string, params: any[] = [], retriesValue = 3): Pr
 }
 
 // Graceful shutdown
+let isShuttingDown = false;
 const shutdown = async () => {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
   console.log("Shutting down server...");
-  await pool.end();
+  try {
+    await pool.end();
+  } catch {}
   process.exit(0);
 };
 
@@ -572,6 +577,8 @@ async function startServer() {
 
 // Font cache to reduce DB load
 const fontCache = new Map<string, { buffer: Buffer; contentType: string }>();
+const missingFontCache = new Map<string, number>();
+const MISSING_FONT_TTL_MS = 30000;
 
 function getFontContentType(filename: string, buffer?: Buffer): string {
   const ext = path.extname(filename).toLowerCase();
@@ -655,11 +662,17 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
 
     // 3. Try database if not found in files
     if (HAS_POSTGRES) {
+      const missingUntil = missingFontCache.get(name);
+      if (missingUntil && Date.now() < missingUntil) {
+        setNoCacheHeaders(res);
+        return res.status(404).send("Font not found");
+      }
       try {
         const result = await safeQuery("SELECT data, name FROM custom_fonts WHERE name = $1", [name]);
         if (result.rowCount && result.rowCount > 0) {
           const fontData: Buffer = result.rows[0].data;
           const dbName: string = result.rows[0].name || name;
+          missingFontCache.delete(name);
           fontCache.set(name, { buffer: fontData, contentType: getFontContentType(dbName, fontData) });
           return sendFontSuccess(fontData, dbName);
         } else {
@@ -676,12 +689,16 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
           if (fuzzyResult.rowCount && fuzzyResult.rowCount > 0) {
             const fuzzyFontData: Buffer = fuzzyResult.rows[0].data;
             const dbName: string = fuzzyResult.rows[0].name || name;
+            missingFontCache.delete(name);
             fontCache.set(name, { buffer: fuzzyFontData, contentType: getFontContentType(dbName, fuzzyFontData) });
             return sendFontSuccess(fuzzyFontData, dbName);
           }
+          missingFontCache.set(name, Date.now() + MISSING_FONT_TTL_MS);
         }
       } catch (err) {
-        console.error(`[Font Service] Error fetching font ${name} from DB:`, err);
+        if (!isSlotExhaustedError(err)) {
+          console.error(`[Font Service] Error fetching font ${name} from DB:`, err);
+        }
         setNoCacheHeaders(res);
         return res.status(503).send("Temporary database error while loading font");
       }
@@ -703,7 +720,7 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
   // Auth
   app.post("/api/register", async (req, res) => {
     try {
-      const { username, password } = req.body;
+      const { username, password } = req.body || {};
       if (!username || !password) {
         return res.status(400).json({ success: false, message: "Username and password are required" });
       }
@@ -716,8 +733,9 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
       }
 
       if (HAS_POSTGRES) {
+        await initDb();
         const existing = await safeQuery(
-          "SELECT username FROM users WHERE LOWER(username) = LOWER($1)",
+          "SELECT username FROM users WHERE LOWER(TRIM(username)) = LOWER($1)",
           [cleanUsername]
         );
         if (existing.rowCount && existing.rowCount > 0) {
@@ -741,8 +759,42 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
         });
       }
 
-      res.status(500).json({ success: false, message: "Database not connected" });
+      ensureFallbackDataFile();
+      const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
+      const existingFallback = (data.users || []).find(
+        (u: any) => String(u.username || "").trim().toLowerCase() === cleanUsername.toLowerCase()
+      );
+      if (existingFallback) {
+        return res.status(400).json({ success: false, message: "Username is already taken" });
+      }
+      data.users = data.users || [];
+      data.users.push({
+        username: cleanUsername,
+        password: String(password),
+        role: "user",
+        selectedFonts: [],
+        defaultFont: null,
+        defaultFontSize: null,
+        defaultFontColor: null,
+      });
+      fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+
+      return res.json({
+        success: true,
+        username: cleanUsername,
+        role: "user",
+        selectedFonts: [],
+        defaultFont: null,
+        defaultFontSize: null,
+        defaultFontColor: null,
+      });
     } catch (err) {
+      if (isSlotExhaustedError(err)) {
+        return res.status(503).json({
+          success: false,
+          message: "Database is temporarily busy. Please try creating your account again in a moment.",
+        });
+      }
       console.error("Register error details:", err instanceof Error ? err.message : String(err));
       res.status(500).json({ success: false, message: "Internal server error" });
     }
@@ -917,6 +969,12 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
 
       res.json({ success: true });
     } catch (err) {
+      if (isSlotExhaustedError(err)) {
+        return res.status(503).json({
+          success: false,
+          message: "Database is temporarily busy. Please try again in a moment.",
+        });
+      }
       console.error("Change password error details:", err instanceof Error ? err.message : String(err));
       res.status(500).json({ success: false, message: "Internal server error: Password update failed" });
     }
@@ -963,6 +1021,12 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
 
       res.json({ success: true });
     } catch (err) {
+      if (isSlotExhaustedError(err)) {
+        return res.status(503).json({
+          success: false,
+          message: "Database is temporarily busy. Please try again in a moment.",
+        });
+      }
       console.error("Update preferences error details:", err instanceof Error ? err.message : String(err));
       res.status(500).json({ success: false, message: "Internal server error: Preferences update failed" });
     }
@@ -1064,7 +1128,8 @@ app.get(["/fonts/:name", "/api/fonts/file/:name"], async (req, res) => {
             [fileName, file.buffer]
           );
           cachedDbFontNames = null;
-cachedLocalFontFiles = null;
+          cachedLocalFontFiles = null;
+          missingFontCache.clear();
           fontCache.clear();
           return res.json({ success: true, url: `/fonts/${encodeURIComponent(fileName)}?v=3`, name: fileName });
         } catch (err) {
@@ -1073,6 +1138,7 @@ cachedLocalFontFiles = null;
       }
 
       fs.writeFileSync(path.join(WRITABLE_FONTS_DIR, fileName), file.buffer);
+      missingFontCache.clear();
       fontCache.clear();
       res.json({ success: true, url: `/fonts/${encodeURIComponent(fileName)}?v=3`, name: fileName });
     } catch (err) {
@@ -1382,6 +1448,12 @@ cachedLocalFontFiles = null;
       }
       res.json([]);
     } catch (err) {
+      if (isSlotExhaustedError(err)) {
+        return res.status(503).json({
+          success: false,
+          message: "Database is temporarily busy. Please try again in a moment.",
+        });
+      }
       console.error("Fetch images error details:", err instanceof Error ? err.message : String(err));
       res.status(500).json({ success: false, message: "Internal server error" });
     }
@@ -1445,6 +1517,12 @@ cachedLocalFontFiles = null;
       
       res.json({ success: true, id, imageUrl: `/api/images/${id}/image${verQuery}` });
     } catch (err) {
+      if (isSlotExhaustedError(err)) {
+        return res.status(503).json({
+          success: false,
+          message: "Database is temporarily busy. Please try saving again in a moment.",
+        });
+      }
       console.error("Save image error details:", err instanceof Error ? err.message : String(err));
       res.status(500).json({ success: false, message: "Internal server error" });
     }
@@ -3222,6 +3300,12 @@ cachedLocalFontFiles = null;
 
   // Error handler
   app.use((err: any, req: any, res: any, next: any) => {
+    if (isSlotExhaustedError(err)) {
+      return res.status(503).json({
+        success: false,
+        message: "Database is temporarily busy. Please try again in a moment.",
+      });
+    }
     console.error("Unhandled error:", err);
     res.status(500).json({ success: false, message: "Internal server error" });
   });
